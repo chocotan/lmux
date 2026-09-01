@@ -1,0 +1,18 @@
+# Kimi CLI screen-state fallback rules
+[[rules]]
+status = "blocked"
+region = "bottom"
+contains = [
+    "Kimi needs your approval",
+    "Kimi is waiting for input",
+]
+
+[[rules]]
+status = "working"
+region = "osc_title"
+regex = ["(?i)kimi(?: cli)?.*(working|thinking|running)"]
+
+[[rules]]
+status = "idle"
+region = "bottom"
+regex = ["(?i)^\\s*(?:kimi|\\(kimi\\))\\s*[>❯]\\s*$"]
