@@ -1,0 +1,8 @@
+# 通用 shell：基本只有 idle（没有 agent 语义）
+[[rules]]
+status = "idle"
+region = "bottom"
+regex = [
+    "[$#] $",
+    "❯ $",
+]

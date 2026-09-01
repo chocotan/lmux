@@ -1,0 +1,436 @@
+//! VTerm：alacritty_terminal 真彩色网格（本地/镜像共用）
+use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Term, TermDamage, TermMode};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone)]
+pub struct VTerm {
+    inner: Arc<Mutex<VTermInner>>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+struct VTermInner {
+    term: Term<VoidListener>,
+    parser: Processor,
+    cached: Option<RenderSnapshot>,
+    damage: ContentDamage,
+}
+
+#[derive(Debug, Clone)]
+enum ContentDamage {
+    Full,
+    Partial(Vec<usize>),
+    None,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VTermModes {
+    pub mouse: bool,
+    pub sgr_mouse: bool,
+    pub alt_screen: bool,
+    pub alternate_scroll: bool,
+    pub app_cursor: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderStyle {
+    pub fg: u32,
+    pub bg: u32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub dim: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct RenderRun {
+    pub text: String,
+    pub start_col: usize,
+    pub cells: usize,
+    pub style: RenderStyle,
+}
+
+#[derive(Clone, Debug)]
+pub struct RenderRow {
+    pub runs: Vec<RenderRun>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RenderCursor {
+    pub col: usize,
+    pub row: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct RenderSnapshot {
+    pub rows: Vec<RenderRow>,
+    pub cursor: Option<RenderCursor>,
+    pub logical_cursor: Option<RenderCursor>,
+    pub cols: usize,
+    pub lines: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TermDim {
+    columns: usize,
+    lines: usize,
+}
+impl Dimensions for TermDim {
+    fn columns(&self) -> usize {
+        self.columns
+    }
+    fn screen_lines(&self) -> usize {
+        self.lines
+    }
+    fn total_lines(&self) -> usize {
+        self.lines
+    }
+}
+
+impl VTerm {
+    pub fn new(cols: u16, rows: u16) -> Self {
+        let size = TermDim {
+            columns: cols as usize,
+            lines: rows as usize,
+        };
+        let term = Term::new(Default::default(), &size, VoidListener);
+        VTerm {
+            inner: Arc::new(Mutex::new(VTermInner {
+                term,
+                parser: Processor::new(),
+                cached: None,
+                damage: ContentDamage::Full,
+            })),
+            cols,
+            rows,
+        }
+    }
+
+    pub fn feed(&self, data: &[u8]) {
+        if let Ok(mut guard) = self.inner.lock() {
+            let VTermInner { term, parser, .. } = &mut *guard;
+            parser.advance(term, data);
+            let damage = match term.damage() {
+                TermDamage::Full => ContentDamage::Full,
+                TermDamage::Partial(lines) => {
+                    let rows: Vec<usize> = lines.map(|d| d.line).collect();
+                    if rows.is_empty() {
+                        ContentDamage::None
+                    } else {
+                        ContentDamage::Partial(rows)
+                    }
+                }
+            };
+            term.reset_damage();
+            guard.damage = merge_damage(
+                std::mem::replace(&mut guard.damage, ContentDamage::None),
+                damage,
+            );
+        }
+    }
+
+    /// 纯文本（检测/测试用）；UI 应使用 render_snapshot 保留颜色/光标。
+    pub fn text_lines(&self) -> Vec<String> {
+        let snap = self.render_snapshot();
+        snap.rows
+            .into_iter()
+            .map(|r| {
+                r.runs
+                    .into_iter()
+                    .map(|x| x.text)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// 真彩色渲染快照：相邻同样式 cell 合并为 run；光标独立返回。
+    pub fn render_snapshot(&self) -> RenderSnapshot {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return RenderSnapshot {
+                    rows: vec![],
+                    cursor: None,
+                    logical_cursor: None,
+                    cols: 0,
+                    lines: 0,
+                }
+            }
+        };
+        let damage = std::mem::replace(&mut guard.damage, ContentDamage::None);
+        let need_full = guard.cached.is_none()
+            || matches!(damage, ContentDamage::Full)
+            || guard.cached.as_ref().is_some_and(|c| {
+                c.cols != guard.term.columns() || c.lines != guard.term.screen_lines()
+            });
+
+        let mut snap = if need_full {
+            build_snapshot(&guard.term)
+        } else {
+            guard.cached.take().unwrap()
+        };
+        if let ContentDamage::Partial(rows) = damage {
+            for row in rows {
+                if row < snap.rows.len() {
+                    snap.rows[row] = build_row(&guard.term, row);
+                }
+            }
+            snap.cursor = cursor_of(&guard.term);
+            snap.logical_cursor = logical_cursor_of(&guard.term);
+        }
+        guard.cached = Some(snap.clone());
+        snap
+    }
+
+    pub fn modes(&self) -> VTermModes {
+        self.inner
+            .lock()
+            .map(|guard| {
+                let mode = guard.term.mode();
+                VTermModes {
+                    mouse: mode.intersects(TermMode::MOUSE_MODE),
+                    sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+                    alt_screen: mode.contains(TermMode::ALT_SCREEN),
+                    alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
+                    app_cursor: mode.contains(TermMode::APP_CURSOR),
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn scroll_display(&self, lines: i32) -> bool {
+        if lines == 0 {
+            return false;
+        }
+        self.inner
+            .lock()
+            .map(|mut guard| {
+                let before = guard.term.grid().display_offset();
+                guard.term.scroll_display(Scroll::Delta(lines));
+                let changed = before != guard.term.grid().display_offset();
+                if changed {
+                    guard.cached = None;
+                    guard.damage = ContentDamage::Full;
+                }
+                changed
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn scroll_metrics(&self) -> (usize, usize) {
+        self.inner
+            .lock()
+            .map(|guard| {
+                (
+                    guard.term.grid().history_size(),
+                    guard.term.grid().display_offset(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn mouse_reporting(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|guard| guard.term.mode().intersects(TermMode::MOUSE_MODE))
+            .unwrap_or(false)
+    }
+
+    pub fn sgr_mouse(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|guard| guard.term.mode().contains(TermMode::SGR_MOUSE))
+            .unwrap_or(false)
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.term.resize(TermDim {
+                columns: cols as usize,
+                lines: rows as usize,
+            });
+            guard.cached = None;
+            guard.damage = ContentDamage::Full;
+        }
+    }
+}
+
+fn merge_damage(a: ContentDamage, b: ContentDamage) -> ContentDamage {
+    match (a, b) {
+        (ContentDamage::Full, _) | (_, ContentDamage::Full) => ContentDamage::Full,
+        (ContentDamage::None, x) | (x, ContentDamage::None) => x,
+        (ContentDamage::Partial(mut a), ContentDamage::Partial(b)) => {
+            a.extend(b);
+            a.sort_unstable();
+            a.dedup();
+            ContentDamage::Partial(a)
+        }
+    }
+}
+
+fn build_snapshot(term: &Term<VoidListener>) -> RenderSnapshot {
+    let rows = (0..term.screen_lines())
+        .map(|r| build_row(term, r))
+        .collect();
+    RenderSnapshot {
+        rows,
+        cursor: cursor_of(term),
+        logical_cursor: logical_cursor_of(term),
+        cols: term.columns(),
+        lines: term.screen_lines(),
+    }
+}
+
+fn cursor_of(term: &Term<VoidListener>) -> Option<RenderCursor> {
+    if !term.mode().contains(TermMode::SHOW_CURSOR) {
+        return None;
+    }
+    let grid = term.grid();
+    let visual = grid.cursor.point.line.0 + grid.display_offset() as i32;
+    (visual >= 0 && visual < grid.screen_lines() as i32).then_some(RenderCursor {
+        col: grid.cursor.point.column.0,
+        row: visual as usize,
+    })
+}
+
+fn logical_cursor_of(term: &Term<VoidListener>) -> Option<RenderCursor> {
+    let grid = term.grid();
+    let p = grid.cursor.point;
+    let visual = p.line.0 + grid.display_offset() as i32;
+    let last = grid.screen_lines().saturating_sub(1) as i32;
+    Some(RenderCursor {
+        col: p.column.0,
+        row: visual.clamp(0, last) as usize,
+    })
+}
+
+fn build_row(term: &Term<VoidListener>, visual: usize) -> RenderRow {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let buffer_line = visual as i32 - grid.display_offset() as i32;
+    let default_fg = 0x2a2e38ff;
+    let default_bg = 0xffffffff;
+    let mut runs: Vec<RenderRun> = vec![];
+    let mut current: Option<RenderRun> = None;
+    for col in 0..columns {
+        let cell = &grid[Point::new(Line(buffer_line), Column(col))];
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            if let Some(mut run) = current.take() {
+                run.cells += 1;
+                runs.push(run);
+            }
+            continue;
+        }
+        let mut fg = cell.fg;
+        let mut bg = cell.bg;
+        if cell.flags.contains(Flags::INVERSE) {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+        let style = RenderStyle {
+            fg: color_u32(fg, default_fg, default_bg),
+            bg: color_u32(bg, default_fg, default_bg),
+            bold: cell.flags.contains(Flags::BOLD),
+            italic: cell.flags.contains(Flags::ITALIC),
+            underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+            dim: cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD),
+        };
+        let ch = if cell.flags.contains(Flags::HIDDEN) {
+            ' '
+        } else {
+            cell.c
+        };
+        let append = current
+            .as_ref()
+            .is_some_and(|r| r.style == style && r.start_col + r.cells == col);
+        if append {
+            let r = current.as_mut().unwrap();
+            r.text.push(ch);
+            if let Some(zerowidth) = cell.zerowidth() {
+                r.text.extend(zerowidth.iter());
+            }
+            r.cells += 1;
+        } else {
+            if let Some(r) = current.take() {
+                runs.push(r);
+            }
+            let mut text = ch.to_string();
+            if let Some(zerowidth) = cell.zerowidth() {
+                text.extend(zerowidth.iter());
+            }
+            current = Some(RenderRun {
+                text,
+                start_col: col,
+                cells: 1,
+                style,
+            });
+        }
+    }
+    if let Some(r) = current {
+        runs.push(r);
+    }
+    RenderRow { runs }
+}
+
+fn color_u32(c: Color, default_fg: u32, default_bg: u32) -> u32 {
+    match c {
+        Color::Spec(Rgb { r, g, b }) => rgba_u32(r, g, b),
+        Color::Indexed(i) => indexed_color(i),
+        Color::Named(n) => named_color(n, default_fg, default_bg),
+    }
+}
+fn rgba_u32(r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | 0xff
+}
+fn named_color(n: NamedColor, fg: u32, bg: u32) -> u32 {
+    use NamedColor::*;
+    match n {
+        Foreground | BrightForeground | DimForeground => fg,
+        Background => bg,
+        Cursor => 0x3d6cd8ff,
+        Black | DimBlack => 0x2a2e38ff,
+        Red | DimRed => 0xd64557ff,
+        Green | DimGreen => 0x5c9e3aff,
+        Yellow | DimYellow => 0xc08a2dff,
+        Blue | DimBlue => 0x3d6cd8ff,
+        Magenta | DimMagenta => 0x9b59b6ff,
+        Cyan | DimCyan => 0x2a92b0ff,
+        White | DimWhite => 0xcfcfd3ff,
+        BrightBlack => 0x6f7480ff,
+        BrightRed => 0xef5668ff,
+        BrightGreen => 0x6fb84aff,
+        BrightYellow => 0xd7a13eff,
+        BrightBlue => 0x5b82e5ff,
+        BrightMagenta => 0xb06ac4ff,
+        BrightCyan => 0x45a8c4ff,
+        BrightWhite => 0xffffffff,
+    }
+}
+fn indexed_color(i: u8) -> u32 {
+    const BASIC: [u32; 16] = [
+        0x2a2e38ff, 0xd64557ff, 0x5c9e3aff, 0xc08a2dff, 0x3d6cd8ff, 0x9b59b6ff, 0x2a92b0ff,
+        0xcfcfd3ff, 0x6f7480ff, 0xef5668ff, 0x6fb84aff, 0xd7a13eff, 0x5b82e5ff, 0xb06ac4ff,
+        0x45a8c4ff, 0xffffffff,
+    ];
+    match i {
+        0..=15 => BASIC[i as usize],
+        16..=231 => {
+            let n = i - 16;
+            let r = n / 36;
+            let g = (n % 36) / 6;
+            let b = n % 6;
+            let cv = |x: u8| if x == 0 { 0 } else { 55 + x * 40 };
+            rgba_u32(cv(r), cv(g), cv(b))
+        }
+        _ => {
+            let v = 8 + (i - 232) * 10;
+            rgba_u32(v, v, v)
+        }
+    }
+}

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=lmux
+Comment=Native multi-agent terminal client
+Exec=lmux
+Terminal=false
+Categories=Development;TerminalEmulator;
+StartupNotify=true

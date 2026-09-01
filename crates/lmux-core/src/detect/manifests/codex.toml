@@ -1,0 +1,15 @@
+# codex 屏幕状态规则（兜底）
+[[rules]]
+status = "blocked"
+region = "bottom"
+contains = [
+    "Allow command?",
+    "approve?",
+    "y/n",
+]
+regex = ["^\\s*\\(y\\)es / \\(n\\)o"]
+
+[[rules]]
+status = "working"
+region = "osc_title"
+contains = ["⋯", "thinking"]

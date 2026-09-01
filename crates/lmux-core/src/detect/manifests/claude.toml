@@ -1,0 +1,27 @@
+# claude code 屏幕状态规则（兜底；hook 可用时 hook 权威）
+[[rules]]
+status = "blocked"
+region = "bottom"
+contains = [
+    "Do you want to proceed?",
+    "Do you want to make this edit",
+    "Waiting for your input",
+    "esc to interrupt (fix",
+]
+regex = [
+    "^❯\\s+1\\.\\s+Yes",
+    "^[\\s>]*1\\.\\s+Yes",
+]
+
+[[rules]]
+status = "working"
+region = "osc_title"
+regex = ["⏺|✳|Baking"]
+
+[[rules]]
+status = "done"
+region = "bottom"
+contains = [
+    "Task complete",
+    "hook: Stop",
+]

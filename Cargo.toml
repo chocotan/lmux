@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lmux-core",
+    "crates/lmux-term",
+    "crates/lmux-server",
+    "crates/lmux-client",
+    "crates/lmux-store",
+    "crates/lmux-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1", features = [
+    "font-kit",
+    "x11",
+    "wayland",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "2"
+ulid = { version = "1", features = ["serde"] }
+base64 = "0.22"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+tempfile = "3"
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.9"
+fs2 = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

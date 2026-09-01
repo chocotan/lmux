@@ -1,0 +1,13 @@
+# pi 屏幕状态规则（兜底）
+[[rules]]
+status = "blocked"
+region = "bottom"
+contains = [
+    "waiting for approval",
+]
+[[rules]]
+status = "done"
+region = "bottom"
+contains = [
+    "agent_end",
+]

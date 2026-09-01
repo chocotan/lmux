@@ -1,0 +1,291 @@
+//! lmux-client：连接远端 lmux 实例（本地 socket 直连或 SSH 隧道）
+mod host;
+mod tunnel;
+
+pub use host::{
+    parse_target, ClientEvent, HostCfg, RemoteHost, RemoteStage, RemoteState, SshAuth, Target,
+};
+
+pub async fn release_remote_tunnel(host: &str) {
+    tunnel::release_tunnel(host).await;
+}
+
+use anyhow::Result;
+use lmux_core::model::Snapshot;
+use lmux_core::protocol::{
+    read_frame, write_frame, EventMsg, Request, Response, TermSubscribeParams, TermSubscribeResult,
+};
+use tokio::net::UnixStream;
+
+/// 到单个对端的连接抽象（newline-JSON RPC）
+pub struct Connection {
+    stream: UnixStream,
+    next_id: u64,
+}
+
+impl Connection {
+    pub fn new(stream: UnixStream) -> Self {
+        Connection { stream, next_id: 1 }
+    }
+
+    pub fn into_split(self) -> (RequestWriter, ResponseReader) {
+        let (r, w) = tokio::io::split(self.stream);
+        (
+            RequestWriter {
+                writer: w,
+                next_id: self.next_id,
+            },
+            ResponseReader { reader: r },
+        )
+    }
+
+    pub async fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        write_frame(
+            &mut self.stream,
+            &Request {
+                id,
+                method: method.into(),
+                params,
+            },
+        )
+        .await?;
+        loop {
+            let v = read_frame(&mut self.stream).await?;
+            if v.get("event").is_some() {
+                continue; // 事件帧混入：跳过，不匹配任何 call
+            }
+            let resp: Response = serde_json::from_value(v)?;
+            if resp.id == id {
+                return match resp.result {
+                    Some(v) => Ok(v),
+                    None => {
+                        let err = resp.error.unwrap_or(lmux_core::protocol::RpcError {
+                            code: "unknown".into(),
+                            message: "no error detail".into(),
+                        });
+                        anyhow::bail!("{} failed: {}: {}", method, err.code, err.message)
+                    }
+                };
+            }
+        }
+    }
+}
+
+pub struct RequestWriter {
+    writer: tokio::io::WriteHalf<UnixStream>,
+    next_id: u64,
+}
+
+impl RequestWriter {
+    pub async fn call(&mut self, method: &str, params: serde_json::Value) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+        write_frame(
+            &mut self.writer,
+            &Request {
+                id,
+                method: method.into(),
+                params,
+            },
+        )
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn raw(&mut self, v: &impl serde::Serialize) -> Result<()> {
+        write_frame(&mut self.writer, v).await
+    }
+}
+
+pub struct ResponseReader {
+    reader: tokio::io::ReadHalf<UnixStream>,
+}
+
+impl ResponseReader {
+    /// 读下一帧（Response 或 EventMsg）
+    pub async fn next(&mut self) -> Result<Frame> {
+        let v = read_frame(&mut self.reader).await?;
+        if v.get("event").is_some() {
+            Ok(Frame::Event(serde_json::from_value(v)?))
+        } else {
+            Ok(Frame::Response(serde_json::from_value(v)?))
+        }
+    }
+}
+
+pub enum Frame {
+    Response(Response),
+    Event(EventMsg),
+}
+
+#[derive(Debug, Clone)]
+pub enum TermUpdate {
+    /// 首帧或 lag/backpressure 后重同步；消费者必须 reset 后重放。
+    Resync(Vec<u8>),
+    Data(Vec<u8>),
+}
+
+pub async fn open(path_or_target: &str) -> Result<Connection> {
+    let stream = UnixStream::connect(path_or_target).await?;
+    Ok(Connection::new(stream))
+}
+
+/// 运行一次终端订阅，直到断线/TermExit。无隐藏后台任务；调用方负责重连循环。
+pub async fn stream_term(
+    socket: &str,
+    agent: &lmux_core::model::AgentId,
+    mut on_update: impl FnMut(TermUpdate) + Send,
+) -> Result<()> {
+    let mut conn = open(socket).await?;
+    let result: TermSubscribeResult = serde_json::from_value(
+        conn.call(
+            lmux_core::protocol::methods::TERM_SUBSCRIBE,
+            serde_json::to_value(TermSubscribeParams {
+                agent: agent.clone(),
+            })?,
+        )
+        .await?,
+    )?;
+    on_update(TermUpdate::Resync(lmux_term::b64_decode(
+        &result.replay_b64,
+    )?));
+    let sub_id = result.sub_id;
+    let (mut writer, mut reader) = conn.into_split();
+    let outcome = loop {
+        match reader.next().await? {
+            Frame::Event(ev) if ev.event == lmux_core::protocol::events::TERM_DATA => {
+                let d: lmux_core::protocol::TermDataEvent = serde_json::from_value(ev.params)?;
+                if d.agent == *agent {
+                    on_update(TermUpdate::Data(lmux_term::b64_decode(&d.data_b64)?));
+                }
+            }
+            Frame::Event(ev) if ev.event == lmux_core::protocol::events::TERM_RESYNC => {
+                let d: lmux_core::protocol::TermResyncEvent = serde_json::from_value(ev.params)?;
+                if d.agent == *agent {
+                    on_update(TermUpdate::Resync(lmux_term::b64_decode(&d.replay_b64)?));
+                }
+            }
+            Frame::Event(ev) if ev.event == lmux_core::protocol::events::TERM_EXIT => break Ok(()),
+            Frame::Event(_) | Frame::Response(_) => {}
+        }
+    };
+    let _ = writer
+        .call(
+            lmux_core::protocol::methods::TERM_UNSUBSCRIBE,
+            serde_json::json!({ "sub_id": sub_id }),
+        )
+        .await;
+    outcome
+}
+
+/// 拉取一次快照
+pub async fn fetch_snapshot(conn: &mut Connection) -> Result<Snapshot> {
+    let v = conn
+        .call(
+            lmux_core::protocol::methods::STATE_LIST,
+            serde_json::json!(null),
+        )
+        .await?;
+    Ok(serde_json::from_value(v)?)
+}
+
+pub async fn spawn_shell_agent(
+    socket: &str,
+    project: &lmux_core::model::ProjectId,
+) -> anyhow::Result<lmux_core::model::AgentInstance> {
+    let mut conn = open(socket).await?;
+    let value = conn
+        .call(
+            lmux_core::protocol::methods::AGENT_SPAWN,
+            serde_json::to_value(lmux_core::protocol::AgentSpawnParams {
+                project: project.clone(),
+            })?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn send_term_input(
+    socket: &str,
+    agent: &lmux_core::model::AgentId,
+    data: &[u8],
+) -> anyhow::Result<()> {
+    let mut conn = open(socket).await?;
+    conn.call(
+        lmux_core::protocol::methods::TERM_INPUT,
+        serde_json::to_value(lmux_core::protocol::TermInputParams {
+            agent: agent.clone(),
+            data_b64: lmux_term::b64_encode(data),
+        })?,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn resize_term(
+    socket: &str,
+    agent: &lmux_core::model::AgentId,
+    cols: u16,
+    rows: u16,
+) -> anyhow::Result<()> {
+    let mut conn = open(socket).await?;
+    conn.call(
+        lmux_core::protocol::methods::TERM_RESIZE,
+        serde_json::to_value(lmux_core::protocol::TermResizeParams {
+            agent: agent.clone(),
+            cols,
+            rows,
+        })?,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn add_project(socket: &str, path: &str) -> anyhow::Result<lmux_core::model::Project> {
+    let mut conn = open(socket).await?;
+    let value = conn
+        .call(
+            lmux_core::protocol::methods::PROJECT_ADD,
+            serde_json::to_value(lmux_core::protocol::ProjectAddParams {
+                path: path.into(),
+                name: None,
+            })?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn delete_project(
+    socket: &str,
+    project: &lmux_core::model::ProjectId,
+) -> anyhow::Result<lmux_core::protocol::DeleteScopeResult> {
+    let mut conn = open(socket).await?;
+    let value = conn
+        .call(
+            lmux_core::protocol::methods::PROJECT_DELETE,
+            serde_json::to_value(lmux_core::protocol::ProjectDeleteParams {
+                project: project.clone(),
+            })?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+/// 删除远端 agent 会话（server 同时 kill PTY + 更新 state.list）
+pub async fn delete_agent(socket: &str, agent: &lmux_core::model::AgentId) -> anyhow::Result<()> {
+    let mut conn = open(socket).await?;
+    conn.call(
+        lmux_core::protocol::methods::AGENT_DELETE,
+        serde_json::to_value(lmux_core::protocol::AgentDeleteParams {
+            agent: agent.clone(),
+        })?,
+    )
+    .await?;
+    Ok(())
+}

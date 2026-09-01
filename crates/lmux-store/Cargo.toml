@@ -1,0 +1,13 @@
+[package]
+name = "lmux-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lmux-core = { path = "../lmux-core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

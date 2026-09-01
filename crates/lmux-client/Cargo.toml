@@ -1,0 +1,19 @@
+[package]
+name = "lmux-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lmux-core = { path = "../lmux-core" }
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+ulid.workspace = true
+tracing.workspace = true
+serde.workspace = true
+lmux-term = { path = "../lmux-term" }
+lmux-server = { path = "../lmux-server" }
+
+[dev-dependencies]
+tempfile.workspace = true

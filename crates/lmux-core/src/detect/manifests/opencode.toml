@@ -1,0 +1,14 @@
+# opencode 屏幕状态规则（兜底）
+[[rules]]
+status = "blocked"
+region = "bottom"
+contains = [
+    "Allow tool?",
+    "confirm",
+]
+[[rules]]
+status = "done"
+region = "bottom"
+contains = [
+    "session.idle",
+]
