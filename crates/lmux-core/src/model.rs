@@ -35,7 +35,9 @@ pub enum AgentType {
     Codex,
     Opencode,
     Pi,
-    Gemini,
+    Agy,
+    Qwen,
+    Kimi,
     Shell,
 }
 
@@ -46,7 +48,9 @@ impl AgentType {
             AgentType::Codex => "codex",
             AgentType::Opencode => "opencode",
             AgentType::Pi => "pi",
-            AgentType::Gemini => "gemini",
+            AgentType::Agy => "agy",
+            AgentType::Qwen => "qwen",
+            AgentType::Kimi => "kimi",
             AgentType::Shell => "shell",
         }
     }
@@ -56,7 +60,9 @@ impl AgentType {
             AgentType::Codex => "codex",
             AgentType::Opencode => "opencode",
             AgentType::Pi => "pi",
-            AgentType::Gemini => "gemini",
+            AgentType::Agy => "agy",
+            AgentType::Qwen => "qwen",
+            AgentType::Kimi => "kimi",
             AgentType::Shell => "bash",
         }
     }
