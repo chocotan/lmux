@@ -207,7 +207,7 @@ impl DetectionEngine {
 
     /// 屏幕规则 → AgentStatus
     fn screen_candidate(&self, agent: &AgentId, input: &ScreenInput) -> Option<AgentStatus> {
-        // agent.id 形如 "agent_<type>_<ulid>"，类型段解析不到就用全局兜底规则
+        // Agent IDs start with "<agent_type>_". Unknown types have no screen fallback.
         let agent_type = agent_type_of(agent);
         let m = self.manifests.get(agent_type)?;
         m.evaluate(input)
@@ -220,9 +220,9 @@ impl Default for DetectionEngine {
     }
 }
 
-/// AgentId 约定: "<agent_type>_<ulid>"；找不到则 "shell"
+/// AgentId convention: "<agent_type>_<ulid>".
 fn agent_type_of(agent: &AgentId) -> &str {
-    agent.split('_').next().unwrap_or("shell")
+    agent.split('_').next().unwrap_or("")
 }
 
 /// 内置 manifest TOML（编译期嵌入）
@@ -232,6 +232,9 @@ pub fn builtin_manifests() -> Vec<CompiledManifest> {
         ("codex", include_str!("manifests/codex.toml")),
         ("opencode", include_str!("manifests/opencode.toml")),
         ("pi", include_str!("manifests/pi.toml")),
+        ("agy", include_str!("manifests/agy.toml")),
+        ("qwen", include_str!("manifests/qwen.toml")),
+        ("kimi", include_str!("manifests/kimi.toml")),
         ("shell", include_str!("manifests/shell.toml")),
     ];
     sources
@@ -313,11 +316,54 @@ mod tests {
     }
 
     #[test]
-    fn unknown_type_uses_shell_rules_or_none() {
+    fn builtin_manifest_types_match_supported_agents() {
+        let types = builtin_manifests()
+            .into_iter()
+            .map(|m| m.agent_type)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            "agy", "claude", "codex", "kimi", "opencode", "pi", "qwen", "shell",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(types, expected);
+        assert!(!types.contains("gemini"));
+    }
+
+    #[test]
+    fn new_agent_manifests_recognize_screen_states() {
+        for (agent_type, status, mut screen) in [
+            (
+                "agy",
+                AgentStatus::Blocked,
+                input(["Agy requires approval"]),
+            ),
+            (
+                "qwen",
+                AgentStatus::Working,
+                input(std::iter::empty::<&str>()),
+            ),
+            ("kimi", AgentStatus::Idle, input(["(kimi) >"])),
+        ] {
+            if agent_type == "qwen" {
+                screen.osc_title = Some("Qwen Code: thinking".into());
+            }
+            let manifest = builtin_manifests()
+                .into_iter()
+                .find(|m| m.agent_type == agent_type)
+                .unwrap();
+            assert_eq!(manifest.evaluate(&screen), Some(status));
+        }
+    }
+
+    #[test]
+    fn unknown_type_has_no_screen_fallback() {
         let mut e = engine();
-        let a: AgentId = "shell_D04".into();
-        // 空闲 bash 无输出 → shell manifest 可判 idle；没有匹配特征则 None
-        let _ = e.observe(&a, AgentStatus::Working, &input(["$ "]));
+        let a: AgentId = "unknown_D04".into();
+        let prompt = input(["$ "]);
+        assert_eq!(e.observe(&a, AgentStatus::Working, &prompt), None);
+        assert_eq!(e.observe(&a, AgentStatus::Working, &prompt), None);
     }
 
     #[test]

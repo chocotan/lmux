@@ -1,0 +1,18 @@
+# agy screen-state fallback rules
+[[rules]]
+status = "blocked"
+region = "bottom"
+contains = [
+    "Agy requires approval",
+    "Agy is waiting for input",
+]
+
+[[rules]]
+status = "working"
+region = "osc_title"
+regex = ["(?i)agy.*(working|thinking|running)"]
+
+[[rules]]
+status = "idle"
+region = "bottom"
+regex = ["(?i)^\\s*agy\\s*[>❯]\\s*$"]

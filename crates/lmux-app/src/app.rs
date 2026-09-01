@@ -245,6 +245,16 @@ struct TreeMenu {
     position: Point<Pixels>,
 }
 
+fn dismiss_context_menus(
+    session_menu: &mut Option<SessionMenu>,
+    tree_menu: &mut Option<TreeMenu>,
+) -> bool {
+    let had_open_menu = session_menu.is_some() || tree_menu.is_some();
+    *session_menu = None;
+    *tree_menu = None;
+    had_open_menu
+}
+
 #[derive(Clone)]
 struct DeleteConfirm {
     target: DeleteTarget,
@@ -846,7 +856,12 @@ impl LmuxApp {
         }
     }
 
-    fn spawn_preset(&mut self, preset: &lmux_core::AgentPreset, cx: &mut Context<Self>) {
+    fn spawn_preset(
+        &mut self,
+        preset: &lmux_core::AgentPreset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let lifecycle = Arc::clone(&self.server.lifecycle);
         let _lifecycle = lifecycle.blocking_lock();
         let project = self
@@ -918,6 +933,7 @@ impl LmuxApp {
         let pane = self.active_pane.clone();
         self.pane_tree.open_tab(&pane, agent_id.clone());
         self.activate_tab(&pane, &agent_id);
+        self.focus_agent(&agent_id, window, cx);
         self.palette_open = false;
         self.new_session_project = None;
         self.persist();
@@ -986,13 +1002,20 @@ impl LmuxApp {
     }
 
     /// 显式分屏：新 pane 始终启动普通 Shell，不复制当前 agent 类型。
-    fn split_pane(&mut self, pane: &PaneId, axis: SplitAxis, cx: &mut Context<Self>) {
+    fn split_pane(
+        &mut self,
+        pane: &PaneId,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(agent_id) = self.spawn_shell_for_pane(pane, cx) else {
             return;
         };
         if let Some(new_pane) = self.pane_tree.split(pane, axis, agent_id.clone()) {
             self.active_pane = new_pane;
-            self.active = Some(agent_id);
+            self.active = Some(agent_id.clone());
+            self.focus_agent(&agent_id, window, cx);
         }
         self.persist();
         cx.notify();
@@ -1476,6 +1499,17 @@ impl LmuxApp {
         };
         div()
             .absolute()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                if dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu) {
+                    cx.notify();
+                }
+            }))
+            .on_any_mouse_down(
+                cx.listener(|_this, _event: &gpui::MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
             .left(menu.position.x)
             .top(menu.position.y)
             .w(px(180.))
@@ -1530,6 +1564,16 @@ impl LmuxApp {
         div()
             .absolute()
             .occlude()
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                if dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu) {
+                    cx.notify();
+                }
+            }))
+            .on_any_mouse_down(
+                cx.listener(|_this, _event: &gpui::MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
             .left(menu.position.x)
             .top(menu.position.y)
             .w(px(190.))
@@ -1959,7 +2003,13 @@ impl LmuxApp {
             .into_any_element()
     }
 
-    fn spawn_remote_shell(&mut self, host: String, project: String, cx: &mut Context<Self>) {
+    fn spawn_remote_shell(
+        &mut self,
+        host: String,
+        project: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let endpoint = self
             .remotes
             .iter()
@@ -1969,11 +2019,11 @@ impl LmuxApp {
             return;
         };
         let runtime = self.server.runtime.clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = runtime
                 .spawn(async move { lmux_client::spawn_shell_agent(&endpoint, &project).await })
                 .await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if let Ok(Ok(agent)) = result {
                     let agent_id = agent.id.clone();
                     if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
@@ -1987,6 +2037,7 @@ impl LmuxApp {
                         snapshot.agents.push(agent);
                     }
                     this.open_remote_agent(&agent_id, cx);
+                    this.focus_agent(&agent_id, window, cx);
                     this.persist();
                     cx.notify();
                 }
@@ -2223,7 +2274,12 @@ impl LmuxApp {
             .into_any_element()
     }
 
-    fn handle_palette_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+    fn handle_palette_key(
+        &mut self,
+        ks: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let available: Vec<lmux_core::AgentPreset> = self
             .presets
             .iter()
@@ -2233,13 +2289,13 @@ impl LmuxApp {
         match ks.key.as_str() {
             "h" => {
                 let pane = self.active_pane.clone();
-                self.split_pane(&pane, SplitAxis::Horizontal, cx);
+                self.split_pane(&pane, SplitAxis::Horizontal, window, cx);
                 self.palette_open = false;
                 return;
             }
             "v" => {
                 let pane = self.active_pane.clone();
-                self.split_pane(&pane, SplitAxis::Vertical, cx);
+                self.split_pane(&pane, SplitAxis::Vertical, window, cx);
                 self.palette_open = false;
                 return;
             }
@@ -2263,7 +2319,7 @@ impl LmuxApp {
             }
             "enter" => {
                 if let Some(preset) = available.get(self.palette_index).cloned() {
-                    self.spawn_preset(&preset, cx);
+                    self.spawn_preset(&preset, window, cx);
                     return;
                 }
             }
@@ -2317,8 +2373,8 @@ impl LmuxApp {
                     .text_size(px(12.))
                     .when(index == self.palette_index, |el| el.bg(rgba(BG2)))
                     .hover(|s| s.bg(rgba(BG2)))
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.spawn_preset(&preset_for_click, cx)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.spawn_preset(&preset_for_click, window, cx)
                     }))
                     .child(format!("＋ 新建 {}", preset_label))
                     .child(
@@ -2349,9 +2405,9 @@ impl LmuxApp {
                     .hover(|s| s.bg(rgba(BG2)))
                     .on_click(cx.listener({
                         let pane = pane.clone();
-                        move |this, _ev, _window, cx| {
+                        move |this, _ev, window, cx| {
                             if let Some(axis) = axis {
-                                this.split_pane(&pane, axis, cx);
+                                this.split_pane(&pane, axis, window, cx);
                             } else {
                                 this.toggle_maximize(&pane, cx);
                             }
@@ -2692,8 +2748,8 @@ impl LmuxApp {
                                 .hover(|s| s.bg(rgba(0xf2f1ecff)))
                                 .on_click(cx.listener({
                                     let pane = pane_id.clone();
-                                    move |this, _ev, _window, cx| {
-                                        this.split_pane(&pane, SplitAxis::Horizontal, cx)
+                                    move |this, _ev, window, cx| {
+                                        this.split_pane(&pane, SplitAxis::Horizontal, window, cx)
                                     }
                                 }))
                                 .child("↔"),
@@ -2705,8 +2761,8 @@ impl LmuxApp {
                                 .hover(|s| s.bg(rgba(0xf2f1ecff)))
                                 .on_click(cx.listener({
                                     let pane = pane_id.clone();
-                                    move |this, _ev, _window, cx| {
-                                        this.split_pane(&pane, SplitAxis::Vertical, cx)
+                                    move |this, _ev, window, cx| {
+                                        this.split_pane(&pane, SplitAxis::Vertical, window, cx)
                                     }
                                 }))
                                 .child("↕"),
@@ -2807,19 +2863,21 @@ impl Render for LmuxApp {
         // ── 侧栏：机器树（本地一个 machine 节点 + 项目 + agent）
         let local_machine_key = "local".to_string();
         let local_collapsed = self.collapsed_machines.contains(&local_machine_key);
-        let mut tree = div().flex().flex_col();
+        let mut tree = div().flex().flex_col().py_1();
         tree = tree.child(
             div()
                 .id("machine-local")
                 .flex()
                 .items_center()
-                .gap_2()
+                .gap_1()
+                .h(px(38.))
                 .px_2()
-                .py_2()
                 .border_b_1()
                 .border_color(rgba(LINE))
                 .text_size(px(13.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgba(FG0))
+                .hover(|style| style.bg(rgba(0xe9e7e0ff)))
                 .on_click(cx.listener({
                     let key = local_machine_key.clone();
                     move |this, _event, _window, cx| {
@@ -2829,17 +2887,33 @@ impl Render for LmuxApp {
                         cx.notify();
                     }
                 }))
-                .text_color(rgba(FG1))
-                .child(if local_collapsed { "▸" } else { "▾" })
-                .text_color(rgba(GREEN))
-                .child("●")
-                .text_color(rgba(FG0))
+                .child(
+                    div()
+                        .w(px(16.))
+                        .text_color(rgba(FG1))
+                        .child(if local_collapsed { "▸" } else { "▾" }),
+                )
+                .child(div().w(px(18.)).text_color(rgba(GREEN)).child("▣"))
                 .child(machine_name.clone())
                 .child(
                     div()
-                        .id("add-local-project")
                         .ml_auto()
                         .px_1()
+                        .rounded_sm()
+                        .bg(rgba(0xe2eadcff))
+                        .text_size(px(9.))
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(rgba(GREEN))
+                        .child("本机"),
+                )
+                .child(
+                    div()
+                        .id("add-local-project")
+                        .w(px(24.))
+                        .h(px(24.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .text_size(px(15.))
                         .text_color(rgba(FG1))
                         .hover(|s| s.bg(rgba(BG2)).text_color(rgba(ACCENT)))
@@ -2859,10 +2933,14 @@ impl Render for LmuxApp {
             for project in &snap.projects {
                 let project_key = format!("local:{}", project.id);
                 let project_collapsed = self.collapsed_projects.contains(&project_key);
+                let project_branch = project
+                    .branch
+                    .clone()
+                    .filter(|branch| !branch.trim().is_empty());
                 let mut pnode = div()
                     .flex()
                     .flex_col()
-                    .ml_2()
+                    .ml_3()
                     .border_l_1()
                     .border_color(rgba(LINE));
                 let project_id_for_add = project.id.clone();
@@ -2877,12 +2955,14 @@ impl Render for LmuxApp {
                         ))
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
+                        .gap_1()
+                        .h(px(32.))
+                        .pl_1()
+                        .pr_2()
                         .text_size(px(12.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgba(FG0))
+                        .hover(|style| style.bg(rgba(0xe9e7e0ff)))
                         .on_click(cx.listener({
                             let key = project_key.clone();
                             move |this, _event, _window, cx| {
@@ -2892,59 +2972,74 @@ impl Render for LmuxApp {
                                 cx.notify();
                             }
                         }))
-                        .child(format!(
-                            "{}  {}",
-                            if project_collapsed { "▸" } else { "▾" },
-                            project.name
-                        ))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener({
+                                let target = local_project_target.clone();
+                                move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                                    this.session_menu = None;
+                                    this.tree_menu = Some(TreeMenu {
+                                        target: target.clone(),
+                                        position: event.position,
+                                    });
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .child(
+                            div()
+                                .w(px(16.))
+                                .text_color(rgba(FG1))
+                                .child(if project_collapsed { "▸" } else { "▾" }),
+                        )
+                        .child(div().w(px(18.)).text_color(rgba(ACCENT)).child("◇"))
+                        .child(project.name.clone())
                         .child(
                             div()
                                 .ml_auto()
-                                .text_size(px(10.))
-                                .text_color(rgba(0x8b90a0ff))
-                                .child(project.branch.clone().unwrap_or_default()),
-                        )
-                        .child(
-                            div()
-                                .id(gpui::ElementId::Name(
-                                    format!("project-add-{}", project.id).into(),
-                                ))
-                                .px_1()
-                                .text_size(px(15.))
-                                .text_color(rgba(FG1))
-                                .hover(|s| s.bg(rgba(BG2)).text_color(rgba(ACCENT)))
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.new_session_project = Some(project_id_for_add.clone());
-                                    this.palette_open = true;
-                                    this.session_menu = None;
-                                    cx.notify();
-                                }))
-                                .child("＋"),
-                        )
-                        .child(
-                            div()
-                                .id(gpui::ElementId::Name(
-                                    format!("project-menu-{}", project.id).into(),
-                                ))
-                                .px_1()
-                                .text_size(px(14.))
-                                .text_color(rgba(FG1))
-                                .hover(|style| style.bg(rgba(BG2)))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(
-                                        move |this, event: &gpui::MouseDownEvent, _window, cx| {
-                                            this.tree_menu = Some(TreeMenu {
-                                                target: local_project_target.clone(),
-                                                position: event.position,
-                                            });
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .when_some(project_branch, |controls, branch| {
+                                    controls.child(
+                                        div()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .bg(rgba(0xe7e5deff))
+                                            .text_size(px(9.5))
+                                            .font_weight(gpui::FontWeight::NORMAL)
+                                            .text_color(rgba(FG1))
+                                            .child(branch),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id(gpui::ElementId::Name(
+                                            format!("project-add-{}", project.id).into(),
+                                        ))
+                                        .w(px(24.))
+                                        .h(px(24.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(15.))
+                                        .font_weight(gpui::FontWeight::NORMAL)
+                                        .text_color(rgba(FG1))
+                                        .hover(|s| s.bg(rgba(BG2)).text_color(rgba(ACCENT)))
+                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
                                             cx.stop_propagation();
+                                            this.new_session_project =
+                                                Some(project_id_for_add.clone());
+                                            this.palette_open = true;
+                                            dismiss_context_menus(
+                                                &mut this.session_menu,
+                                                &mut this.tree_menu,
+                                            );
                                             cx.notify();
-                                        },
-                                    ),
-                                )
-                                .child("…"),
+                                        }))
+                                        .child("＋"),
+                                ),
                         ),
                 );
                 if !project_collapsed {
@@ -2955,14 +3050,16 @@ impl Render for LmuxApp {
                             .id(gpui::ElementId::Name(id.clone().into()))
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap_1()
+                            .h(px(30.))
                             .pl_3()
                             .pr_2()
-                            .py_1()
-                            .text_size(px(12.))
+                            .border_l_2()
+                            .border_color(rgba(if active { ACCENT } else { 0x00000000 }))
+                            .text_size(px(11.5))
                             .text_color(rgba(if active { FG0 } else { FG1 }))
-                            .when(active, |el| el.bg(rgba(0xe9e7faff)))
-                            .hover(|s| s.bg(rgba(BG2)))
+                            .hover(|s| s.bg(rgba(0xe9e7e0ff)))
+                            .when(active, |el| el.bg(rgba(0xe7edfaff)))
                             .on_click(cx.listener({
                                 let id = id.clone();
                                 move |this, _ev, window, cx| {
@@ -2975,27 +3072,30 @@ impl Render for LmuxApp {
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, ev: &gpui::MouseDownEvent, _window, cx| {
+                                        this.tree_menu = None;
                                         this.session_menu = Some(SessionMenu {
                                             agent: id.clone(),
                                             position: ev.position,
                                             remote: false,
                                         });
                                         this.palette_open = false;
+                                        cx.stop_propagation();
                                         cx.notify();
                                     }
                                 }),
                             );
                         row = row
-                            .child(div().text_color(rgba(LINE)).child("├"))
                             .child(
                                 div()
+                                    .w(px(16.))
                                     .text_color(rgba(status_color(&agent.status)))
                                     .child(status_marker(&agent.status, self.spinner_frame)),
                             )
                             .child(truncate(&agent.title, 28))
                             .child(
                                 div()
-                                    .text_size(px(10.))
+                                    .ml_auto()
+                                    .text_size(px(9.5))
                                     .px_1()
                                     .rounded_sm()
                                     .bg(rgba(BG2))
@@ -3114,13 +3214,15 @@ impl Render for LmuxApp {
                     .id(gpui::ElementId::Name(format!("machine-row-{name}").into()))
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
+                    .h(px(38.))
                     .px_2()
-                    .py_2()
                     .border_b_1()
                     .border_color(rgba(LINE))
                     .text_size(px(13.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgba(FG0))
+                    .hover(|style| style.bg(rgba(0xe9e7e0ff)))
                     .on_click(cx.listener({
                         let key = machine_key.clone();
                         move |this, _event, _window, cx| {
@@ -3130,17 +3232,23 @@ impl Render for LmuxApp {
                             cx.notify();
                         }
                     }))
-                    .text_color(rgba(FG1))
-                    .child(if machine_collapsed { "▸" } else { "▾" })
-                    .text_color(rgba(dot_color))
-                    .child("●")
-                    .text_color(rgba(FG0))
+                    .child(
+                        div()
+                            .w(px(16.))
+                            .text_color(rgba(FG1))
+                            .child(if machine_collapsed { "▸" } else { "▾" }),
+                    )
+                    .child(div().w(px(18.)).text_color(rgba(dot_color)).child("▣"))
                     .child(name.clone())
                     .child(
                         div()
                             .ml_auto()
-                            .text_size(px(10.))
-                            .text_color(rgba(0x8b90a0ff))
+                            .px_1()
+                            .rounded_sm()
+                            .bg(rgba(BG2))
+                            .text_size(px(9.))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(rgba(dot_color))
                             .child(status_text.to_string()),
                     )
                     .child(
@@ -3201,6 +3309,7 @@ impl Render for LmuxApp {
                                 MouseButton::Left,
                                 cx.listener(
                                     move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                                        this.session_menu = None;
                                         this.tree_menu = Some(TreeMenu {
                                             target: machine_target.clone(),
                                             position: event.position,
@@ -3228,87 +3337,107 @@ impl Render for LmuxApp {
                         let mut pnode = div()
                             .flex()
                             .flex_col()
-                            .ml_2()
+                            .ml_3()
                             .border_l_1()
                             .border_color(rgba(LINE));
                         pnode = pnode.child(
-                        div()
-                            .id(gpui::ElementId::Name(
-                                format!("remote-project-row-{name}-{}", project.id).into(),
-                            ))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgba(FG0))
-                            .on_click(cx.listener({
-                                let key = project_key.clone();
-                                move |this, _event, _window, cx| {
-                                    if !this.collapsed_projects.remove(&key) {
-                                        this.collapsed_projects.insert(key.clone());
+                            div()
+                                .id(gpui::ElementId::Name(
+                                    format!("remote-project-row-{name}-{}", project.id).into(),
+                                ))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .h(px(32.))
+                                .pl_1()
+                                .pr_2()
+                                .text_size(px(12.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgba(FG0))
+                                .hover(|style| style.bg(rgba(0xe9e7e0ff)))
+                                .on_click(cx.listener({
+                                    let key = project_key.clone();
+                                    move |this, _event, _window, cx| {
+                                        if !this.collapsed_projects.remove(&key) {
+                                            this.collapsed_projects.insert(key.clone());
+                                        }
+                                        cx.notify();
                                     }
-                                    cx.notify();
-                                }
-                            }))
-                            .child(format!(
-                                "{}  {}",
-                                if project_collapsed { "▸" } else { "▾" },
-                                project.name
-                            ))
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .text_size(px(10.))
-                                    .text_color(rgba(0x3d6cd8ff))
-                                    .child("⧉"),
-                            )
-                            .child(
-                                div()
-                                    .id(gpui::ElementId::Name(
-                                        format!("remote-session-add-{name}-{}", project.id).into(),
-                                    ))
-                                    .px_1()
-                                    .text_size(px(15.))
-                                    .text_color(rgba(FG1))
-                                    .hover(|style| style.bg(rgba(BG2)).text_color(rgba(ACCENT)))
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.spawn_remote_shell(
-                                            spawn_host.clone(),
-                                            spawn_project.clone(),
-                                            cx,
-                                        );
-                                    }))
-                                    .child("＋"),
-                            )
-                            .child(
-                                div()
-                                    .px_1()
-                                    .text_size(px(14.))
-                                    .text_color(rgba(FG1))
-                                    .hover(|style| style.bg(rgba(BG2)))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            move |this,
-                                                  event: &gpui::MouseDownEvent,
-                                                  _window,
-                                                  cx| {
-                                                this.tree_menu = Some(TreeMenu {
-                                                    target: remote_project_target.clone(),
-                                                    position: event.position,
-                                                });
-                                                cx.stop_propagation();
-                                                cx.notify();
-                                            },
+                                }))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener({
+                                        let target = remote_project_target.clone();
+                                        move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                                            this.session_menu = None;
+                                            this.tree_menu = Some(TreeMenu {
+                                                target: target.clone(),
+                                                position: event.position,
+                                            });
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(16.))
+                                        .text_color(rgba(FG1))
+                                        .child(if project_collapsed { "▸" } else { "▾" }),
+                                )
+                                .child(div().w(px(18.)).text_color(rgba(ACCENT)).child("◇"))
+                                .child(project.name.clone())
+                                .child(
+                                    div()
+                                        .ml_auto()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .bg(rgba(0xe3e9f6ff))
+                                                .text_size(px(9.))
+                                                .font_weight(gpui::FontWeight::NORMAL)
+                                                .text_color(rgba(ACCENT))
+                                                .child("远程"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(gpui::ElementId::Name(
+                                                    format!(
+                                                        "remote-session-add-{name}-{}",
+                                                        project.id
+                                                    )
+                                                    .into(),
+                                                ))
+                                                .w(px(24.))
+                                                .h(px(24.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_size(px(15.))
+                                                .font_weight(gpui::FontWeight::NORMAL)
+                                                .text_color(rgba(FG1))
+                                                .hover(|style| {
+                                                    style.bg(rgba(BG2)).text_color(rgba(ACCENT))
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |this, _event, window, cx| {
+                                                        cx.stop_propagation();
+                                                        this.spawn_remote_shell(
+                                                            spawn_host.clone(),
+                                                            spawn_project.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child("＋"),
                                         ),
-                                    )
-                                    .child("…"),
-                            ),
-                    );
+                                ),
+                        );
                         if !project_collapsed {
                             for agent in rsnap.agents_of(&project.id) {
                                 let id = agent.id.clone();
@@ -3317,14 +3446,16 @@ impl Render for LmuxApp {
                                     .id(gpui::ElementId::Name(id.clone().into()))
                                     .flex()
                                     .items_center()
-                                    .gap_2()
+                                    .gap_1()
+                                    .h(px(30.))
                                     .pl_3()
                                     .pr_2()
-                                    .py_1()
-                                    .text_size(px(12.))
+                                    .border_l_2()
+                                    .border_color(rgba(if active { ACCENT } else { 0x00000000 }))
+                                    .text_size(px(11.5))
                                     .text_color(rgba(if active { FG0 } else { FG1 }))
-                                    .when(active, |el| el.bg(rgba(0xe9e7faff)))
-                                    .hover(|s| s.bg(rgba(BG2)))
+                                    .hover(|s| s.bg(rgba(0xe9e7e0ff)))
+                                    .when(active, |el| el.bg(rgba(0xe7edfaff)))
                                     .on_click(cx.listener({
                                         let id = id.clone();
                                         move |this, _ev, window, cx| {
@@ -3337,27 +3468,33 @@ impl Render for LmuxApp {
                                         cx.listener({
                                             let id = id.clone();
                                             move |this, ev: &gpui::MouseDownEvent, _window, cx| {
+                                                this.tree_menu = None;
                                                 this.session_menu = Some(SessionMenu {
                                                     agent: id.clone(),
                                                     position: ev.position,
                                                     remote: true,
                                                 });
                                                 this.palette_open = false;
+                                                cx.stop_propagation();
                                                 cx.notify();
                                             }
                                         }),
                                     );
                                 row = row
-                                    .child(div().text_color(rgba(LINE)).child("├"))
                                     .child(
-                                        div().text_color(rgba(status_color(&agent.status))).child(
-                                            status_marker(&agent.status, self.spinner_frame),
-                                        ),
+                                        div()
+                                            .w(px(16.))
+                                            .text_color(rgba(status_color(&agent.status)))
+                                            .child(status_marker(
+                                                &agent.status,
+                                                self.spinner_frame,
+                                            )),
                                     )
                                     .child(truncate(&agent.title, 24))
                                     .child(
                                         div()
-                                            .text_size(px(10.))
+                                            .ml_auto()
+                                            .text_size(px(9.5))
                                             .px_1()
                                             .rounded_sm()
                                             .bg(rgba(BG2))
@@ -3421,9 +3558,9 @@ impl Render for LmuxApp {
                 let pane = this.active_pane.clone();
                 this.new_shell_tab(&pane, window, cx);
             }))
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if this.palette_open {
-                    this.handle_palette_key(&ev.keystroke, cx);
+                    this.handle_palette_key(&ev.keystroke, window, cx);
                     cx.stop_propagation();
                 }
             }))
@@ -3457,8 +3594,7 @@ impl Render for LmuxApp {
                     || this.remote_project_dialog.is_some()
                 {
                     this.palette_open = false;
-                    this.session_menu = None;
-                    this.tree_menu = None;
+                    dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu);
                     this.delete_confirm = None;
                     this.bootstrap_confirm = None;
                     this.connect_dialog = false;
@@ -3617,6 +3753,27 @@ mod tests {
             Some(dir.path().canonicalize().unwrap())
         );
         assert!(resolve_local_project_path("/definitely/missing/lmux-project").is_none());
+    }
+
+    #[test]
+    fn dismissing_context_menus_clears_session_and_tree_menus() {
+        let mut session_menu = Some(SessionMenu {
+            agent: "agent-1".into(),
+            position: Point::new(px(10.), px(20.)),
+            remote: false,
+        });
+        let mut tree_menu = Some(TreeMenu {
+            target: DeleteTarget::LocalProject {
+                project: "project-1".into(),
+                label: "demo".into(),
+            },
+            position: Point::new(px(30.), px(40.)),
+        });
+
+        assert!(dismiss_context_menus(&mut session_menu, &mut tree_menu));
+        assert!(session_menu.is_none());
+        assert!(tree_menu.is_none());
+        assert!(!dismiss_context_menus(&mut session_menu, &mut tree_menu));
     }
 
     #[test]
