@@ -3,8 +3,8 @@
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, Context, FocusHandle,
     Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
-    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, Styled, Task,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    MouseButton, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine,
+    Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use lmux_core::model::AgentId;
 use lmux_term::{PtySession, VTerm};
@@ -14,6 +14,58 @@ const FONT_SIZE: f32 = 13.0;
 const TERM_PADDING: f32 = 4.0;
 const FALLBACK_CELL_W: f32 = 8.2;
 const FALLBACK_CELL_H: f32 = 17.0;
+const SCROLLBAR_WIDTH: f32 = 10.0;
+const SCROLLBAR_RIGHT: f32 = 2.0;
+const MIN_SCROLLBAR_THUMB: f32 = 24.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollbarGeometry {
+    track_height: f32,
+    thumb_top: f32,
+    thumb_height: f32,
+}
+
+fn scrollbar_geom(
+    track_height: f32,
+    visible_lines: usize,
+    history: usize,
+    display_offset: usize,
+) -> Option<ScrollbarGeometry> {
+    if history == 0 || track_height <= 0.0 {
+        return None;
+    }
+
+    let visible_lines = visible_lines.max(1);
+    let total_lines = history.saturating_add(visible_lines);
+    let proportional = track_height * visible_lines as f32 / total_lines as f32;
+    let thumb_height = proportional
+        .max(MIN_SCROLLBAR_THUMB.min(track_height))
+        .min(track_height);
+    let travel = (track_height - thumb_height).max(0.0);
+    let offset = display_offset.min(history);
+    let thumb_top = travel * (history - offset) as f32 / history as f32;
+
+    Some(ScrollbarGeometry {
+        track_height,
+        thumb_top,
+        thumb_height,
+    })
+}
+
+fn scrollbar_drag_offset(
+    geometry: ScrollbarGeometry,
+    pointer_y: f32,
+    grab_offset: f32,
+    history: usize,
+    display_offset: usize,
+) -> usize {
+    let travel = (geometry.track_height - geometry.thumb_height).max(0.0);
+    if travel == 0.0 {
+        return display_offset.min(history);
+    }
+    let thumb_top = (pointer_y - grab_offset).clamp(0.0, travel);
+    ((1.0 - thumb_top / travel) * history as f32).round() as usize
+}
 
 struct PaintRun {
     shaped: ShapedLine,
@@ -176,6 +228,7 @@ pub struct TermView {
     last_bounds: Arc<std::sync::Mutex<Option<Bounds<Pixels>>>>,
     cell_size: Arc<std::sync::Mutex<(f32, f32)>>,
     scroll_accum: Arc<std::sync::Mutex<f32>>,
+    scrollbar_drag: Option<f32>,
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
     _drain: Task<()>,
 }
@@ -239,6 +292,7 @@ impl TermView {
             last_bounds: Arc::new(std::sync::Mutex::new(None)),
             cell_size: Arc::new(std::sync::Mutex::new((FALLBACK_CELL_W, FALLBACK_CELL_H))),
             scroll_accum: Arc::new(std::sync::Mutex::new(0.0)),
+            scrollbar_drag: None,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             _drain: drain,
         }
@@ -263,6 +317,7 @@ impl TermView {
             last_bounds: Arc::new(std::sync::Mutex::new(None)),
             cell_size: Arc::new(std::sync::Mutex::new((FALLBACK_CELL_W, FALLBACK_CELL_H))),
             scroll_accum: Arc::new(std::sync::Mutex::new(0.0)),
+            scrollbar_drag: None,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             _drain: idle,
         }
@@ -390,6 +445,40 @@ impl TermView {
         }
         cx.stop_propagation();
     }
+
+    fn scrollbar_geometry(&self) -> Option<(f32, ScrollbarGeometry)> {
+        let bounds = self.last_bounds.lock().ok().and_then(|bounds| *bounds)?;
+        let visible_lines = self
+            .last_dims
+            .lock()
+            .map(|dims| dims.1 as usize)
+            .unwrap_or(1);
+        let (history, display_offset) = self.vterm.scroll_metrics();
+        scrollbar_geom(
+            f32::from(bounds.size.height),
+            visible_lines,
+            history,
+            display_offset,
+        )
+        .map(|geometry| (f32::from(bounds.origin.y), geometry))
+    }
+
+    fn apply_scrollbar_drag(&self, pointer_y: Pixels, grab_offset: f32) -> bool {
+        let Some((track_top, geometry)) = self.scrollbar_geometry() else {
+            return false;
+        };
+        let (history, display_offset) = self.vterm.scroll_metrics();
+        let desired_offset = scrollbar_drag_offset(
+            geometry,
+            f32::from(pointer_y) - track_top,
+            grab_offset,
+            history,
+            display_offset,
+        );
+        let delta = desired_offset as i64 - display_offset as i64;
+        self.vterm
+            .scroll_display(delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+    }
 }
 
 fn wheel_report(
@@ -442,6 +531,7 @@ impl Render for TermView {
         let dims = Arc::clone(&self.last_dims);
         let pane_bounds = Arc::clone(&self.last_bounds);
         let cell_size = Arc::clone(&self.cell_size);
+        let scrollbar = self.scrollbar_geometry().map(|(_, geometry)| geometry);
 
         div()
             .id("term-pane")
@@ -666,9 +756,98 @@ impl Render for TermView {
                 .absolute()
                 .size_full(),
             )
-            .child(div().absolute().size_full().on_scroll_wheel(cx.listener(
-                |this, event: &ScrollWheelEvent, _window, cx| this.scroll_wheel(event, cx),
-            )))
+            .child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                        this.scroll_wheel(event, cx)
+                    }))
+                    .on_mouse_move(cx.listener(
+                        |this, event: &gpui::MouseMoveEvent, _window, cx| {
+                            let Some(grab_offset) = this.scrollbar_drag else {
+                                return;
+                            };
+                            if event.pressed_button != Some(MouseButton::Left) {
+                                this.scrollbar_drag = None;
+                                cx.notify();
+                                return;
+                            }
+                            if this.apply_scrollbar_drag(event.position.y, grab_offset) {
+                                cx.notify();
+                            }
+                            cx.stop_propagation();
+                        },
+                    ))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            if this.scrollbar_drag.take().is_some() {
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            if this.scrollbar_drag.take().is_some() {
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .when_some(scrollbar, |layer, geometry| {
+                        layer.child(
+                            div()
+                                .absolute()
+                                .right(px(SCROLLBAR_RIGHT))
+                                .top(px(TERM_PADDING))
+                                .w(px(SCROLLBAR_WIDTH))
+                                .h(px(geometry.track_height))
+                                .rounded_sm()
+                                .bg(rgba(0x2a2e381a))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(
+                                        |this, event: &gpui::MouseDownEvent, window, cx| {
+                                            let Some((track_top, geometry)) =
+                                                this.scrollbar_geometry()
+                                            else {
+                                                return;
+                                            };
+                                            let pointer_y = f32::from(event.position.y) - track_top;
+                                            let on_thumb = pointer_y >= geometry.thumb_top
+                                                && pointer_y
+                                                    <= geometry.thumb_top + geometry.thumb_height;
+                                            let grab_offset = if on_thumb {
+                                                pointer_y - geometry.thumb_top
+                                            } else {
+                                                geometry.thumb_height * 0.5
+                                            };
+                                            this.scrollbar_drag = Some(grab_offset);
+                                            this.focus.focus(window, cx);
+                                            if this
+                                                .apply_scrollbar_drag(event.position.y, grab_offset)
+                                            {
+                                                cx.notify();
+                                            }
+                                            cx.stop_propagation();
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top(px(geometry.thumb_top))
+                                        .w_full()
+                                        .h(px(geometry.thumb_height))
+                                        .rounded_sm()
+                                        .bg(rgba(0x6f7480aa)),
+                                ),
+                        )
+                    }),
+            )
     }
 }
 
@@ -716,6 +895,32 @@ mod tests {
             wheel_report(false, 0, 0, false, false, false, false),
             vec![0x1b, b'[', b'M', 97, 33, 33]
         );
+    }
+
+    #[test]
+    fn scrollbar_geometry_tracks_display_offset() {
+        let bottom = scrollbar_geom(200.0, 25, 75, 0).unwrap();
+        assert_eq!(bottom.thumb_height, 50.0);
+        assert_eq!(bottom.thumb_top, 150.0);
+
+        let middle = scrollbar_geom(200.0, 25, 75, 38).unwrap();
+        assert!((middle.thumb_top - 74.0).abs() < 0.01);
+
+        let top = scrollbar_geom(200.0, 25, 75, 75).unwrap();
+        assert_eq!(top.thumb_top, 0.0);
+        assert!(scrollbar_geom(200.0, 25, 0, 0).is_none());
+    }
+
+    #[test]
+    fn scrollbar_thumb_has_minimum_height_and_drag_clamps() {
+        let geometry = scrollbar_geom(100.0, 10, 990, 0).unwrap();
+        assert_eq!(geometry.thumb_height, MIN_SCROLLBAR_THUMB);
+        assert_eq!(scrollbar_drag_offset(geometry, -20.0, 12.0, 990, 0), 990);
+        assert_eq!(scrollbar_drag_offset(geometry, 120.0, 12.0, 990, 0), 0);
+        assert_eq!(scrollbar_drag_offset(geometry, 50.0, 12.0, 990, 0), 495);
+
+        let immovable = scrollbar_geom(20.0, 10, 10, 7).unwrap();
+        assert_eq!(scrollbar_drag_offset(immovable, 10.0, 10.0, 10, 7), 7);
     }
 
     #[test]
