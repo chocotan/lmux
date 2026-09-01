@@ -232,7 +232,6 @@ fn main() {
     // 恢复持久 tmux 会话；GUI 关闭只 detach，进程继续运行。
     {
         let sessions = Arc::clone(&server.sessions);
-        let mut restored = 0usize;
         for saved in &persisted.sessions {
             let alive = std::process::Command::new("tmux")
                 .args(["-L", "lmux", "has-session", "-t", &saved.tmux_session])
@@ -282,57 +281,10 @@ fn main() {
                 sessions
                     .blocking_lock()
                     .insert(saved.agent_id.clone(), session);
-                restored += 1;
             }
         }
 
-        // 首次运行才创建一个默认 shell；恢复成功时不额外新增。
-        if restored == 0 && !persisted.initialized {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let project =
-                persisted
-                    .projects
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| lmux_core::model::Project {
-                        id: "p_demo".into(),
-                        name: cwd
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "demo".into()),
-                        path: cwd,
-                        branch: None,
-                        agents: vec![],
-                    });
-            let agent_id = lmux_core::model::new_id("shell");
-            let mut cfg = lmux_term::LaunchCfg::shell(agent_id.clone(), project.path.clone());
-            let tmux_name = cfg.tmux_session.clone();
-            cfg.env.push(("LMUX_AGENT_ID".into(), agent_id.clone()));
-            cfg.env.push((
-                "LMUX_SOCKET".into(),
-                server.socket_path.display().to_string(),
-            ));
-            cfg.env
-                .push(("LMUX_HOOK_TOKEN".into(), server.hook_token(&agent_id)));
-            if let Ok(session) = lmux_term::PtySession::spawn(cfg) {
-                let instance = lmux_core::model::AgentInstance {
-                    id: agent_id.clone(),
-                    project: project.id.clone(),
-                    agent_type: lmux_core::model::AgentType::Shell,
-                    title: lmux_term::default_shell_program()
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("shell")
-                        .to_string(),
-                    status: lmux_core::model::AgentStatus::Idle,
-                    status_since: lmux_core::model::now_secs(),
-                    seen: true,
-                    tmux_session: tmux_name,
-                };
-                state.blocking_write().add_agent(project, instance);
-                sessions.blocking_lock().insert(agent_id, session);
-            }
-        }
+        // 不自动创建启动目录项目；用户从左侧“添加项目”显式添加。
     }
     // 立即落盘当前可恢复会话，避免用户未点开 tab 就关闭导致元数据丢失。
     {
@@ -401,7 +353,6 @@ fn main() {
             KeyBinding::new("ctrl-k", app::TogglePalette, None),
             KeyBinding::new("ctrl-w", app::CloseTab, None),
             KeyBinding::new("ctrl-shift-t", app::NewShellTab, None),
-            KeyBinding::new("escape", app::ClosePalette, None),
         ]);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         let _ = cx.open_window(

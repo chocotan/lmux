@@ -31,12 +31,17 @@ impl AgentPreset {
         which(&self.program).is_some()
     }
 
+    /// Resolve the executable visible from a project, including project-local bins.
+    pub fn executable_in(&self, cwd: &Path) -> Option<PathBuf> {
+        if self.agent_type == AgentType::Shell {
+            return Some(PathBuf::from(&self.program));
+        }
+        project_binary(cwd, &self.program).or_else(|| which(&self.program))
+    }
+
     /// Check project-local binary directories before falling back to PATH.
     pub fn installed_in(&self, cwd: &Path) -> bool {
-        if self.agent_type == AgentType::Shell {
-            return true;
-        }
-        project_binary(cwd, &self.program).is_some() || which(&self.program).is_some()
+        self.executable_in(cwd).is_some()
     }
 }
 
@@ -118,6 +123,23 @@ pub fn builtin_presets(shell: impl Into<String>) -> Vec<AgentPreset> {
     ]
 }
 
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn project_binary(cwd: &Path, program: &str) -> Option<PathBuf> {
     let program = Path::new(program);
     if program.components().count() > 1 {
@@ -126,24 +148,24 @@ fn project_binary(cwd: &Path, program: &str) -> Option<PathBuf> {
         } else {
             cwd.join(program)
         };
-        return candidate.is_file().then_some(candidate);
+        return is_executable(&candidate).then_some(candidate);
     }
 
     ["node_modules/.bin", ".venv/bin", ".local/bin"]
         .into_iter()
         .map(|dir| cwd.join(dir).join(program))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
 }
 
 fn which(program: &str) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(program);
     if p.components().count() > 1 && p.is_file() {
-        return Some(p.to_path_buf());
+        return is_executable(p).then_some(p.to_path_buf());
     }
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())
+            .find(|candidate| is_executable(candidate))
     })
 }
 
@@ -185,6 +207,15 @@ mod tests {
             let bin_dir = project.join(dir);
             std::fs::create_dir_all(&bin_dir).unwrap();
             std::fs::write(bin_dir.join("qwen"), "").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    bin_dir.join("qwen"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
             assert!(preset.installed_in(&project), "local bin under {dir}");
         }
     }

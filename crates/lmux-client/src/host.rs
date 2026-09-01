@@ -1,7 +1,7 @@
 //! RemoteHost：一台远端 lmux 实例的连接管理（含 SSH 隧道与重连）
 use crate::fetch_snapshot;
 use lmux_core::model::Snapshot;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use tokio::sync::{mpsc, Mutex, Notify};
@@ -203,6 +203,7 @@ pub struct RemoteHost {
     endpoint: StdRwLock<Option<String>>,
     stopped: AtomicBool,
     retry: Notify,
+    latency_ms: AtomicU64,
 }
 
 impl RemoteHost {
@@ -214,6 +215,7 @@ impl RemoteHost {
             endpoint: StdRwLock::new(None),
             stopped: AtomicBool::new(false),
             retry: Notify::new(),
+            latency_ms: AtomicU64::new(0),
         })
     }
 
@@ -277,6 +279,22 @@ impl RemoteHost {
         self.retry.notify_waiters();
     }
 
+    pub fn reconnect(&self) {
+        self.retry.notify_one();
+    }
+
+    pub fn latency_ms(&self) -> Option<u64> {
+        let latency = self.latency_ms.load(Ordering::Relaxed);
+        (latency > 0).then_some(latency)
+    }
+
+    async fn wait_retry(&self, delay: std::time::Duration) {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {},
+            _ = self.retry.notified() => {},
+        }
+    }
+
     /// 连接循环（由调用方 spawn：tokio::spawn(host.run_loop()) 或 runtime.spawn）
     pub async fn run_loop(self: Arc<Self>) {
         let this = self;
@@ -331,7 +349,8 @@ impl RemoteHost {
                 Err(error) => {
                     this.set_state(RemoteState::Offline(error.to_string()), &this.events_tx)
                         .await;
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                    this.wait_retry(std::time::Duration::from_millis(backoff))
+                        .await;
                     backoff = (backoff * 2).min(30_000);
                     continue;
                 }
@@ -343,6 +362,7 @@ impl RemoteHost {
             .await;
             match crate::open(&socket).await {
                 Ok(mut conn) => {
+                    let started = std::time::Instant::now();
                     let hello = conn
                         .call(
                             lmux_core::protocol::methods::SYSTEM_HELLO,
@@ -390,13 +410,18 @@ impl RemoteHost {
                     {
                         this.set_state(RemoteState::Offline(e.to_string()), &this.events_tx)
                             .await;
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        this.wait_retry(std::time::Duration::from_millis(backoff))
+                            .await;
                         backoff = (backoff * 2).min(30_000);
                         continue;
                     }
                     // 拉全量快照
                     match fetch_snapshot(&mut conn).await {
                         Ok(snap) => {
+                            this.latency_ms.store(
+                                started.elapsed().as_millis().clamp(1, u64::MAX as u128) as u64,
+                                Ordering::Relaxed,
+                            );
                             this.set_state(RemoteState::Online(snap), &this.events_tx)
                                 .await;
                             backoff = this.cfg.retry_base_ms.max(200);
@@ -404,7 +429,8 @@ impl RemoteHost {
                         Err(e) => {
                             this.set_state(RemoteState::Offline(e.to_string()), &this.events_tx)
                                 .await;
-                            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                            this.wait_retry(std::time::Duration::from_millis(backoff))
+                                .await;
                             backoff = (backoff * 2).min(30_000);
                             continue;
                         }
@@ -480,7 +506,8 @@ impl RemoteHost {
                         .await;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+            this.wait_retry(std::time::Duration::from_millis(backoff))
+                .await;
             if this.stopped.load(Ordering::Acquire) {
                 break;
             }

@@ -1,10 +1,10 @@
 //! 终端视图：真彩色 cell renderer + 光标 + 低延迟 PTY 输入。
 //! 架构直接遵循 muxel：TermView 在 GPUI task 内 drain PTY 输出，chunk 到达即 process + notify。
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, Context, FocusHandle,
-    Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
-    MouseButton, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine,
-    Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, ClipboardItem, Context,
+    FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla,
+    InputHandler, MouseButton, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
+    ShapedLine, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use lmux_core::model::AgentId;
 use lmux_term::{PtySession, VTerm};
@@ -73,6 +73,7 @@ struct PaintRun {
     row: usize,
     cells: usize,
     bg: Hsla,
+    selected: bool,
 }
 
 struct TerminalPaintState {
@@ -229,6 +230,8 @@ pub struct TermView {
     cell_size: Arc<std::sync::Mutex<(f32, f32)>>,
     scroll_accum: Arc<std::sync::Mutex<f32>>,
     scrollbar_drag: Option<f32>,
+    selecting: bool,
+    mouse_press_pending: Option<u8>,
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
     _drain: Task<()>,
 }
@@ -293,6 +296,8 @@ impl TermView {
             cell_size: Arc::new(std::sync::Mutex::new((FALLBACK_CELL_W, FALLBACK_CELL_H))),
             scroll_accum: Arc::new(std::sync::Mutex::new(0.0)),
             scrollbar_drag: None,
+            selecting: false,
+            mouse_press_pending: None,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             _drain: drain,
         }
@@ -318,6 +323,8 @@ impl TermView {
             cell_size: Arc::new(std::sync::Mutex::new((FALLBACK_CELL_W, FALLBACK_CELL_H))),
             scroll_accum: Arc::new(std::sync::Mutex::new(0.0)),
             scrollbar_drag: None,
+            selecting: false,
+            mouse_press_pending: None,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             _drain: idle,
         }
@@ -328,6 +335,65 @@ impl TermView {
             .as_ref()
             .map(|session| InputSink::Local(Arc::clone(session)))
             .or_else(|| self.remote_input.clone().map(InputSink::Remote))
+    }
+
+    fn grid_point(&self, position: Point<Pixels>) -> Option<(i32, usize, bool)> {
+        let bounds = self.last_bounds.lock().ok().and_then(|bounds| *bounds)?;
+        let (cell_w, cell_h) = self
+            .cell_size
+            .lock()
+            .map(|size| *size)
+            .unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H));
+        let (cols, rows) = self.last_dims.lock().map(|dims| *dims).unwrap_or((2, 2));
+        let local = position - bounds.origin;
+        let col = (f32::from(local.x).max(0.0) / cell_w) as usize;
+        let visual_row = (f32::from(local.y).max(0.0) / cell_h) as usize;
+        let (_, offset) = self.vterm.scroll_metrics();
+        let row = visual_row.min(rows.saturating_sub(1) as usize) as i32 - offset as i32;
+        Some((
+            row,
+            col.min(cols.saturating_sub(1) as usize),
+            f32::from(local.x) >= cell_w * (col as f32 + 0.5),
+        ))
+    }
+
+    fn finish_mouse(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
+        let mut handled = false;
+        if let Some(button) = self.mouse_press_pending.take() {
+            if let (Some(sink), Some((line, col, _))) =
+                (self.input_sink(), self.grid_point(event.position))
+            {
+                let modes = self.vterm.modes();
+                sink.write(&mouse_report(
+                    button,
+                    col,
+                    line.max(0) as usize,
+                    modes.sgr_mouse,
+                    false,
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                    false,
+                ));
+                handled = true;
+            }
+        }
+        if event.button == MouseButton::Left && self.selecting {
+            self.selecting = false;
+            if let Some(text) = self
+                .vterm
+                .selection_to_string()
+                .filter(|text| !text.is_empty())
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            self.vterm.stop_selection();
+            handled = true;
+        }
+        if handled {
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     fn keystroke_bytes(ks: &gpui::Keystroke) -> Vec<u8> {
@@ -406,6 +472,7 @@ impl TermView {
             lines
         };
         if lines == 0 {
+            cx.stop_propagation();
             return;
         }
 
@@ -514,6 +581,49 @@ fn wheel_report(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn mouse_report(
+    button: u8,
+    col: usize,
+    row: usize,
+    sgr: bool,
+    pressed: bool,
+    shift: bool,
+    alt: bool,
+    control: bool,
+    motion: bool,
+) -> Vec<u8> {
+    let mut code = if motion {
+        32 + button
+    } else if pressed {
+        button
+    } else {
+        3
+    };
+    if shift {
+        code += 4;
+    }
+    if alt {
+        code += 8;
+    }
+    if control {
+        code += 16;
+    }
+    if sgr {
+        let suffix = if pressed { 'M' } else { 'm' };
+        format!("\x1b[<{code};{};{}{}", col + 1, row + 1, suffix).into_bytes()
+    } else {
+        vec![
+            0x1b,
+            b'[',
+            b'M',
+            if motion { code } else { 32 + code },
+            (33 + col.min(222)) as u8,
+            (33 + row.min(222)) as u8,
+        ]
+    }
+}
+
 impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.vterm.render_snapshot();
@@ -538,6 +648,20 @@ impl Render for TermView {
             .relative()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
+                if ev.keystroke.modifiers.control
+                    && ev.keystroke.modifiers.shift
+                    && ev.keystroke.key.as_str() == "c"
+                {
+                    if let Some(text) = this
+                        .vterm
+                        .selection_to_string()
+                        .filter(|text| !text.is_empty())
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if let Some(sink) = this.input_sink() {
                     let bytes = Self::keystroke_bytes(&ev.keystroke);
                     if !bytes.is_empty() {
@@ -553,7 +677,7 @@ impl Render for TermView {
             .cursor_text()
             .size_full()
             .overflow_hidden()
-            .bg(rgba(0xffffffff))
+            .bg(rgba(0xfaf9f6ff))
             .child(
                 canvas(
                     move |bounds, window, _cx| {
@@ -566,7 +690,7 @@ impl Render for TermView {
                             ),
                         };
 
-                        let family = "JetBrains Mono".into();
+                        let family = "Noto Sans Mono".into();
                         let base_font = Font {
                             family,
                             features: FontFeatures::disable_ligatures(),
@@ -674,6 +798,7 @@ impl Render for TermView {
                                     row,
                                     cells: run.cells,
                                     bg: rgba(run.style.bg).into(),
+                                    selected: run.style.selected,
                                 });
                             }
                         }
@@ -718,7 +843,12 @@ impl Render for TermView {
                                             + state.cell_width * run.start_col as f32,
                                         state.inner.origin.y + state.line_height * run.row as f32,
                                     );
-                                    if run.bg != rgba(0xffffffff).into() {
+                                    let bg = if run.selected {
+                                        rgba(0xbed2f0ff).into()
+                                    } else {
+                                        run.bg
+                                    };
+                                    if bg != rgba(0xffffffff).into() {
                                         window.paint_quad(fill(
                                             Bounds {
                                                 origin,
@@ -727,7 +857,7 @@ impl Render for TermView {
                                                     state.line_height,
                                                 ),
                                             },
-                                            run.bg,
+                                            bg,
                                         ));
                                     }
                                     let run_half = (run.shaped.ascent - run.shaped.descent) * 0.5;
@@ -760,11 +890,73 @@ impl Render for TermView {
                 div()
                     .absolute()
                     .size_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                            this.focus.focus(window, cx);
+                            let Some((line, col, right)) = this.grid_point(event.position) else {
+                                return;
+                            };
+                            let modes = this.vterm.modes();
+                            if modes.mouse && !event.modifiers.shift {
+                                if let Some(sink) = this.input_sink() {
+                                    sink.write(&mouse_report(
+                                        0,
+                                        col,
+                                        line.max(0) as usize,
+                                        modes.sgr_mouse,
+                                        true,
+                                        event.modifiers.shift,
+                                        event.modifiers.alt,
+                                        event.modifiers.control,
+                                        false,
+                                    ));
+                                    this.mouse_press_pending = Some(0);
+                                }
+                            } else {
+                                this.vterm.begin_selection(line, col, right);
+                                this.selecting = true;
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                         this.scroll_wheel(event, cx)
                     }))
                     .on_mouse_move(cx.listener(
                         |this, event: &gpui::MouseMoveEvent, _window, cx| {
+                            if this.selecting && event.pressed_button == Some(MouseButton::Left) {
+                                if let Some((line, col, right)) = this.grid_point(event.position) {
+                                    this.vterm.update_selection(line, col, right);
+                                    cx.notify();
+                                }
+                                cx.stop_propagation();
+                                return;
+                            }
+                            if let (Some(button), true) = (
+                                this.mouse_press_pending,
+                                this.vterm.mouse_motion_reporting(),
+                            ) {
+                                if event.pressed_button == Some(MouseButton::Left) {
+                                    if let (Some(sink), Some((line, col, _))) =
+                                        (this.input_sink(), this.grid_point(event.position))
+                                    {
+                                        let modes = this.vterm.modes();
+                                        sink.write(&mouse_report(
+                                            button,
+                                            col,
+                                            line.max(0) as usize,
+                                            modes.sgr_mouse,
+                                            true,
+                                            event.modifiers.shift,
+                                            event.modifiers.alt,
+                                            event.modifiers.control,
+                                            true,
+                                        ));
+                                        cx.stop_propagation();
+                                    }
+                                }
+                            }
                             let Some(grab_offset) = this.scrollbar_drag else {
                                 return;
                             };
@@ -781,7 +973,8 @@ impl Render for TermView {
                     ))
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|this, _event, _window, cx| {
+                        cx.listener(|this, event, _window, cx| {
+                            this.finish_mouse(event, cx);
                             if this.scrollbar_drag.take().is_some() {
                                 cx.stop_propagation();
                                 cx.notify();
@@ -790,7 +983,8 @@ impl Render for TermView {
                     )
                     .on_mouse_up_out(
                         MouseButton::Left,
-                        cx.listener(|this, _event, _window, cx| {
+                        cx.listener(|this, event, _window, cx| {
+                            this.finish_mouse(event, cx);
                             if this.scrollbar_drag.take().is_some() {
                                 cx.stop_propagation();
                                 cx.notify();
@@ -921,6 +1115,22 @@ mod tests {
 
         let immovable = scrollbar_geom(20.0, 10, 10, 7).unwrap();
         assert_eq!(scrollbar_drag_offset(immovable, 10.0, 10.0, 10, 7), 7);
+    }
+
+    #[test]
+    fn mouse_reports_encode_press_release_and_motion() {
+        assert_eq!(
+            mouse_report(0, 1, 2, true, true, false, false, false, false),
+            b"\x1b[<0;2;3M"
+        );
+        assert_eq!(
+            mouse_report(0, 1, 2, true, false, false, false, false, false),
+            b"\x1b[<3;2;3m"
+        );
+        assert_eq!(
+            mouse_report(0, 1, 2, false, true, false, false, false, true),
+            vec![0x1b, b'[', b'M', 32, 34, 35]
+        );
     }
 
     #[test]

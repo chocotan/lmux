@@ -41,6 +41,21 @@ trap cleanup EXIT
 export SHELL="${LMUX_TEST_SHELL:-/usr/bin/zsh}"
 export LMUX_TEST_AUTO_OPEN=1
 export XDG_DATA_HOME="$TMP/data"
+mkdir -p "$XDG_DATA_HOME/lmux"
+SMOKE_AGENT="shell_smoke"
+SMOKE_TMUX="lmux-smoke-shell"
+tmux -L lmux new-session -d -s "$SMOKE_TMUX" -c "$ROOT" "$SHELL"
+python3 - "$XDG_DATA_HOME/lmux/state.json" "$ROOT" "$SMOKE_AGENT" "$SMOKE_TMUX" <<'PY'
+import json, sys
+path, root, agent, tmux_session = sys.argv[1:]
+with open(path, "w") as f:
+    json.dump({
+        "version": 1,
+        "initialized": True,
+        "projects": [{"id": "p_smoke", "name": "lmux", "path": root, "branch": None, "agents": []}],
+        "sessions": [{"agent_id": agent, "project_id": "p_smoke", "agent_type": "shell", "title": "shell", "tmux_session": tmux_session}],
+    }, f)
+PY
 "$ROOT/target/debug/lmux" >"$TMP/lmux.log" 2>&1 &
 PID=$!
 for _ in {1..100}; do
@@ -199,8 +214,8 @@ assert len(d['pane_tree']['group']['tabs'])==1, d['pane_tree']
 s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.connect(os.environ['LMUX_SOCKET'])
 s.sendall(b'{"id":1,"method":"state.list"}\n');b=b''
 while b'\n' not in b:b+=s.recv(65536)
-assert len(json.loads(b.decode())['result']['agents'])==2
-print('✓ tab close removed the tab without killing its session')
+assert len(json.loads(b.decode())['result']['agents'])==1
+print('✓ tab close terminated and removed its session')
 PY
 import -window "$WID" "$ARTIFACTS/05-tab-closed.png"
 
@@ -239,8 +254,8 @@ assert d['pane_tree']['kind']=='leaf', d['pane_tree']
 s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.connect(os.environ['LMUX_SOCKET'])
 s.sendall(b'{"id":1,"method":"state.list"}\n');b=b''
 while b'\n' not in b:b+=s.recv(65536)
-assert len(json.loads(b.decode())['result']['agents'])==4
-print('✓ close split collapsed layout without killing its shell session')
+assert len(json.loads(b.decode())['result']['agents'])==1
+print('✓ close split terminated its shell session')
 PY
 import -window "$WID" "$ARTIFACTS/08-split-closed.png"
 

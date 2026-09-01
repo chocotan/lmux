@@ -1,7 +1,8 @@
 //! VTerm：alacritty_terminal 真彩色网格（本地/镜像共用）
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
@@ -45,6 +46,7 @@ pub struct RenderStyle {
     pub italic: bool,
     pub underline: bool,
     pub dim: bool,
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +189,64 @@ impl VTerm {
         }
         guard.cached = Some(snap.clone());
         snap
+    }
+
+    pub fn begin_selection(&self, line: i32, col: usize, right: bool) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.term.selection = Some(Selection::new(
+                SelectionType::Simple,
+                Point::new(Line(line), Column(col)),
+                if right { Side::Right } else { Side::Left },
+            ));
+            guard.cached = None;
+            guard.damage = ContentDamage::Full;
+        }
+    }
+
+    pub fn update_selection(&self, line: i32, col: usize, right: bool) {
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some(selection) = guard.term.selection.as_mut() {
+                selection.update(
+                    Point::new(Line(line), Column(col)),
+                    if right { Side::Right } else { Side::Left },
+                );
+                guard.cached = None;
+                guard.damage = ContentDamage::Full;
+            }
+        }
+    }
+
+    pub fn stop_selection(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            if guard.term.selection.is_some() {
+                guard.term.selection = None;
+                guard.cached = None;
+                guard.damage = ContentDamage::Full;
+            }
+        }
+    }
+
+    pub fn selection_to_string(&self) -> Option<String> {
+        self.inner.lock().ok()?.term.selection_to_string()
+    }
+
+    pub fn selection_active(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|guard| guard.term.selection.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn mouse_motion_reporting(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|guard| {
+                guard
+                    .term
+                    .mode()
+                    .intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG)
+            })
+            .unwrap_or(false)
     }
 
     pub fn modes(&self) -> VTermModes {
@@ -340,6 +400,13 @@ fn build_row(term: &Term<VoidListener>, visual: usize) -> RenderRow {
             italic: cell.flags.contains(Flags::ITALIC),
             underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
             dim: cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD),
+            selected: term
+                .selection
+                .as_ref()
+                .and_then(|selection| selection.to_range(term))
+                .is_some_and(|selection| {
+                    selection.contains(Point::new(Line(buffer_line), Column(col)))
+                }),
         };
         let ch = if cell.flags.contains(Flags::HIDDEN) {
             ' '

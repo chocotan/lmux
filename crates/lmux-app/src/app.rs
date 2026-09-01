@@ -12,31 +12,19 @@ use lmux_term::VTerm;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-gpui::actions!(lmux, [TogglePalette, ClosePalette, CloseTab, NewShellTab]);
+gpui::actions!(lmux, [TogglePalette, CloseTab, NewShellTab]);
 
-// ── 主题（prototype.html 的亮色板）──
-const BG0: u32 = 0xf6f5f1ff;
-const BG1: u32 = 0xefede7ff;
-const BG2: u32 = 0xe4e2daff;
-const LINE: u32 = 0xcfccc0ff;
-const FG0: u32 = 0x2a2e38ff;
-const FG1: u32 = 0x565c6bff;
+// ── 主题（Zed 极简纯正调色板）──
+const BG0: u32 = 0xfaf9f6ff;
+const BG1: u32 = 0xece8e1ff;
+const BG2: u32 = 0xdbd7cfff;
+const LINE: u32 = 0xd0ccc3ff;
+const FG0: u32 = 0x242831ff;
+const FG1: u32 = 0x727783ff;
 const ACCENT: u32 = 0x3d6cd8ff;
-const GREEN: u32 = 0x5c9e3aff;
-const YELLOW: u32 = 0xc08a2dff;
-const RED: u32 = 0xd64557ff;
-const CYAN: u32 = 0x2a92b0ff;
-
-fn status_color(status: &lmux_core::model::AgentStatus) -> u32 {
-    use lmux_core::model::AgentStatus::*;
-    match status {
-        Working => YELLOW,
-        Blocked => RED,
-        Done => CYAN,
-        Idle => GREEN,
-    }
-}
-
+const GREEN: u32 = 0x529633ff;
+const YELLOW: u32 = 0xb88226ff;
+const RED: u32 = 0xd13e50ff;
 #[derive(Clone)]
 struct DragTab {
     agent: AgentId,
@@ -84,15 +72,6 @@ struct SplitDrag {
     axis: SplitAxis,
     start: Point<Pixels>,
     sizes: Vec<f32>,
-}
-
-fn status_marker(status: &lmux_core::model::AgentStatus, frame: usize) -> String {
-    if *status == lmux_core::model::AgentStatus::Working {
-        const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-        FRAMES[frame % FRAMES.len()].to_string()
-    } else {
-        "●".into()
-    }
 }
 
 fn shell_split_launch_cfg(
@@ -272,10 +251,8 @@ struct BootstrapConfirm {
 #[derive(Clone)]
 pub struct Notification {
     pub agent: AgentId,
-    pub from: lmux_core::model::AgentStatus,
     pub to: lmux_core::model::AgentStatus,
     pub message: Option<String>,
-    pub time: String,
     pub unread: bool,
 }
 
@@ -375,6 +352,12 @@ impl LmuxApp {
                     username: username.clone(),
                     identity_file: identity_file.clone(),
                 },
+                lmux_store::PersistedRemoteAuth::Password { username } => {
+                    lmux_client::SshAuth::Password {
+                        username: username.clone(),
+                        password: String::new(),
+                    }
+                }
             };
             let remote = lmux_client::RemoteHost::new(
                 lmux_client::HostCfg {
@@ -549,10 +532,10 @@ impl LmuxApp {
         for p in &mut projects {
             p.agents.clear();
         }
-        let remote_configs = self
+        let remote_configs: Vec<lmux_store::PersistedRemote> = self
             .remotes
             .iter()
-            .filter_map(|host| {
+            .map(|host| {
                 let target = match &host.cfg.target {
                     lmux_client::Target::Socket(path) => path.clone(),
                     lmux_client::Target::Ssh { host, socket } if socket.is_empty() => host.clone(),
@@ -567,17 +550,23 @@ impl LmuxApp {
                         username: username.clone(),
                         identity_file: identity_file.clone(),
                     },
-                    // 密码永不持久化；重启后用户需要重新添加该连接。
-                    lmux_client::SshAuth::Password { .. } => return None,
+                    lmux_client::SshAuth::Password { username, .. } => {
+                        lmux_store::PersistedRemoteAuth::Password {
+                            username: username.clone(),
+                        }
+                    }
                 };
-                Some(lmux_store::PersistedRemote { target, auth })
+                lmux_store::PersistedRemote { target, auth }
             })
             .collect();
         let app = lmux_store::PersistedApp {
             version: lmux_store::STORE_VERSION,
             initialized: true,
             projects,
-            remotes: vec![],
+            remotes: remote_configs
+                .iter()
+                .map(|remote| remote.target.clone())
+                .collect(),
             remote_configs,
             sessions: self
                 .last_snapshot
@@ -633,10 +622,8 @@ impl LmuxApp {
             0,
             Notification {
                 agent,
-                from,
                 to,
                 message: Some(body.clone()),
-                time: now_hhmm(),
                 unread: true,
             },
         );
@@ -821,21 +808,23 @@ impl LmuxApp {
         }
     }
 
-    fn close_tab(&mut self, pane: &PaneId, agent: &AgentId, cx: &mut Context<Self>) {
-        if !self.pane_tree.close_tab(pane, agent) {
-            return;
+    fn close_tab(
+        &mut self,
+        _pane: &PaneId,
+        agent: &AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let remote = self.remote_snaps.values().any(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .any(|candidate| &candidate.id == agent)
+        });
+        self.delete_session(agent, remote, cx);
+        if let Some(active) = self.active.clone() {
+            self.focus_agent(&active, window, cx);
         }
-        if self.pane_tree.pane_for_agent(agent).is_none() {
-            self.terms.remove(agent);
-            if let Some(cancelled) = self.mirror_cancel.remove(agent) {
-                cancelled.store(true, std::sync::atomic::Ordering::Release);
-            }
-        }
-        if &self.active_pane == pane {
-            self.active = self.pane_tree.group(pane).and_then(|g| g.active.clone());
-        }
-        self.persist();
-        cx.notify();
     }
 
     fn move_dragged_tab(
@@ -892,7 +881,12 @@ impl LmuxApp {
             program_override: if preset.agent_type == lmux_core::model::AgentType::Shell {
                 None
             } else {
-                Some(preset.program.clone())
+                Some(
+                    preset
+                        .executable_in(&project.path)
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| preset.program.clone()),
+                )
             },
             args: preset.args.clone(),
             cols: 120,
@@ -1240,6 +1234,12 @@ impl LmuxApp {
                         });
                     }
                 }
+                if let Some(snapshot) = self.remote_snaps.get_mut(&host_name) {
+                    snapshot.agents.retain(|candidate| &candidate.id != agent);
+                    for project in &mut snapshot.projects {
+                        project.agents.retain(|candidate| candidate != agent);
+                    }
+                }
             }
         } else {
             let session = self.server.sessions.blocking_lock().remove(agent);
@@ -1513,9 +1513,10 @@ impl LmuxApp {
             .left(menu.position.x)
             .top(menu.position.y)
             .w(px(180.))
-            .bg(rgba(0xffffffff))
+            .bg(rgba(BG1))
             .border_1()
             .border_color(rgba(LINE))
+            .rounded_md()
             .shadow_lg()
             .child(
                 div()
@@ -1524,7 +1525,7 @@ impl LmuxApp {
                     .py_2()
                     .text_size(px(12.))
                     .text_color(rgba(RED))
-                    .hover(|s| s.bg(rgba(0xffeeeeff)))
+                    .hover(|s| s.bg(rgba(BG2)))
                     .on_click(cx.listener({
                         let id = menu.agent.clone();
                         let remote = menu.remote;
@@ -1542,6 +1543,7 @@ impl LmuxApp {
                     .px_3()
                     .py_2()
                     .text_size(px(11.))
+                    .text_color(rgba(FG1))
                     .hover(|s| s.bg(rgba(BG2)))
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         this.session_menu = None;
@@ -1577,9 +1579,10 @@ impl LmuxApp {
             .left(menu.position.x)
             .top(menu.position.y)
             .w(px(190.))
-            .bg(rgba(0xffffffff))
+            .bg(rgba(BG1))
             .border_1()
             .border_color(rgba(LINE))
+            .rounded_md()
             .shadow_lg()
             .child(
                 div()
@@ -1588,7 +1591,7 @@ impl LmuxApp {
                     .py_2()
                     .text_size(px(12.))
                     .text_color(rgba(RED))
-                    .hover(|style| style.bg(rgba(0xffeeeeff)))
+                    .hover(|style| style.bg(rgba(BG2)))
                     .on_click(cx.listener({
                         let target = menu.target.clone();
                         move |this, _event, _window, cx| this.begin_delete(target.clone(), cx)
@@ -1601,6 +1604,7 @@ impl LmuxApp {
                     .px_3()
                     .py_2()
                     .text_size(px(11.))
+                    .text_color(rgba(FG1))
                     .hover(|style| style.bg(rgba(BG2)))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.tree_menu = None;
@@ -1639,13 +1643,14 @@ impl LmuxApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x00000044))
+            .bg(rgba(0x00000033))
             .child(
                 div()
                     .w(px(460.))
-                    .bg(rgba(0xffffffff))
+                    .bg(rgba(BG1))
                     .border_1()
                     .border_color(rgba(LINE))
+                    .rounded_md()
                     .shadow_lg()
                     .child(
                         div()
@@ -1654,6 +1659,7 @@ impl LmuxApp {
                             .border_b_1()
                             .border_color(rgba(LINE))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(FG0))
                             .child(title),
                     )
                     .child(
@@ -1661,6 +1667,7 @@ impl LmuxApp {
                             .px_4()
                             .pt_3()
                             .text_size(px(12.))
+                            .text_color(rgba(FG1))
                             .child(format!("{} · {}", label, destructive_copy)),
                     )
                     .when_some(self.delete_error.clone(), |dialog, error| {
@@ -1685,6 +1692,8 @@ impl LmuxApp {
                                     .id("delete-confirm-cancel")
                                     .px_3()
                                     .py_1()
+                                    .rounded_sm()
+                                    .text_color(rgba(FG0))
                                     .hover(|style| style.bg(rgba(BG2)))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.delete_confirm = None;
@@ -1698,6 +1707,7 @@ impl LmuxApp {
                                     .id("delete-confirm-submit")
                                     .px_3()
                                     .py_1()
+                                    .rounded_sm()
                                     .bg(rgba(RED))
                                     .text_color(rgba(0xffffffff))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
@@ -1776,32 +1786,43 @@ impl LmuxApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x00000044))
+            .bg(rgba(0x00000033))
             .child(
                 div()
                     .w(px(480.))
-                    .bg(rgba(0xffffffff))
+                    .bg(rgba(BG1))
                     .border_1()
                     .border_color(rgba(LINE))
+                    .rounded_md()
                     .shadow_lg()
                     .child(
                         div()
                             .px_4()
                             .py_3()
+                            .border_b_1()
+                            .border_color(rgba(LINE))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(FG0))
                             .child(format!("{}远端 lmux", action)),
                     )
-                    .child(div().px_4().text_size(px(12.)).child(format!(
-                        "SSH 已连接到 {}。将使用当前认证方式{} headless 进程。",
-                        confirm.host,
-                        if confirm.upgrade {
-                            "上传新版本并重启"
-                        } else if confirm.install {
-                            "上传当前 lmux 并启动"
-                        } else {
-                            "启动"
-                        }
-                    )))
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_3()
+                            .text_size(px(12.))
+                            .text_color(rgba(FG1))
+                            .child(format!(
+                                "SSH 已连接到 {}。将使用当前认证方式{} headless 进程。",
+                                confirm.host,
+                                if confirm.upgrade {
+                                    "上传新版本并重启"
+                                } else if confirm.install {
+                                    "上传当前 lmux 并启动"
+                                } else {
+                                    "启动"
+                                }
+                            )),
+                    )
                     .when_some(self.bootstrap_error.clone(), |dialog, error| {
                         dialog.child(
                             div()
@@ -1824,6 +1845,8 @@ impl LmuxApp {
                                     .id("bootstrap-cancel")
                                     .px_3()
                                     .py_1()
+                                    .rounded_sm()
+                                    .text_color(rgba(FG0))
                                     .hover(|style| style.bg(rgba(BG2)))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.bootstrap_confirm = None;
@@ -1837,6 +1860,7 @@ impl LmuxApp {
                                     .id("bootstrap-submit")
                                     .px_3()
                                     .py_1()
+                                    .rounded_sm()
                                     .bg(rgba(ACCENT))
                                     .text_color(rgba(0xffffffff))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
@@ -1857,147 +1881,179 @@ impl LmuxApp {
         let auth_mode = self.connect_auth_mode;
         let error = self.dialog_error.clone();
         div()
+            .id("connect-dialog-backdrop")
             .absolute()
-            .occlude()
-            .top(px(180.))
-            .left(px(520.))
-            .w(px(520.))
-            .bg(rgba(0xffffffff))
-            .border_1()
-            .border_color(rgba(LINE))
-            .shadow_lg()
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                if matches!(ev.keystroke.key.as_str(), "enter" | "escape" | "tab") {
-                    this.handle_connect_key(&ev.keystroke, window, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(rgba(LINE))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("连接远程机器"),
+            .size_full()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(90.))
+            .bg(rgba(0x00000033))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.connect_dialog = false;
+                    this.dialog_error = None;
+                    cx.notify();
+                }),
             )
             .child(
                 div()
-                    .px_4()
-                    .pt_3()
-                    .text_size(px(11.))
-                    .text_color(rgba(FG1))
-                    .child("输入 SSH Host 或 ~/.ssh/config 别名；socket 自动发现"),
-            )
-            .child(div().mx_4().mt_3().child(input))
-            .child(
-                div()
-                    .mx_4()
-                    .mt_2()
-                    .flex()
+                    .occlude()
+                    .w(px(480.))
+                    .bg(rgba(BG1))
                     .border_1()
                     .border_color(rgba(LINE))
+                    .rounded_md()
+                    .shadow_lg()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(ev.keystroke.key.as_str(), "enter" | "escape" | "tab") {
+                            this.handle_connect_key(&ev.keystroke, window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
                     .child(
                         div()
-                            .id("auth-config")
-                            .flex_1()
-                            .px_2()
-                            .py_1()
-                            .text_size(px(11.))
-                            .when(auth_mode == ConnectAuthMode::SshConfig, |item| {
-                                item.bg(rgba(ACCENT)).text_color(rgba(0xffffffff))
-                            })
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.connect_auth_mode = ConnectAuthMode::SshConfig;
-                                cx.notify();
-                            }))
-                            .child("SSH 配置"),
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgba(LINE))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(FG0))
+                            .child("连接远程机器"),
                     )
                     .child(
                         div()
-                            .id("auth-key")
-                            .flex_1()
-                            .px_2()
-                            .py_1()
+                            .px_4()
+                            .pt_3()
                             .text_size(px(11.))
-                            .when(auth_mode == ConnectAuthMode::PublicKey, |item| {
-                                item.bg(rgba(ACCENT)).text_color(rgba(0xffffffff))
-                            })
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.connect_auth_mode = ConnectAuthMode::PublicKey;
-                                cx.notify();
-                            }))
-                            .child("SSH 公钥"),
+                            .text_color(rgba(FG1))
+                            .child("输入 SSH Host 或 ~/.ssh/config 别名；socket 自动发现"),
                     )
+                    .child(div().mx_4().mt_3().child(input))
                     .child(
                         div()
-                            .id("auth-password")
-                            .flex_1()
-                            .px_2()
-                            .py_1()
-                            .text_size(px(11.))
-                            .when(auth_mode == ConnectAuthMode::Password, |item| {
-                                item.bg(rgba(ACCENT)).text_color(rgba(0xffffffff))
-                            })
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.connect_auth_mode = ConnectAuthMode::Password;
-                                cx.notify();
-                            }))
-                            .child("用户名密码"),
-                    ),
-            )
-            .when(auth_mode == ConnectAuthMode::PublicKey, |dialog| {
-                dialog
-                    .child(div().mx_4().mt_2().child(username.clone()))
-                    .child(div().mx_4().mt_2().child(key_path))
-            })
-            .when(auth_mode == ConnectAuthMode::Password, |dialog| {
-                dialog
-                    .child(div().mx_4().mt_2().child(username))
-                    .child(div().mx_4().mt_2().child(password))
-            })
-            .when_some(error, |dialog, error| {
-                dialog.child(
-                    div()
-                        .mx_4()
-                        .mt_2()
-                        .text_size(px(11.))
-                        .text_color(rgba(RED))
-                        .child(error),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .child(
-                        div()
-                            .id("connect-cancel")
-                            .px_3()
-                            .py_1()
-                            .hover(|s| s.bg(rgba(BG2)))
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.connect_dialog = false;
-                                this.dialog_error = None;
-                                cx.notify();
-                            }))
-                            .child("取消"),
+                            .mx_4()
+                            .mt_2()
+                            .flex()
+                            .border_1()
+                            .border_color(rgba(LINE))
+                            .rounded_sm()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id("auth-config")
+                                    .flex_1()
+                                    .px_2()
+                                    .py_1()
+                                    .text_size(px(11.))
+                                    .text_color(rgba(FG1))
+                                    .when(auth_mode == ConnectAuthMode::SshConfig, |item| {
+                                        item.bg(rgba(ACCENT)).text_color(rgba(0xffffffff))
+                                    })
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.connect_auth_mode = ConnectAuthMode::SshConfig;
+                                        cx.notify();
+                                    }))
+                                    .child("SSH 配置"),
+                            )
+                            .child(
+                                div()
+                                    .id("auth-key")
+                                    .flex_1()
+                                    .px_2()
+                                    .py_1()
+                                    .text_size(px(11.))
+                                    .text_color(rgba(FG1))
+                                    .when(auth_mode == ConnectAuthMode::PublicKey, |item| {
+                                        item.bg(rgba(ACCENT)).text_color(rgba(0xffffffff))
+                                    })
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.connect_auth_mode = ConnectAuthMode::PublicKey;
+                                        cx.notify();
+                                    }))
+                                    .child("SSH 公钥"),
+                            )
+                            .child(
+                                div()
+                                    .id("auth-password")
+                                    .flex_1()
+                                    .px_2()
+                                    .py_1()
+                                    .text_size(px(11.))
+                                    .text_color(rgba(FG1))
+                                    .when(auth_mode == ConnectAuthMode::Password, |item| {
+                                        item.bg(rgba(ACCENT)).text_color(rgba(0xffffffff))
+                                    })
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.connect_auth_mode = ConnectAuthMode::Password;
+                                        cx.notify();
+                                    }))
+                                    .child("用户名密码"),
+                            ),
                     )
+                    .when(auth_mode == ConnectAuthMode::PublicKey, |dialog| {
+                        dialog
+                            .child(div().mx_4().mt_2().child(username.clone()))
+                            .child(div().mx_4().mt_2().child(key_path))
+                    })
+                    .when(auth_mode == ConnectAuthMode::Password, |dialog| {
+                        dialog
+                            .child(div().mx_4().mt_2().child(username))
+                            .child(div().mx_4().mt_2().child(password))
+                    })
+                    .when_some(error, |dialog, error| {
+                        dialog.child(
+                            div()
+                                .mx_4()
+                                .mt_2()
+                                .text_size(px(11.))
+                                .text_color(rgba(RED))
+                                .child(error),
+                        )
+                    })
                     .child(
                         div()
-                            .id("connect-submit")
-                            .px_3()
-                            .py_1()
-                            .bg(rgba(ACCENT))
-                            .text_color(rgba(0xffffffff))
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                let target = this.connect_input.read(cx).text();
-                                this.add_remote_target(target, cx);
-                            }))
-                            .child("连接"),
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .px_4()
+                            .py_3()
+                            .child(
+                                div()
+                                    .id("connect-cancel")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_color(rgba(FG0))
+                                    .hover(|s| s.bg(rgba(BG2)))
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        this.connect_dialog = false;
+                                        this.dialog_error = None;
+                                        cx.notify();
+                                    }))
+                                    .child("取消"),
+                            )
+                            .child(
+                                div()
+                                    .id("connect-submit")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(rgba(ACCENT))
+                                    .text_color(rgba(0xffffffff))
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        let target = this.connect_input.read(cx).text();
+                                        this.add_remote_target(target, cx);
+                                    }))
+                                    .child("连接"),
+                            ),
                     ),
             )
             .into_any_element()
@@ -2098,93 +2154,124 @@ impl LmuxApp {
         };
         let input = self.remote_project_input.clone();
         div()
+            .id("remote-project-backdrop")
             .absolute()
-            .occlude()
-            .top(px(180.))
-            .left(px(520.))
-            .w(px(520.))
-            .bg(rgba(0xffffffff))
-            .border_1()
-            .border_color(rgba(LINE))
-            .shadow_lg()
-            .on_key_down(
-                cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
-                    match event.keystroke.key.as_str() {
-                        "escape" => {
-                            this.remote_project_dialog = None;
-                            this.dialog_error = None;
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                        "enter" => {
-                            if let Some(host) = this.remote_project_dialog.clone() {
-                                let path = this.remote_project_input.read(cx).text();
-                                this.submit_remote_project(host, path, cx);
-                            }
-                            cx.stop_propagation();
-                        }
-                        _ => {}
-                    }
+            .size_full()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(90.))
+            .bg(rgba(0x00000033))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    this.remote_project_dialog = None;
+                    this.dialog_error = None;
+                    cx.notify();
                 }),
             )
             .child(
                 div()
-                    .px_4()
-                    .py_3()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(format!("在 {host} 添加项目")),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .text_size(px(11.))
-                    .text_color(rgba(FG1))
-                    .child("输入远端已存在的目录；不会上传或删除项目文件"),
-            )
-            .child(div().mx_4().mt_3().child(input))
-            .when_some(self.dialog_error.clone(), |dialog, error| {
-                dialog.child(
-                    div()
-                        .mx_4()
-                        .mt_2()
-                        .text_size(px(11.))
-                        .text_color(rgba(RED))
-                        .child(error),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .child(
-                        div()
-                            .id("remote-project-cancel")
-                            .px_3()
-                            .py_1()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.remote_project_dialog = None;
-                                this.dialog_error = None;
-                                cx.notify();
-                            }))
-                            .child("取消"),
+                    .occlude()
+                    .w(px(480.))
+                    .bg(rgba(BG1))
+                    .border_1()
+                    .border_color(rgba(LINE))
+                    .rounded_md()
+                    .shadow_lg()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_key_down(
+                        cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
+                            match event.keystroke.key.as_str() {
+                                "escape" => {
+                                    this.remote_project_dialog = None;
+                                    this.dialog_error = None;
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                                "enter" => {
+                                    if let Some(host) = this.remote_project_dialog.clone() {
+                                        let path = this.remote_project_input.read(cx).text();
+                                        this.submit_remote_project(host, path, cx);
+                                    }
+                                    cx.stop_propagation();
+                                }
+                                _ => {}
+                            }
+                        }),
                     )
                     .child(
                         div()
-                            .id("remote-project-submit")
-                            .px_3()
-                            .py_1()
-                            .bg(rgba(ACCENT))
-                            .text_color(rgba(0xffffffff))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                if let Some(host) = this.remote_project_dialog.clone() {
-                                    let path = this.remote_project_input.read(cx).text();
-                                    this.submit_remote_project(host, path, cx);
-                                }
-                            }))
-                            .child("添加"),
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgba(LINE))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(FG0))
+                            .child(format!("在 {host} 添加项目")),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_3()
+                            .text_size(px(11.))
+                            .text_color(rgba(FG1))
+                            .child("输入远端已存在的目录；不会上传或删除项目文件"),
+                    )
+                    .child(div().mx_4().mt_3().child(input))
+                    .when_some(self.dialog_error.clone(), |dialog, error| {
+                        dialog.child(
+                            div()
+                                .mx_4()
+                                .mt_2()
+                                .text_size(px(11.))
+                                .text_color(rgba(RED))
+                                .child(error),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .px_4()
+                            .py_3()
+                            .child(
+                                div()
+                                    .id("remote-project-cancel")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_color(rgba(FG0))
+                                    .hover(|s| s.bg(rgba(BG2)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.remote_project_dialog = None;
+                                        this.dialog_error = None;
+                                        cx.notify();
+                                    }))
+                                    .child("取消"),
+                            )
+                            .child(
+                                div()
+                                    .id("remote-project-submit")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(rgba(ACCENT))
+                                    .text_color(rgba(0xffffffff))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        if let Some(host) = this.remote_project_dialog.clone() {
+                                            let path = this.remote_project_input.read(cx).text();
+                                            this.submit_remote_project(host, path, cx);
+                                        }
+                                    }))
+                                    .child("添加"),
+                            ),
                     ),
             )
             .into_any_element()
@@ -2194,84 +2281,131 @@ impl LmuxApp {
         let input = self.project_input.clone();
         let error = self.dialog_error.clone();
         div()
+            .id("project-dialog-backdrop")
             .absolute()
-            .occlude()
-            .top(px(180.))
-            .left(px(520.))
-            .w(px(520.))
-            .bg(rgba(0xffffffff))
-            .border_1()
-            .border_color(rgba(LINE))
-            .shadow_lg()
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
-                if matches!(ev.keystroke.key.as_str(), "enter" | "escape") {
-                    this.handle_project_key(&ev.keystroke, cx);
-                    cx.stop_propagation();
-                }
-            }))
+            .size_full()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(90.))
+            .bg(rgba(0x00000033))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.project_dialog = false;
+                    this.dialog_error = None;
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
+                    .occlude()
+                    .w(px(480.))
+                    .bg(rgba(BG1))
+                    .border_1()
                     .border_color(rgba(LINE))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("添加本地项目"),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .pt_3()
-                    .text_size(px(11.))
-                    .text_color(rgba(FG1))
-                    .child("输入已有项目目录；远程项目由连接机器后自动发现"),
-            )
-            .child(div().mx_4().mt_3().child(input))
-            .when_some(error, |dialog, error| {
-                dialog.child(
-                    div()
-                        .mx_4()
-                        .mt_2()
-                        .text_size(px(11.))
-                        .text_color(rgba(RED))
-                        .child(error),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
+                    .rounded_md()
+                    .shadow_lg()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
+                        if matches!(ev.keystroke.key.as_str(), "enter" | "escape") {
+                            this.handle_project_key(&ev.keystroke, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
                     .child(
                         div()
-                            .id("project-cancel")
-                            .px_3()
-                            .py_1()
-                            .hover(|s| s.bg(rgba(BG2)))
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.project_dialog = false;
-                                this.dialog_error = None;
-                                cx.notify();
-                            }))
-                            .child("取消"),
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgba(LINE))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(FG0))
+                            .child("添加本地项目"),
                     )
                     .child(
                         div()
-                            .id("project-submit")
-                            .px_3()
-                            .py_1()
-                            .bg(rgba(ACCENT))
-                            .text_color(rgba(0xffffffff))
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                let path = this.project_input.read(cx).text();
-                                this.add_local_project(path, cx);
-                            }))
-                            .child("添加"),
+                            .px_4()
+                            .pt_3()
+                            .text_size(px(11.))
+                            .text_color(rgba(FG1))
+                            .child("输入已有项目目录；远程项目由连接机器后自动发现"),
+                    )
+                    .child(div().mx_4().mt_3().child(input))
+                    .when_some(error, |dialog, error| {
+                        dialog.child(
+                            div()
+                                .mx_4()
+                                .mt_2()
+                                .text_size(px(11.))
+                                .text_color(rgba(RED))
+                                .child(error),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .px_4()
+                            .py_3()
+                            .child(
+                                div()
+                                    .id("project-cancel")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_color(rgba(FG0))
+                                    .hover(|s| s.bg(rgba(BG2)))
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        this.project_dialog = false;
+                                        this.dialog_error = None;
+                                        cx.notify();
+                                    }))
+                                    .child("取消"),
+                            )
+                            .child(
+                                div()
+                                    .id("project-submit")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(rgba(ACCENT))
+                                    .text_color(rgba(0xffffffff))
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        let path = this.project_input.read(cx).text();
+                                        this.add_local_project(path, cx);
+                                    }))
+                                    .child("添加"),
+                            ),
                     ),
             )
             .into_any_element()
+    }
+
+    fn palette_project_path(&self) -> Option<std::path::PathBuf> {
+        self.new_session_project
+            .as_ref()
+            .and_then(|id| self.last_snapshot.project(id))
+            .map(|project| project.path.clone())
+            .or_else(|| {
+                self.active
+                    .as_ref()
+                    .and_then(|id| self.last_snapshot.agent(id))
+                    .and_then(|agent| self.last_snapshot.project(&agent.project))
+                    .map(|project| project.path.clone())
+            })
+            .or_else(|| {
+                self.last_snapshot
+                    .projects
+                    .first()
+                    .map(|project| project.path.clone())
+            })
     }
 
     fn handle_palette_key(
@@ -2280,10 +2414,15 @@ impl LmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let project_path = self.palette_project_path();
         let available: Vec<lmux_core::AgentPreset> = self
             .presets
             .iter()
-            .filter(|p| p.installed())
+            .filter(|p| {
+                project_path
+                    .as_deref()
+                    .map_or_else(|| p.installed(), |path| p.installed_in(path))
+            })
             .cloned()
             .collect();
         match ks.key.as_str() {
@@ -2301,7 +2440,7 @@ impl LmuxApp {
             }
             "x" => {
                 let pane = self.active_pane.clone();
-                self.close_split_pane(&pane, cx);
+                self.close_split_pane(&pane, window, cx);
                 self.palette_open = false;
                 return;
             }
@@ -2323,7 +2462,12 @@ impl LmuxApp {
                     return;
                 }
             }
-            "escape" => self.palette_open = false,
+            "escape" => {
+                self.palette_open = false;
+                if let Some(active) = self.active.clone() {
+                    self.focus_agent(&active, window, cx);
+                }
+            }
             _ => {}
         }
         cx.notify();
@@ -2332,30 +2476,43 @@ impl LmuxApp {
     fn render_palette(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut panel = div()
             .absolute()
-            .top(px(70.))
-            .left(px(480.))
-            .w(px(520.))
-            .max_h(px(560.))
+            .top(px(56.))
+            .left(px(360.))
+            .occlude()
+            .w(px(480.))
+            .max_h(px(520.))
             .overflow_hidden()
-            .bg(rgba(0xffffffff))
+            .bg(rgba(BG1))
             .border_1()
             .border_color(rgba(LINE))
             .shadow_lg()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .px_4()
                     .py_3()
                     .border_b_1()
                     .border_color(rgba(LINE))
-                    .text_size(px(13.))
-                    .text_color(rgba(0x8b90a0ff))
+                    .text_size(px(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgba(FG1))
                     .child("输入命令…  Ctrl K / Esc"),
             );
+        let project_path = self.palette_project_path();
         for (index, preset) in self
             .presets
             .clone()
             .into_iter()
-            .filter(|p| p.installed())
+            .filter(|p| {
+                project_path
+                    .as_deref()
+                    .map_or_else(|| p.installed(), |path| p.installed_in(path))
+            })
             .enumerate()
         {
             let preset_for_click = preset.clone();
@@ -2371,6 +2528,7 @@ impl LmuxApp {
                     .px_4()
                     .py_2()
                     .text_size(px(12.))
+                    .text_color(rgba(FG0))
                     .when(index == self.palette_index, |el| el.bg(rgba(BG2)))
                     .hover(|s| s.bg(rgba(BG2)))
                     .on_click(cx.listener(move |this, _ev, window, cx| {
@@ -2381,7 +2539,7 @@ impl LmuxApp {
                         div()
                             .ml_auto()
                             .text_size(px(10.))
-                            .text_color(rgba(0x8b90a0ff))
+                            .text_color(rgba(FG1))
                             .child(preset_program),
                     ),
             );
@@ -2390,11 +2548,11 @@ impl LmuxApp {
         for (id, label, axis) in [
             (
                 "cmd-split-h",
-                "↔  水平分屏  [h]",
+                "◫  水平分屏  [h]",
                 Some(SplitAxis::Horizontal),
             ),
-            ("cmd-split-v", "↕  垂直分屏  [v]", Some(SplitAxis::Vertical)),
-            ("cmd-max", "⛶  最大化 / 还原  [m]", None),
+            ("cmd-split-v", "⊟  垂直分屏  [v]", Some(SplitAxis::Vertical)),
+            ("cmd-max", "⤢  最大化 / 还原  [m]", None),
         ] {
             panel = panel.child(
                 div()
@@ -2402,6 +2560,7 @@ impl LmuxApp {
                     .px_4()
                     .py_2()
                     .text_size(px(12.))
+                    .text_color(rgba(FG0))
                     .hover(|s| s.bg(rgba(BG2)))
                     .on_click(cx.listener({
                         let pane = pane.clone();
@@ -2427,34 +2586,59 @@ impl LmuxApp {
                     .py_2()
                     .text_size(px(12.))
                     .text_color(rgba(RED))
-                    .hover(|s| s.bg(rgba(0xffeeeeff)))
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.close_split_pane(&pane, cx);
+                    .hover(|s| s.bg(rgba(BG2)))
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.close_split_pane(&pane, window, cx);
                         this.palette_open = false;
+                        cx.notify();
                     }))
                     .child("×  关闭当前分屏  [x]"),
             );
         }
-        panel
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(rgba(LINE))
-                    .text_size(px(11.))
-                    .text_color(rgba(0x8b90a0ff))
-                    .child("连接远程机器：lmux --connect <remote lmux.sock>"),
+
+        div()
+            .id("palette-backdrop")
+            .absolute()
+            .size_full()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(70.))
+            .bg(rgba(0x00000033))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    this.palette_open = false;
+                    if let Some(active) = this.active.clone() {
+                        this.focus_agent(&active, window, cx);
+                    }
+                    cx.notify();
+                }),
             )
+            .child(panel)
             .into_any_element()
     }
 
-    fn close_split_pane(&mut self, pane: &PaneId, cx: &mut Context<Self>) {
+    fn close_split_pane(&mut self, pane: &PaneId, window: &mut Window, cx: &mut Context<Self>) {
         if self.pane_tree.leaf_count() <= 1 {
             return;
         }
+        let agents = self
+            .pane_tree
+            .group(pane)
+            .map(|group| group.tabs.clone())
+            .unwrap_or_default();
         if let Some(next) = self.pane_tree.without_pane(pane) {
             self.pane_tree = next;
+            for agent in agents {
+                let remote = self.remote_snaps.values().any(|snapshot| {
+                    snapshot
+                        .agents
+                        .iter()
+                        .any(|candidate| candidate.id == agent)
+                });
+                self.delete_session(&agent, remote, cx);
+            }
             if let Ok(mut metrics) = self.split_metrics.lock() {
                 metrics.clear();
             }
@@ -2464,6 +2648,9 @@ impl LmuxApp {
                 .pane_tree
                 .group(&self.active_pane)
                 .and_then(|g| g.active.clone());
+            if let Some(active) = self.active.clone() {
+                self.focus_agent(&active, window, cx);
+            }
             self.persist();
             cx.notify();
         }
@@ -2580,17 +2767,17 @@ impl LmuxApp {
                                 .items_center()
                                 .justify_center()
                                 .when(axis == SplitAxis::Horizontal, |el| {
-                                    el.w(px(48.))
+                                    el.w(px(14.))
                                         .h_full()
-                                        .ml(px(-23.))
-                                        .mr(px(-23.))
+                                        .ml(px(-6.))
+                                        .mr(px(-6.))
                                         .child(div().w(px(2.)).h_full().bg(rgba(LINE)))
                                 })
                                 .when(axis == SplitAxis::Vertical, |el| {
-                                    el.h(px(48.))
+                                    el.h(px(14.))
                                         .w_full()
-                                        .mt(px(-23.))
-                                        .mb(px(-23.))
+                                        .mt(px(-6.))
+                                        .mb(px(-6.))
                                         .child(div().h(px(2.)).w_full().bg(rgba(LINE)))
                                 })
                                 .hover(|s| s.bg(rgba(0xe8e6de88)))
@@ -2647,8 +2834,8 @@ impl LmuxApp {
                 let mut tabs = div()
                     .flex()
                     .items_center()
-                    .h(px(30.))
-                    .bg(rgba(BG2))
+                    .h(px(28.))
+                    .bg(rgba(BG1))
                     .border_b_1()
                     .border_color(rgba(LINE));
                 for tab_id in group.tabs.clone() {
@@ -2658,20 +2845,20 @@ impl LmuxApp {
                         .id(gpui::ElementId::Name(format!("tab-{tab_id}").into()))
                         .flex()
                         .items_center()
-                        .gap_2()
+                        .gap_1()
                         .h_full()
-                        .px_3()
-                        .text_size(px(11.))
-                        .text_color(rgba(if is_active { ACCENT } else { FG1 }))
+                        .px_2()
+                        .text_size(px(11.5))
+                        .text_color(rgba(if is_active { FG0 } else { FG1 }))
                         .font_weight(if is_active {
-                            gpui::FontWeight::SEMIBOLD
+                            gpui::FontWeight::MEDIUM
                         } else {
                             gpui::FontWeight::NORMAL
                         })
-                        .when(is_active, |el| el.bg(rgba(0xffffffff)))
+                        .when(is_active, |el| el.bg(rgba(BG0)))
                         .border_r_1()
                         .border_color(rgba(LINE))
-                        .hover(|s| s.bg(rgba(0xf2f1ecff)))
+                        .hover(|s| s.bg(rgba(BG2)))
                         .on_click(cx.listener({
                             let id = tab_id.clone();
                             let pane = pane_for_tab.clone();
@@ -2707,18 +2894,38 @@ impl LmuxApp {
                             div()
                                 .id(gpui::ElementId::Name(format!("tab-close-{tab_id}").into()))
                                 .text_color(rgba(0x8b90a0ff))
+                                .rounded_sm()
+                                .px_1()
+                                .hover(|s| s.bg(rgba(BG2)).text_color(rgba(FG0)))
                                 .on_click(cx.listener({
                                     let id = tab_id.clone();
                                     let pane = pane_id.clone();
-                                    move |this, _ev, _window, cx| {
+                                    move |this, _ev, window, cx| {
                                         cx.stop_propagation();
-                                        this.close_tab(&pane, &id, cx);
+                                        this.close_tab(&pane, &id, window, cx);
                                     }
                                 }))
                                 .child("×"),
                         );
                     tabs = tabs.child(tab);
                 }
+                tabs = tabs.child(
+                    div()
+                        .id(gpui::ElementId::Name(format!("new-tab-{pane_id}").into()))
+                        .w(px(28.))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(14.))
+                        .text_color(rgba(FG1))
+                        .hover(|s| s.bg(rgba(BG2)).text_color(rgba(FG0)))
+                        .on_click(cx.listener({
+                            let pane = pane_id.clone();
+                            move |this, _ev, window, cx| this.new_shell_tab(&pane, window, cx)
+                        }))
+                        .child("＋"),
+                );
                 // 显式分屏/最大化 controls：没有隐式 split。
                 tabs = tabs.child(
                     div()
@@ -2729,49 +2936,47 @@ impl LmuxApp {
                         .text_color(rgba(FG1))
                         .child(
                             div()
-                                .id(gpui::ElementId::Name(format!("new-tab-{pane_id}").into()))
-                                .px_2()
-                                .text_size(px(14.))
-                                .hover(|s| s.bg(rgba(0xf2f1ecff)).text_color(rgba(ACCENT)))
-                                .on_click(cx.listener({
-                                    let pane = pane_id.clone();
-                                    move |this, _ev, window, cx| {
-                                        this.new_shell_tab(&pane, window, cx)
-                                    }
-                                }))
-                                .child("＋"),
-                        )
-                        .child(
-                            div()
                                 .id(gpui::ElementId::Name(format!("split-h-{pane_id}").into()))
-                                .px_2()
-                                .hover(|s| s.bg(rgba(0xf2f1ecff)))
+                                .w(px(28.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|s| s.bg(rgba(BG2)).text_color(rgba(FG0)))
                                 .on_click(cx.listener({
                                     let pane = pane_id.clone();
                                     move |this, _ev, window, cx| {
                                         this.split_pane(&pane, SplitAxis::Horizontal, window, cx)
                                     }
                                 }))
-                                .child("↔"),
+                                .child("◫"),
                         )
                         .child(
                             div()
                                 .id(gpui::ElementId::Name(format!("split-v-{pane_id}").into()))
-                                .px_2()
-                                .hover(|s| s.bg(rgba(0xf2f1ecff)))
+                                .w(px(28.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|s| s.bg(rgba(BG2)).text_color(rgba(FG0)))
                                 .on_click(cx.listener({
                                     let pane = pane_id.clone();
                                     move |this, _ev, window, cx| {
                                         this.split_pane(&pane, SplitAxis::Vertical, window, cx)
                                     }
                                 }))
-                                .child("↕"),
+                                .child("⊟"),
                         )
                         .child(
                             div()
                                 .id(gpui::ElementId::Name(format!("maximize-{pane_id}").into()))
-                                .px_2()
-                                .hover(|s| s.bg(rgba(0xf2f1ecff)))
+                                .w(px(28.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|s| s.bg(rgba(BG2)).text_color(rgba(FG0)))
                                 .on_click(cx.listener({
                                     let pane = pane_id.clone();
                                     move |this, _ev, _window, cx| this.toggle_maximize(&pane, cx)
@@ -2779,7 +2984,7 @@ impl LmuxApp {
                                 .child(if self.maximized_pane.as_ref() == Some(&pane_id) {
                                     "❐"
                                 } else {
-                                    "⛶"
+                                    "⤢"
                                 }),
                         )
                         .when(self.pane_tree.leaf_count() > 1, |controls| {
@@ -2788,13 +2993,17 @@ impl LmuxApp {
                                     .id(gpui::ElementId::Name(
                                         format!("close-pane-{pane_id}").into(),
                                     ))
-                                    .px_2()
-                                    .text_color(rgba(RED))
-                                    .hover(|s| s.bg(rgba(0xffeeeeff)))
+                                    .w(px(28.))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgba(FG1))
+                                    .hover(|s| s.bg(rgba(BG2)).text_color(rgba(RED)))
                                     .on_click(cx.listener({
                                         let pane = pane_id.clone();
-                                        move |this, _ev, _window, cx| {
-                                            this.close_split_pane(&pane, cx)
+                                        move |this, _ev, window, cx| {
+                                            this.close_split_pane(&pane, window, cx)
                                         }
                                     }))
                                     .child("×"),
@@ -2861,6 +3070,7 @@ impl Render for LmuxApp {
             .unwrap_or_else(|| "local".into());
 
         // ── 侧栏：机器树（本地一个 machine 节点 + 项目 + agent）
+        // ── 侧栏：机器树（统一 Machines 树：Local Machine + Projects + Sessions）
         let local_machine_key = "local".to_string();
         let local_collapsed = self.collapsed_machines.contains(&local_machine_key);
         let mut tree = div().flex().flex_col().py_1();
@@ -2870,14 +3080,12 @@ impl Render for LmuxApp {
                 .flex()
                 .items_center()
                 .gap_1()
-                .h(px(38.))
+                .h(px(32.))
                 .px_2()
-                .border_b_1()
-                .border_color(rgba(LINE))
-                .text_size(px(13.))
+                .text_size(px(12.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(FG0))
-                .hover(|style| style.bg(rgba(0xe9e7e0ff)))
+                .hover(|style| style.bg(rgba(BG2)))
                 .on_click(cx.listener({
                     let key = local_machine_key.clone();
                     move |this, _event, _window, cx| {
@@ -2889,32 +3097,33 @@ impl Render for LmuxApp {
                 }))
                 .child(
                     div()
-                        .w(px(16.))
+                        .w(px(14.))
                         .text_color(rgba(FG1))
                         .child(if local_collapsed { "▸" } else { "▾" }),
                 )
-                .child(div().w(px(18.)).text_color(rgba(GREEN)).child("▣"))
                 .child(machine_name.clone())
                 .child(
                     div()
                         .ml_auto()
                         .px_1()
                         .rounded_sm()
-                        .bg(rgba(0xe2eadcff))
+                        .bg(rgba(BG2))
                         .text_size(px(9.))
                         .font_weight(gpui::FontWeight::NORMAL)
-                        .text_color(rgba(GREEN))
-                        .child("本机"),
+                        .text_color(rgba(FG1))
+                        .child("local"),
                 )
                 .child(
                     div()
                         .id("add-local-project")
-                        .w(px(24.))
-                        .h(px(24.))
+                        .w(px(20.))
+                        .h(px(20.))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(15.))
+                        .rounded_sm()
+                        .text_size(px(13.))
+                        .font_weight(gpui::FontWeight::NORMAL)
                         .text_color(rgba(FG1))
                         .hover(|s| s.bg(rgba(BG2)).text_color(rgba(ACCENT)))
                         .on_click(cx.listener(|this, _ev, window, cx| {
@@ -2940,7 +3149,7 @@ impl Render for LmuxApp {
                 let mut pnode = div()
                     .flex()
                     .flex_col()
-                    .ml_3()
+                    .ml_4()
                     .border_l_1()
                     .border_color(rgba(LINE));
                 let project_id_for_add = project.id.clone();
@@ -2956,13 +3165,13 @@ impl Render for LmuxApp {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .h(px(32.))
-                        .pl_1()
+                        .h(px(28.))
+                        .pl_2()
                         .pr_2()
                         .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(rgba(FG0))
-                        .hover(|style| style.bg(rgba(0xe9e7e0ff)))
+                        .hover(|style| style.bg(rgba(BG2)))
                         .on_click(cx.listener({
                             let key = project_key.clone();
                             move |this, _event, _window, cx| {
@@ -2976,7 +3185,9 @@ impl Render for LmuxApp {
                             MouseButton::Right,
                             cx.listener({
                                 let target = local_project_target.clone();
-                                move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                                move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.focus.focus(window, cx);
+                                    this.palette_open = false;
                                     this.session_menu = None;
                                     this.tree_menu = Some(TreeMenu {
                                         target: target.clone(),
@@ -2989,11 +3200,10 @@ impl Render for LmuxApp {
                         )
                         .child(
                             div()
-                                .w(px(16.))
+                                .w(px(12.))
                                 .text_color(rgba(FG1))
                                 .child(if project_collapsed { "▸" } else { "▾" }),
                         )
-                        .child(div().w(px(18.)).text_color(rgba(ACCENT)).child("◇"))
                         .child(project.name.clone())
                         .child(
                             div()
@@ -3006,8 +3216,8 @@ impl Render for LmuxApp {
                                         div()
                                             .px_1()
                                             .rounded_sm()
-                                            .bg(rgba(0xe7e5deff))
-                                            .text_size(px(9.5))
+                                            .bg(rgba(BG2))
+                                            .text_size(px(9.))
                                             .font_weight(gpui::FontWeight::NORMAL)
                                             .text_color(rgba(FG1))
                                             .child(branch),
@@ -3018,12 +3228,13 @@ impl Render for LmuxApp {
                                         .id(gpui::ElementId::Name(
                                             format!("project-add-{}", project.id).into(),
                                         ))
-                                        .w(px(24.))
-                                        .h(px(24.))
+                                        .w(px(20.))
+                                        .h(px(20.))
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .text_size(px(15.))
+                                        .rounded_sm()
+                                        .text_size(px(13.))
                                         .font_weight(gpui::FontWeight::NORMAL)
                                         .text_color(rgba(FG1))
                                         .hover(|s| s.bg(rgba(BG2)).text_color(rgba(ACCENT)))
@@ -3051,15 +3262,16 @@ impl Render for LmuxApp {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .h(px(30.))
-                            .pl_3()
+                            .h(px(26.))
+                            .pl_6()
                             .pr_2()
-                            .border_l_2()
-                            .border_color(rgba(if active { ACCENT } else { 0x00000000 }))
+                            .rounded_sm()
                             .text_size(px(11.5))
                             .text_color(rgba(if active { FG0 } else { FG1 }))
-                            .hover(|s| s.bg(rgba(0xe9e7e0ff)))
-                            .when(active, |el| el.bg(rgba(0xe7edfaff)))
+                            .hover(|s| s.bg(rgba(BG2)))
+                            .when(active, |el| {
+                                el.bg(rgba(BG2)).font_weight(gpui::FontWeight::MEDIUM)
+                            })
                             .on_click(cx.listener({
                                 let id = id.clone();
                                 move |this, _ev, window, cx| {
@@ -3067,11 +3279,21 @@ impl Render for LmuxApp {
                                     this.focus_agent(&id, window, cx);
                                 }
                             }))
+                            .on_mouse_move(cx.listener({
+                                let id = id.clone();
+                                move |this, _ev, window, cx| {
+                                    if this.active.as_deref() != Some(&id) {
+                                        this.open_agent(&id, cx);
+                                    }
+                                    this.focus_agent(&id, window, cx);
+                                }
+                            }))
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener({
                                     let id = id.clone();
-                                    move |this, ev: &gpui::MouseDownEvent, _window, cx| {
+                                    move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                                        this.focus.focus(window, cx);
                                         this.tree_menu = None;
                                         this.session_menu = Some(SessionMenu {
                                             agent: id.clone(),
@@ -3084,98 +3306,21 @@ impl Render for LmuxApp {
                                     }
                                 }),
                             );
-                        row = row
-                            .child(
-                                div()
-                                    .w(px(16.))
-                                    .text_color(rgba(status_color(&agent.status)))
-                                    .child(status_marker(&agent.status, self.spinner_frame)),
-                            )
-                            .child(truncate(&agent.title, 28))
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .text_size(px(9.5))
-                                    .px_1()
-                                    .rounded_sm()
-                                    .bg(rgba(BG2))
-                                    .text_color(rgba(FG1))
-                                    .child(agent.agent_type.as_str().to_string()),
-                            );
+                        row = row.child(truncate(&agent.title, 24)).child(
+                            div()
+                                .ml_auto()
+                                .text_size(px(9.))
+                                .px_1()
+                                .rounded_sm()
+                                .bg(rgba(BG2))
+                                .text_color(rgba(FG1))
+                                .child(agent.agent_type.as_str().to_string()),
+                        );
                         pnode = pnode.child(row);
                     }
                 }
                 tree = tree.child(pnode);
             }
-        }
-
-        // ── NOTIFICATIONS（侧栏下段）
-        let mut notif_section = div()
-            .flex()
-            .flex_col()
-            .mt_2()
-            .border_t_1()
-            .border_color(rgba(LINE))
-            .child(
-                div()
-                    .px_2()
-                    .pt_2()
-                    .text_size(px(10.))
-                    .text_color(rgba(0x8b90a0ff))
-                    .child("NOTIFICATIONS"),
-            );
-        for n in self.notifications.iter().take(8) {
-            let nid = n.agent.clone();
-            let color = status_color(&n.to);
-            notif_section =
-                notif_section.child(
-                    div()
-                        .id(gpui::ElementId::Name(format!("notif-{}", nid).into()))
-                        .flex()
-                        .flex_col()
-                        .px_2()
-                        .py_1()
-                        .ml_2()
-                        .border_l_2()
-                        .border_color(rgba(color))
-                        .when(n.unread, |el| el.bg(rgba(0xefe9f2ff)))
-                        .hover(|s| s.bg(rgba(BG2)))
-                        .text_size(px(11.))
-                        .on_click(cx.listener({
-                            let agent = n.agent.clone();
-                            move |this, _ev, window, cx| {
-                                // 标记已读 + 跳转
-                                if let Some(nn) =
-                                    this.notifications.iter_mut().find(|nn| nn.agent == agent)
-                                {
-                                    nn.unread = false;
-                                }
-                                this.open_agent(&agent, cx);
-                                this.focus_agent(&agent, window, cx);
-                            }
-                        }))
-                        .child(div().text_color(rgba(FG0)).child(
-                            n.message.clone().unwrap_or_else(|| {
-                                format!("{} → {}", n.from.as_str(), n.to.as_str())
-                            }),
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(9.5))
-                                .text_color(rgba(0x8b90a0ff))
-                                .child(format!("{} · {}", truncate(&n.agent, 26), n.time)),
-                        ),
-                );
-        }
-        if self.notifications.is_empty() {
-            notif_section = notif_section.child(
-                div()
-                    .px_2()
-                    .py_2()
-                    .text_size(px(10.5))
-                    .text_color(rgba(0x8b90a0ff))
-                    .child("暂无通知，agent 停下时会出现在这里"),
-            );
         }
 
         // ── 远程机器分组
@@ -3185,9 +3330,9 @@ impl Render for LmuxApp {
             let (dot_color, status_text, remediation) = match self.remote_states.get(&name) {
                 Some(lmux_client::RemoteState::Online(_)) => {
                     if self.remote_snaps.contains_key(&name) {
-                        (ACCENT, "已连接", None)
+                        (GREEN, "已连接", None)
                     } else {
-                        (0x8b90a0ff, "连接中", None)
+                        (FG1, "连接中", None)
                     }
                 }
                 Some(lmux_client::RemoteState::NeedsInstall { .. }) => {
@@ -3201,28 +3346,45 @@ impl Render for LmuxApp {
                 }
                 Some(lmux_client::RemoteState::AuthenticationFailed(_)) => (RED, "认证失败", None),
                 Some(lmux_client::RemoteState::Connecting(stage)) => (YELLOW, stage.label(), None),
-                Some(lmux_client::RemoteState::Offline(_)) => (0x8b90a0ff, "离线", None),
-                _ => (0x8b90a0ff, "连接中", None),
+                Some(lmux_client::RemoteState::Offline(_)) => (FG1, "离线", None),
+                _ => (FG1, "连接中", None),
+            };
+            let reconnectable = !matches!(
+                self.remote_states.get(&name),
+                Some(lmux_client::RemoteState::Online(_))
+            );
+            let status_text = if matches!(
+                self.remote_states.get(&name),
+                Some(lmux_client::RemoteState::Online(_))
+            ) {
+                host.latency_ms()
+                    .map(|latency| format!("{latency} ms"))
+                    .unwrap_or_else(|| "已连接".into())
+            } else if matches!(
+                self.remote_states.get(&name),
+                Some(lmux_client::RemoteState::Offline(_))
+            ) {
+                "已断开".into()
+            } else {
+                status_text.to_string()
             };
             let machine_key = format!("remote:{name}");
             let machine_collapsed = self.collapsed_machines.contains(&machine_key);
             let snap_ref = self.remote_snaps.get(&name);
             let remediation_host = name.clone();
             let remote_project_host = name.clone();
-            let mut rnode = div().flex().flex_col().mt_2().child(
+            let mut rnode = div().flex().flex_col().mt_1().child(
                 div()
                     .id(gpui::ElementId::Name(format!("machine-row-{name}").into()))
                     .flex()
                     .items_center()
                     .gap_1()
-                    .h(px(38.))
+                    .h(px(32.))
                     .px_2()
-                    .border_b_1()
-                    .border_color(rgba(LINE))
-                    .text_size(px(13.))
+                    .text_size(px(12.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgba(FG0))
-                    .hover(|style| style.bg(rgba(0xe9e7e0ff)))
+                    .hover(|style| style.bg(rgba(BG2)))
                     .on_click(cx.listener({
                         let key = machine_key.clone();
                         move |this, _event, _window, cx| {
@@ -3232,16 +3394,34 @@ impl Render for LmuxApp {
                             cx.notify();
                         }
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener({
+                            let target = machine_target.clone();
+                            move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.focus.focus(window, cx);
+                                this.session_menu = None;
+                                this.tree_menu = Some(TreeMenu {
+                                    target: target.clone(),
+                                    position: event.position,
+                                });
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }),
+                    )
                     .child(
                         div()
-                            .w(px(16.))
+                            .w(px(14.))
                             .text_color(rgba(FG1))
                             .child(if machine_collapsed { "▸" } else { "▾" }),
                     )
-                    .child(div().w(px(18.)).text_color(rgba(dot_color)).child("▣"))
                     .child(name.clone())
                     .child(
                         div()
+                            .id(gpui::ElementId::Name(
+                                format!("remote-reconnect-{name}").into(),
+                            ))
                             .ml_auto()
                             .px_1()
                             .rounded_sm()
@@ -3249,15 +3429,31 @@ impl Render for LmuxApp {
                             .text_size(px(9.))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(rgba(dot_color))
-                            .child(status_text.to_string()),
+                            .on_click(cx.listener({
+                                let host = Arc::clone(host);
+                                move |this, _event, window, cx| {
+                                    if reconnectable {
+                                        host.reconnect();
+                                        this.focus.focus(window, cx);
+                                        cx.notify();
+                                    }
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .child(status_text),
                     )
                     .child(
                         div()
                             .id(gpui::ElementId::Name(
                                 format!("remote-project-add-{remote_project_host}").into(),
                             ))
-                            .px_1()
-                            .text_size(px(15.))
+                            .w(px(20.))
+                            .h(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .text_size(px(13.))
                             .text_color(rgba(FG1))
                             .hover(|style| style.bg(rgba(BG2)).text_color(rgba(ACCENT)))
                             .on_click(cx.listener(move |this, _event, window, cx| {
@@ -3298,29 +3494,7 @@ impl Render for LmuxApp {
                                 }))
                                 .child(if install { "安装…" } else { "启动…" }),
                         )
-                    })
-                    .child(
-                        div()
-                            .px_1()
-                            .text_size(px(14.))
-                            .text_color(rgba(FG1))
-                            .hover(|style| style.bg(rgba(BG2)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(
-                                    move |this, event: &gpui::MouseDownEvent, _window, cx| {
-                                        this.session_menu = None;
-                                        this.tree_menu = Some(TreeMenu {
-                                            target: machine_target.clone(),
-                                            position: event.position,
-                                        });
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    },
-                                ),
-                            )
-                            .child("…"),
-                    ),
+                    }),
             );
             if !machine_collapsed {
                 if let Some(rsnap) = snap_ref {
@@ -3334,12 +3508,7 @@ impl Render for LmuxApp {
                         };
                         let spawn_host = name.clone();
                         let spawn_project = project.id.clone();
-                        let mut pnode = div()
-                            .flex()
-                            .flex_col()
-                            .ml_3()
-                            .border_l_1()
-                            .border_color(rgba(LINE));
+                        let mut pnode = div().flex().flex_col().ml_2();
                         pnode = pnode.child(
                             div()
                                 .id(gpui::ElementId::Name(
@@ -3348,13 +3517,13 @@ impl Render for LmuxApp {
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .h(px(32.))
-                                .pl_1()
+                                .h(px(28.))
+                                .pl_2()
                                 .pr_2()
                                 .text_size(px(12.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(rgba(FG0))
-                                .hover(|style| style.bg(rgba(0xe9e7e0ff)))
+                                .hover(|style| style.bg(rgba(BG2)))
                                 .on_click(cx.listener({
                                     let key = project_key.clone();
                                     move |this, _event, _window, cx| {
@@ -3368,7 +3537,9 @@ impl Render for LmuxApp {
                                     MouseButton::Right,
                                     cx.listener({
                                         let target = remote_project_target.clone();
-                                        move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                                        move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                            this.focus.focus(window, cx);
+                                            this.palette_open = false;
                                             this.session_menu = None;
                                             this.tree_menu = Some(TreeMenu {
                                                 target: target.clone(),
@@ -3381,61 +3552,43 @@ impl Render for LmuxApp {
                                 )
                                 .child(
                                     div()
-                                        .w(px(16.))
+                                        .w(px(12.))
                                         .text_color(rgba(FG1))
                                         .child(if project_collapsed { "▸" } else { "▾" }),
                                 )
-                                .child(div().w(px(18.)).text_color(rgba(ACCENT)).child("◇"))
                                 .child(project.name.clone())
                                 .child(
-                                    div()
-                                        .ml_auto()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .px_1()
-                                                .rounded_sm()
-                                                .bg(rgba(0xe3e9f6ff))
-                                                .text_size(px(9.))
-                                                .font_weight(gpui::FontWeight::NORMAL)
-                                                .text_color(rgba(ACCENT))
-                                                .child("远程"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(gpui::ElementId::Name(
-                                                    format!(
-                                                        "remote-session-add-{name}-{}",
-                                                        project.id
-                                                    )
+                                    div().ml_auto().flex().items_center().gap_1().child(
+                                        div()
+                                            .id(gpui::ElementId::Name(
+                                                format!("remote-session-add-{name}-{}", project.id)
                                                     .into(),
-                                                ))
-                                                .w(px(24.))
-                                                .h(px(24.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .text_size(px(15.))
-                                                .font_weight(gpui::FontWeight::NORMAL)
-                                                .text_color(rgba(FG1))
-                                                .hover(|style| {
-                                                    style.bg(rgba(BG2)).text_color(rgba(ACCENT))
-                                                })
-                                                .on_click(cx.listener(
-                                                    move |this, _event, window, cx| {
-                                                        cx.stop_propagation();
-                                                        this.spawn_remote_shell(
-                                                            spawn_host.clone(),
-                                                            spawn_project.clone(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                ))
-                                                .child("＋"),
-                                        ),
+                                            ))
+                                            .w(px(20.))
+                                            .h(px(20.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .text_size(px(13.))
+                                            .font_weight(gpui::FontWeight::NORMAL)
+                                            .text_color(rgba(FG1))
+                                            .hover(|style| {
+                                                style.bg(rgba(BG2)).text_color(rgba(ACCENT))
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _event, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.spawn_remote_shell(
+                                                        spawn_host.clone(),
+                                                        spawn_project.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            ))
+                                            .child("＋"),
+                                    ),
                                 ),
                         );
                         if !project_collapsed {
@@ -3447,15 +3600,16 @@ impl Render for LmuxApp {
                                     .flex()
                                     .items_center()
                                     .gap_1()
-                                    .h(px(30.))
-                                    .pl_3()
+                                    .h(px(26.))
+                                    .pl_4()
                                     .pr_2()
-                                    .border_l_2()
-                                    .border_color(rgba(if active { ACCENT } else { 0x00000000 }))
+                                    .rounded_sm()
                                     .text_size(px(11.5))
                                     .text_color(rgba(if active { FG0 } else { FG1 }))
-                                    .hover(|s| s.bg(rgba(0xe9e7e0ff)))
-                                    .when(active, |el| el.bg(rgba(0xe7edfaff)))
+                                    .hover(|s| s.bg(rgba(BG2)))
+                                    .when(active, |el| {
+                                        el.bg(rgba(BG2)).font_weight(gpui::FontWeight::MEDIUM)
+                                    })
                                     .on_click(cx.listener({
                                         let id = id.clone();
                                         move |this, _ev, window, cx| {
@@ -3467,7 +3621,8 @@ impl Render for LmuxApp {
                                         MouseButton::Right,
                                         cx.listener({
                                             let id = id.clone();
-                                            move |this, ev: &gpui::MouseDownEvent, _window, cx| {
+                                            move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                                                this.focus.focus(window, cx);
                                                 this.tree_menu = None;
                                                 this.session_menu = Some(SessionMenu {
                                                     agent: id.clone(),
@@ -3480,27 +3635,16 @@ impl Render for LmuxApp {
                                             }
                                         }),
                                     );
-                                row = row
-                                    .child(
-                                        div()
-                                            .w(px(16.))
-                                            .text_color(rgba(status_color(&agent.status)))
-                                            .child(status_marker(
-                                                &agent.status,
-                                                self.spinner_frame,
-                                            )),
-                                    )
-                                    .child(truncate(&agent.title, 24))
-                                    .child(
-                                        div()
-                                            .ml_auto()
-                                            .text_size(px(9.5))
-                                            .px_1()
-                                            .rounded_sm()
-                                            .bg(rgba(BG2))
-                                            .text_color(rgba(ACCENT))
-                                            .child(agent.agent_type.as_str().to_string()),
-                                    );
+                                row = row.child(truncate(&agent.title, 24)).child(
+                                    div()
+                                        .ml_auto()
+                                        .text_size(px(9.))
+                                        .px_1()
+                                        .rounded_sm()
+                                        .bg(rgba(BG2))
+                                        .text_color(rgba(FG1))
+                                        .child(agent.agent_type.as_str().to_string()),
+                                );
                                 pnode = pnode.child(row);
                             }
                         }
@@ -3510,8 +3654,6 @@ impl Render for LmuxApp {
             }
             tree = tree.child(rnode);
         }
-
-        // notifications 在 sidebar 底部固定渲染，不随机器树滚动。
 
         // ── 终端网格：PaneTree 递归渲染。默认一个 pane + 多 tabs；显式 ↔/↕ 才 split。
         let render_tree = if let Some(max) = &self.maximized_pane {
@@ -3540,18 +3682,19 @@ impl Render for LmuxApp {
                 this.palette_open = !this.palette_open;
                 if this.palette_open {
                     this.palette_index = 0;
+                    dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu);
                     this.focus.focus(window, cx);
                 }
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &CloseTab, _window, cx| {
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 let pane = this.active_pane.clone();
                 if let Some(agent) = this
                     .pane_tree
                     .group(&pane)
                     .and_then(|group| group.active.clone())
                 {
-                    this.close_tab(&pane, &agent, cx);
+                    this.close_tab(&pane, &agent, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &NewShellTab, window, cx| {
@@ -3562,6 +3705,12 @@ impl Render for LmuxApp {
                 if this.palette_open {
                     this.handle_palette_key(&ev.keystroke, window, cx);
                     cx.stop_propagation();
+                } else if ev.keystroke.key.as_str() == "escape"
+                    && (this.session_menu.is_some() || this.tree_menu.is_some())
+                {
+                    dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu);
+                    cx.stop_propagation();
+                    cx.notify();
                 }
             }))
             .on_drag_move::<DividerDrag>(cx.listener(
@@ -3583,77 +3732,57 @@ impl Render for LmuxApp {
                 MouseButton::Left,
                 cx.listener(|this, _ev, _window, _cx| this.end_split_drag()),
             )
-            .on_action(cx.listener(|this, _: &ClosePalette, _window, cx| {
-                if this.palette_open
-                    || this.session_menu.is_some()
-                    || this.tree_menu.is_some()
-                    || this.delete_confirm.is_some()
-                    || this.bootstrap_confirm.is_some()
-                    || this.connect_dialog
-                    || this.project_dialog
-                    || this.remote_project_dialog.is_some()
-                {
-                    this.palette_open = false;
-                    dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu);
-                    this.delete_confirm = None;
-                    this.bootstrap_confirm = None;
-                    this.connect_dialog = false;
-                    this.project_dialog = false;
-                    this.remote_project_dialog = None;
-                    this.dialog_error = None;
-                    cx.notify();
-                }
-            }))
             .flex()
             .size_full()
             .bg(rgba(BG0))
             .text_color(rgba(FG0))
-            .font_family("JetBrains Mono")
+            .font_family("Noto Sans")
             .child(
                 div()
-                    .w(px(280.))
+                    .w(px(230.))
                     .flex()
                     .flex_col()
                     .bg(rgba(BG1))
                     .border_r_1()
                     .border_color(rgba(LINE))
-                    .child(div().flex_1().overflow_hidden().child(tree))
                     .child(
                         div()
-                            .max_h(px(220.))
-                            .overflow_hidden()
-                            .border_t_1()
-                            .border_color(rgba(LINE))
-                            .child(notif_section),
+                            .id("sidebar-tree-scroll")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .child(tree),
                     )
                     .child(
                         div()
-                            .id("connect-machine")
-                            .mx_2()
-                            .mb_2()
+                            .h(px(32.))
                             .px_3()
-                            .py_2()
-                            .border_1()
+                            .flex()
+                            .items_center()
+                            .border_t_1()
                             .border_color(rgba(LINE))
-                            .text_size(px(11.))
-                            .text_color(rgba(FG1))
-                            .hover(|s| s.bg(rgba(BG2)))
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.connect_dialog = true;
-                                this.connect_focus_index = 0;
-                                this.project_dialog = false;
-                                this.dialog_error = None;
-                                this.connect_input.update(cx, |input, cx| input.reset(cx));
-                                this.connect_username
-                                    .update(cx, |input, cx| input.reset(cx));
-                                this.connect_password
-                                    .update(cx, |input, cx| input.reset(cx));
-                                this.connect_key_path
-                                    .update(cx, |input, cx| input.reset(cx));
-                                this.connect_input.focus_handle(cx).focus(window, cx);
-                                cx.notify();
-                            }))
-                            .child("＋ 连接远程机器"),
+                            .child(
+                                div()
+                                    .id("connect-machine")
+                                    .text_size(px(11.))
+                                    .text_color(rgba(FG1))
+                                    .hover(|s| s.text_color(rgba(FG0)))
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.connect_dialog = true;
+                                        this.connect_focus_index = 0;
+                                        this.project_dialog = false;
+                                        this.dialog_error = None;
+                                        this.connect_input.update(cx, |input, cx| input.reset(cx));
+                                        this.connect_username
+                                            .update(cx, |input, cx| input.reset(cx));
+                                        this.connect_password
+                                            .update(cx, |input, cx| input.reset(cx));
+                                        this.connect_key_path
+                                            .update(cx, |input, cx| input.reset(cx));
+                                        this.connect_input.focus_handle(cx).focus(window, cx);
+                                        cx.notify();
+                                    }))
+                                    .child("+ Connect..."),
+                            ),
                     ),
             )
             .child(grid);
@@ -3669,6 +3798,26 @@ impl Render for LmuxApp {
         if self.remote_project_dialog.is_some() {
             root = root.child(self.render_remote_project_dialog(cx));
         }
+        if self.session_menu.is_some() || self.tree_menu.is_some() {
+            root = root.child(
+                div()
+                    .id("context-menu-backdrop")
+                    .absolute()
+                    .size_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, window, cx| {
+                            if dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu) {
+                                if let Some(active) = this.active.clone() {
+                                    this.focus_agent(&active, window, cx);
+                                }
+                                cx.notify();
+                            }
+                            cx.stop_propagation();
+                        }),
+                    ),
+            );
+        }
         if self.session_menu.is_some() {
             root = root.child(self.render_session_menu(cx));
         }
@@ -3683,15 +3832,6 @@ impl Render for LmuxApp {
         }
         root
     }
-}
-
-fn now_hhmm() -> String {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (h, m) = ((t / 3600 + 8) % 24, (t / 60) % 60); // UTC+8
-    format!("{h:02}:{m:02}")
 }
 
 fn truncate(s: &str, n: usize) -> String {

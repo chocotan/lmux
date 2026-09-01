@@ -69,6 +69,21 @@ fn local_scrollback_changes_rendered_viewport() {
 }
 
 #[test]
+fn selection_copies_selected_cells_and_marks_render_runs() {
+    let vt = VTerm::new(20, 4);
+    vt.feed(b"hello world");
+    vt.begin_selection(0, 0, false);
+    vt.update_selection(0, 4, true);
+    assert_eq!(vt.selection_to_string().as_deref(), Some("hello"));
+    assert!(vt.render_snapshot().rows[0]
+        .runs
+        .iter()
+        .any(|run| run.style.selected && run.text.contains("hello")));
+    vt.stop_selection();
+    assert!(!vt.selection_active());
+}
+
+#[test]
 fn vterm_renders_text() {
     let vt = VTerm::new(80, 24);
     vt.feed(b"echo hello\r\nhello world\r\n");

@@ -56,6 +56,11 @@ pub enum PersistedRemoteAuth {
         #[serde(default)]
         identity_file: Option<String>,
     },
+    /// Password is intentionally not stored; restart requires re-entry.
+    Password {
+        #[serde(default)]
+        username: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,6 +118,16 @@ fn migrate(app: &mut PersistedApp) -> anyhow::Result<()> {
         );
     }
     // v1 是首版；后续在此逐版本迁移。
+    if app.remote_configs.is_empty() && !app.remotes.is_empty() {
+        app.remote_configs = app
+            .remotes
+            .drain(..)
+            .map(|target| PersistedRemote {
+                target,
+                auth: PersistedRemoteAuth::SshConfig,
+            })
+            .collect();
+    }
     app.version = STORE_VERSION;
     Ok(())
 }
@@ -129,7 +144,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("state.json");
         let mut app = PersistedApp::default();
-        app.remotes.push("user@nuc:/tmp/lmux.sock".into());
+        app.remote_configs.push(PersistedRemote {
+            target: "user@nuc:/tmp/lmux.sock".into(),
+            auth: PersistedRemoteAuth::SshConfig,
+        });
         app.sessions.push(PersistedSession {
             agent_id: "a".into(),
             project_id: "p".into(),
@@ -164,6 +182,21 @@ mod tests {
         assert_eq!(back, app);
         assert!(!p.with_extension("json.tmp").exists());
     }
+    #[test]
+    fn legacy_remote_targets_migrate_to_remote_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("state.json");
+        std::fs::write(
+            &p,
+            r#"{"version":1,"remotes":["user@nuc"],"projects":[],"sessions":[]}"#,
+        )
+        .unwrap();
+        let app = load(&p).unwrap();
+        assert!(app.remotes.is_empty());
+        assert_eq!(app.remote_configs.len(), 1);
+        assert_eq!(app.remote_configs[0].target, "user@nuc");
+    }
+
     #[test]
     fn missing_is_default() {
         let dir = tempfile::tempdir().unwrap();
