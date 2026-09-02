@@ -409,11 +409,27 @@ pub async fn install_and_restart(
     upload_binary(host, auth, on_upload_progress, cancel).await?;
     let destination = auth.destination(host);
     let command = r#"data=${XDG_DATA_HOME:-$HOME/.local/share}/lmux
-pkill -TERM -f '[l]mux.*--headless' 2>/dev/null || true
+if command -v fuser >/dev/null 2>&1; then
+  fuser -k -TERM "$data/lmux.lock" >/dev/null 2>&1 || true
+else
+  pkill -TERM -x lmux 2>/dev/null || true
+fi
+stopped=0
 for i in 1 2 3 4 5 6 7 8 9 10; do
-  if flock -n "$data/lmux.lock" -c true 2>/dev/null; then break; fi
+  if flock -n "$data/lmux.lock" -c true 2>/dev/null; then stopped=1; break; fi
   sleep .2
 done
+if [ "$stopped" -eq 0 ]; then
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k -KILL "$data/lmux.lock" >/dev/null 2>&1 || true
+  else
+    pkill -KILL -x lmux 2>/dev/null || true
+  fi
+  for i in 1 2 3 4 5; do
+    if flock -n "$data/lmux.lock" -c true 2>/dev/null; then break; fi
+    sleep .2
+  done
+fi
 rm -f -- "$data/lmux.sock""#;
     let output = ssh_command(auth)
         .arg(&destination)

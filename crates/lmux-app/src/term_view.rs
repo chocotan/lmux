@@ -226,6 +226,7 @@ pub struct TermEnterEvent(pub AgentId);
 
 pub struct TermView {
     pub agent: AgentId,
+    font_family: String,
     pub vterm: VTerm,
     pub focus: FocusHandle,
     writer: Option<Arc<PtySession>>,
@@ -251,7 +252,12 @@ impl Focusable for TermView {
 
 impl TermView {
     /// 本地 PTY：订阅 replay+增量，输出到达即 `cx.notify()`，无 1 秒轮询。
-    pub fn new_local(agent: AgentId, session: Arc<PtySession>, cx: &mut Context<Self>) -> Self {
+    pub fn new_local(
+        agent: AgentId,
+        session: Arc<PtySession>,
+        font_family: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let vterm = VTerm::new(120, 32);
         let (replay, mut rx) = session.subscribe();
         vterm.feed(&replay);
@@ -295,6 +301,7 @@ impl TermView {
         });
         Self {
             agent,
+            font_family,
             vterm,
             focus: cx.focus_handle(),
             writer: Some(session),
@@ -316,6 +323,7 @@ impl TermView {
         agent: AgentId,
         vterm: VTerm,
         remote_input: tokio::sync::mpsc::UnboundedSender<RemoteTermCommand>,
+        font_family: String,
         cx: &mut Context<Self>,
     ) -> Self {
         let idle = cx.spawn(async move |_view, _cx| {
@@ -323,6 +331,7 @@ impl TermView {
         });
         Self {
             agent,
+            font_family,
             vterm,
             focus: cx.focus_handle(),
             writer: None,
@@ -337,6 +346,11 @@ impl TermView {
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             _drain: idle,
         }
+    }
+
+    pub fn set_font_family(&mut self, font_family: String, cx: &mut Context<Self>) {
+        self.font_family = font_family;
+        cx.notify();
     }
 
     fn input_sink(&self) -> Option<InputSink> {
@@ -639,6 +653,7 @@ impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.vterm.render_snapshot();
         let focused = self.focus.is_focused(window);
+        let font_family = self.font_family.clone();
         if let Some(writer) = &self.writer {
             writer.set_focused(focused);
         }
@@ -705,7 +720,7 @@ impl Render for TermView {
                             ),
                         };
 
-                        let family = "Noto Sans Mono".into();
+                        let family = font_family.clone().into();
                         let base_font = Font {
                             family,
                             features: FontFeatures::disable_ligatures(),

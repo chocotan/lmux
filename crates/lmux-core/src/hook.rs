@@ -483,15 +483,19 @@ function shortText(value: any, max = 160) {
 export default function (pi: any) {
   let latestAssistant = ""
   const seenAskUserCalls = new Set<string>()
+  let doneReported = false
 
   pi.on("session_start", async () => {
     latestAssistant = ""
+    doneReported = false
     seenAskUserCalls.clear()
   })
   pi.on("turn_start", async () => {
+    doneReported = false
     await report("working", "")
   })
   pi.on("agent_start", async () => {
+    doneReported = false
     await report("working", "")
   })
 
@@ -536,14 +540,25 @@ export default function (pi: any) {
     }
   })
 
-  pi.on("agent_end", async (event: any) => {
+  pi.on("agent_end", async (event: any, ctx: any) => {
     const text = assistantText(event?.messages || [])
     if (text) latestAssistant = shortText(text, 180)
+    // Pi < 0.80.4 没有 agent_settled；旧版在 agent_end 且没有重试时完成上报。
+    if (doneReported || (ctx?.isIdle && !ctx.isIdle())) return
+    doneReported = true
+    let msg = latestAssistant
+    if (event?.error || ctx?.error) {
+      const err = shortText(event?.error || ctx?.error || "执行出错")
+      msg = `任务异常: ${err}`
+    }
+    await report("done", msg || "任务已完成")
+    latestAssistant = ""
   })
 
-  // 任务结算（完成或异常）
+  // 新版 Pi 在所有重试、压缩和排队消息结束后触发；旧版没有此事件。
   pi.on("agent_settled", async (event: any, ctx: any) => {
-    if (ctx?.isIdle && !ctx.isIdle()) return
+    if (doneReported || (ctx?.isIdle && !ctx.isIdle())) return
+    doneReported = true
     let msg = latestAssistant
     if (event?.error || ctx?.error) {
       const err = shortText(event?.error || ctx?.error || "执行出错")

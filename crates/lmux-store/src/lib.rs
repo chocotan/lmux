@@ -29,6 +29,10 @@ pub struct PersistedApp {
     pub window: Option<WindowGeometry>,
     #[serde(default)]
     pub dark_mode: Option<bool>,
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub font_family: Option<String>,
 }
 
 impl Default for PersistedApp {
@@ -45,6 +49,8 @@ impl Default for PersistedApp {
             maximized_pane: None,
             window: None,
             dark_mode: None,
+            theme: None,
+            font_family: None,
         }
     }
 }
