@@ -1,5 +1,6 @@
 //! 终端视图：真彩色 cell renderer + 光标 + 低延迟 PTY 输入。
 //! 架构直接遵循 muxel：TermView 在 GPUI task 内 drain PTY 输出，chunk 到达即 process + notify。
+use crate::theme::Theme;
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, ClipboardItem, Context,
     EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
@@ -227,6 +228,7 @@ pub struct TermEnterEvent(pub AgentId);
 pub struct TermView {
     pub agent: AgentId,
     font_family: String,
+    theme: Theme,
     pub vterm: VTerm,
     pub focus: FocusHandle,
     writer: Option<Arc<PtySession>>,
@@ -256,6 +258,7 @@ impl TermView {
         agent: AgentId,
         session: Arc<PtySession>,
         font_family: String,
+        theme: Theme,
         cx: &mut Context<Self>,
     ) -> Self {
         let vterm = VTerm::new(120, 32);
@@ -302,6 +305,7 @@ impl TermView {
         Self {
             agent,
             font_family,
+            theme,
             vterm,
             focus: cx.focus_handle(),
             writer: Some(session),
@@ -324,6 +328,7 @@ impl TermView {
         vterm: VTerm,
         remote_input: tokio::sync::mpsc::UnboundedSender<RemoteTermCommand>,
         font_family: String,
+        theme: Theme,
         cx: &mut Context<Self>,
     ) -> Self {
         let idle = cx.spawn(async move |_view, _cx| {
@@ -332,6 +337,7 @@ impl TermView {
         Self {
             agent,
             font_family,
+            theme,
             vterm,
             focus: cx.focus_handle(),
             writer: None,
@@ -346,6 +352,11 @@ impl TermView {
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             _drain: idle,
         }
+    }
+
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme;
+        cx.notify();
     }
 
     pub fn set_font_family(&mut self, font_family: String, cx: &mut Context<Self>) {
@@ -654,6 +665,7 @@ impl Render for TermView {
         let snapshot = self.vterm.render_snapshot();
         let focused = self.focus.is_focused(window);
         let font_family = self.font_family.clone();
+        let term_theme = self.theme;
         if let Some(writer) = &self.writer {
             writer.set_focused(focused);
         }
@@ -707,7 +719,7 @@ impl Render for TermView {
             .cursor_text()
             .size_full()
             .overflow_hidden()
-            .bg(rgba(0xfaf9f6ff))
+            .bg(rgba(term_theme.bg0))
             .child(
                 canvas(
                     move |bounds, window, _cx| {
@@ -747,7 +759,7 @@ impl Render for TermView {
                             &[TextRun {
                                 len: 1,
                                 font: base_font.clone(),
-                                color: rgba(0x2a2e38ff).into(),
+                                color: rgba(term_theme.fg0).into(),
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
@@ -786,7 +798,9 @@ impl Render for TermView {
                         let mut runs = Vec::new();
                         for (row, render_row) in snapshot.rows.iter().enumerate() {
                             for run in &render_row.runs {
-                                let fg = if run.style.dim {
+                                let fg = if run.style.fg == 0x2a2e38ff {
+                                    term_theme.fg0
+                                } else if run.style.dim {
                                     dim_u32(run.style.fg)
                                 } else {
                                     run.style.fg
@@ -827,7 +841,12 @@ impl Render for TermView {
                                     start_col: run.start_col,
                                     row,
                                     cells: run.cells,
-                                    bg: rgba(run.style.bg).into(),
+                                    bg: rgba(if run.style.bg == 0xffffffff {
+                                        term_theme.bg0
+                                    } else {
+                                        run.style.bg
+                                    })
+                                    .into(),
                                     selected: run.style.selected,
                                 });
                             }

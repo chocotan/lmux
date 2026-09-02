@@ -58,6 +58,19 @@ impl ThemeMode {
         }
     }
 
+    pub fn label_en(self) -> &'static str {
+        match self {
+            Self::Light => "Porcelain",
+            Self::Paper => "Paper Warm",
+            Self::Sky => "Clear Sky",
+            Self::Jade => "Jade",
+            Self::Sakura => "Sakura",
+            Self::Dark => "Ink",
+            Self::Synthwave => "Synthwave",
+            Self::OneDark => "One Dark",
+        }
+    }
+
     pub fn is_dark(self) -> bool {
         matches!(self, Self::Dark | Self::Synthwave | Self::OneDark)
     }

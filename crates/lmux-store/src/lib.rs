@@ -33,6 +33,10 @@ pub struct PersistedApp {
     pub theme: Option<String>,
     #[serde(default)]
     pub font_family: Option<String>,
+    #[serde(default)]
+    pub sound_enabled: Option<bool>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 impl Default for PersistedApp {
@@ -51,6 +55,8 @@ impl Default for PersistedApp {
             dark_mode: None,
             theme: None,
             font_family: None,
+            sound_enabled: None,
+            language: None,
         }
     }
 }

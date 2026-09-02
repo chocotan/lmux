@@ -1,4 +1,5 @@
 //! LmuxApp：根组件。侧栏（机器树+通知）+ 贴边终端网格。
+use crate::i18n::{self, Language};
 use crate::sound::{self, SoundKind};
 use crate::term_view::TermView;
 use crate::text_field::TextField;
@@ -241,6 +242,11 @@ pub struct LmuxApp {
     theme_mode: ThemeMode,
     font_family: String,
     settings_open: bool,
+    settings_theme_menu: bool,
+    settings_font_menu: bool,
+    settings_language_menu: bool,
+    sound_enabled: bool,
+    language: Language,
     palette_open: bool,
     palette_index: usize,
     palette_input: Entity<TextField>,
@@ -616,6 +622,11 @@ impl LmuxApp {
             .filter(|font| FONT_FAMILIES.contains(font))
             .unwrap_or(DEFAULT_FONT_FAMILY)
             .to_string();
+        let language = persisted
+            .language
+            .as_deref()
+            .and_then(Language::from_id)
+            .unwrap_or_else(Language::detect);
         let is_dark = theme_mode.is_dark();
         let palette_input = cx.new(|cx| {
             let mut field = TextField::new("输入命令、项目名或 Agent 名…", cx);
@@ -679,6 +690,11 @@ impl LmuxApp {
             theme_mode,
             font_family,
             settings_open: false,
+            settings_theme_menu: false,
+            settings_font_menu: false,
+            settings_language_menu: false,
+            sound_enabled: persisted.sound_enabled.unwrap_or(true),
+            language,
             palette_open: false,
             palette_index: 0,
             palette_input,
@@ -727,7 +743,13 @@ impl LmuxApp {
         for agent in opened {
             let session = app.server.sessions.blocking_lock().get(&agent).cloned();
             if let Some(session) = session {
-                let term = Self::create_local_term(agent.clone(), session, &app.font_family, cx);
+                let term = Self::create_local_term(
+                    agent.clone(),
+                    session,
+                    &app.font_family,
+                    Theme::for_mode(app.theme_mode),
+                    cx,
+                );
                 app.terms.insert(agent, term);
             }
         }
@@ -808,6 +830,8 @@ impl LmuxApp {
             dark_mode: Some(self.theme_mode.is_dark()),
             theme: Some(self.theme_mode.id().into()),
             font_family: Some(self.font_family.clone()),
+            sound_enabled: Some(self.sound_enabled),
+            language: Some(self.language.id().into()),
         };
         if let Err(e) = lmux_store::save(&self.store_path, &app) {
             tracing::warn!(error = %e, "persist state failed");
@@ -934,15 +958,16 @@ impl LmuxApp {
             self.toasts.truncate(3);
         }
 
-        // 提示音播放
-        match to {
-            lmux_core::model::AgentStatus::Blocked => {
-                sound::play_sound(SoundKind::Request);
+        if self.sound_enabled {
+            match to {
+                lmux_core::model::AgentStatus::Blocked => {
+                    sound::play_sound(SoundKind::Request);
+                }
+                lmux_core::model::AgentStatus::Done => {
+                    sound::play_sound(SoundKind::Done);
+                }
+                _ => {}
             }
-            lmux_core::model::AgentStatus::Done => {
-                sound::play_sound(SoundKind::Done);
-            }
-            _ => {}
         }
 
         // 系统桌面通知
@@ -988,11 +1013,23 @@ impl LmuxApp {
     }
 
     fn mark_agent_working(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+        let mut local = false;
         if let Some(a) = self.last_snapshot.agent_mut(agent) {
+            local = true;
             if a.status != lmux_core::model::AgentStatus::Working {
                 a.status = lmux_core::model::AgentStatus::Working;
                 a.status_since = lmux_core::model::now_secs();
                 cx.notify();
+            }
+        } else {
+            // 远程没有 mark_working RPC，先更新本地镜像，避免输入后仍显示 Idle。
+            for snapshot in self.remote_snaps.values_mut() {
+                if let Some(a) = snapshot.agent_mut(agent) {
+                    a.status = lmux_core::model::AgentStatus::Working;
+                    a.status_since = lmux_core::model::now_secs();
+                    cx.notify();
+                    break;
+                }
             }
         }
         // 与屏幕采样同走 DetectionEngine：既避免与引擎内部状态互斥（否则引擎
@@ -1000,21 +1037,24 @@ impl LmuxApp {
         // 又保证 Idle 状态下输入命令立即显示 working 反馈。
         let server_state = self.server.state.clone();
         let agent_id = agent.clone();
-        cx.background_spawn(async move {
-            let mut st = server_state.write().await;
-            let _ = st.mark_screen_working(&agent_id);
-        })
-        .detach();
+        if local {
+            cx.background_spawn(async move {
+                let mut st = server_state.write().await;
+                let _ = st.mark_screen_working(&agent_id);
+            })
+            .detach();
+        }
     }
 
     fn create_local_term(
         agent: AgentId,
         session: Arc<lmux_term::PtySession>,
         font_family: &str,
+        theme: Theme,
         cx: &mut Context<Self>,
     ) -> Entity<TermView> {
         let font_family = font_family.to_string();
-        let term = cx.new(|cx| TermView::new_local(agent.clone(), session, font_family, cx));
+        let term = cx.new(|cx| TermView::new_local(agent.clone(), session, font_family, theme, cx));
         cx.subscribe(
             &term,
             |this, _term, ev: &crate::term_view::TermEnterEvent, cx| {
@@ -1030,11 +1070,13 @@ impl LmuxApp {
         vterm: VTerm,
         remote_input: tokio::sync::mpsc::UnboundedSender<crate::term_view::RemoteTermCommand>,
         font_family: &str,
+        theme: Theme,
         cx: &mut Context<Self>,
     ) -> Entity<TermView> {
         let font_family = font_family.to_string();
-        let term =
-            cx.new(|cx| TermView::new_remote(agent.clone(), vterm, remote_input, font_family, cx));
+        let term = cx.new(|cx| {
+            TermView::new_remote(agent.clone(), vterm, remote_input, font_family, theme, cx)
+        });
         cx.subscribe(
             &term,
             |this, _term, ev: &crate::term_view::TermEnterEvent, cx| {
@@ -1057,7 +1099,13 @@ impl LmuxApp {
                 map.get(agent).cloned()
             };
             if let Some(sess) = sess {
-                let term = Self::create_local_term(agent.clone(), sess, &self.font_family, cx);
+                let term = Self::create_local_term(
+                    agent.clone(),
+                    sess,
+                    &self.font_family,
+                    Theme::for_mode(self.theme_mode),
+                    cx,
+                );
                 self.terms.insert(agent.clone(), term);
             } else {
                 return;
@@ -1084,6 +1132,7 @@ impl LmuxApp {
                 vterm.clone(),
                 command_tx,
                 &self.font_family,
+                Theme::for_mode(self.theme_mode),
                 cx,
             );
             self.terms.insert(agent.clone(), term);
@@ -1350,6 +1399,10 @@ impl LmuxApp {
             .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
         self.remote_project_input
             .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
+        let theme = Theme::for_mode(self.theme_mode);
+        for term in self.terms.values() {
+            term.update(cx, |term, cx| term.set_theme(theme, cx));
+        }
     }
 
     fn close_tab(
@@ -1485,7 +1538,13 @@ impl LmuxApp {
             .blocking_write()
             .add_agent(project, instance);
         self.server.dirty.bump();
-        let term = Self::create_local_term(agent_id.clone(), session, &self.font_family, cx);
+        let term = Self::create_local_term(
+            agent_id.clone(),
+            session,
+            &self.font_family,
+            Theme::for_mode(self.theme_mode),
+            cx,
+        );
         self.terms.insert(agent_id.clone(), term);
         let pane = self.active_pane.clone();
         self.pane_tree.open_tab(&pane, agent_id.clone());
@@ -1542,7 +1601,13 @@ impl LmuxApp {
             },
         );
         self.server.dirty.bump();
-        let term = Self::create_local_term(agent_id.clone(), session, &self.font_family, cx);
+        let term = Self::create_local_term(
+            agent_id.clone(),
+            session,
+            &self.font_family,
+            Theme::for_mode(self.theme_mode),
+            cx,
+        );
         self.terms.insert(agent_id.clone(), term);
         Some(agent_id)
     }
@@ -2624,6 +2689,8 @@ impl LmuxApp {
 
     fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
         self.theme_mode = mode;
+        self.settings_theme_menu = false;
+        self.settings_font_menu = false;
         self.apply_theme_to_inputs(cx);
         self.persist();
         cx.notify();
@@ -2631,11 +2698,26 @@ impl LmuxApp {
 
     fn set_font_family(&mut self, font_family: &str, cx: &mut Context<Self>) {
         self.font_family = font_family.to_string();
+        self.settings_font_menu = false;
+        self.settings_theme_menu = false;
         let family = self.font_family.clone();
+        let theme = Theme::for_mode(self.theme_mode);
         for term in self.terms.values() {
             let family = family.clone();
-            term.update(cx, |term, cx| term.set_font_family(family, cx));
+            term.update(cx, |term, cx| {
+                term.set_font_family(family, cx);
+                term.set_theme(theme, cx);
+            });
         }
+        self.persist();
+        cx.notify();
+    }
+
+    fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        self.language = language;
+        self.settings_language_menu = false;
+        self.settings_theme_menu = false;
+        self.settings_font_menu = false;
         self.persist();
         cx.notify();
     }
@@ -2669,7 +2751,6 @@ impl LmuxApp {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_lg()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -2699,7 +2780,7 @@ impl LmuxApp {
                                     .text_size(px(15.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgba(theme.fg0))
-                                    .child("设置"),
+                                    .child(i18n::text(self.language, "设置", "Settings")),
                             )
                             .child(
                                 div()
@@ -2727,51 +2808,132 @@ impl LmuxApp {
                             .text_size(px(10.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg2))
-                            .child("主题"),
+                            .child(i18n::text(self.language, "主题", "Theme")),
                     )
-                    .child(div().px_4().flex().flex_col().gap_1().children(
-                        ThemeMode::ALL.into_iter().map(|mode| {
-                            let selected = mode == self.theme_mode;
-                            let swatch = Theme::for_mode(mode);
-                            div()
-                                .id(gpui::ElementId::Name(
-                                    format!("settings-theme-{}", mode.id()).into(),
-                                ))
-                                .h(px(34.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .rounded_sm()
-                                .when(selected, |el| el.bg(rgba(theme.bg2)))
-                                .when(!selected, |el| el.hover(|s| s.bg(rgba(theme.bg2))))
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.set_theme(mode, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .w(px(28.))
-                                        .h(px(18.))
-                                        .bg(rgba(swatch.bg0))
-                                        .border_1()
-                                        .border_color(rgba(swatch.accent)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(12.))
-                                        .text_color(rgba(theme.fg0))
-                                        .child(mode.label()),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(20.))
-                                        .text_size(px(14.))
-                                        .text_color(rgba(theme.accent))
-                                        .child(if selected { "✓" } else { "" }),
-                                )
-                        }),
-                    ))
+                    .child(
+                        div()
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div().text_size(px(12.)).text_color(rgba(theme.fg0)).child(
+                                    i18n::text(self.language, "界面主题", "Interface theme"),
+                                ),
+                            )
+                            .child({
+                                let selected = Theme::for_mode(self.theme_mode);
+                                div()
+                                    .relative()
+                                    .child(
+                                        div()
+                                            .id("settings-theme-select")
+                                            .w(px(210.))
+                                            .h(px(32.))
+                                            .px_2()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .border_1()
+                                            .border_color(rgba(theme.line))
+                                            .hover(|s| s.bg(rgba(theme.bg2)))
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.settings_theme_menu =
+                                                    !this.settings_theme_menu;
+                                                this.settings_font_menu = false;
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .w(px(24.))
+                                                    .h(px(16.))
+                                                    .bg(rgba(selected.bg0))
+                                                    .border_1()
+                                                    .border_color(rgba(selected.accent)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_size(px(11.))
+                                                    .text_color(rgba(theme.fg0))
+                                                    .child(if self.language == Language::English {
+                                                        self.theme_mode.label_en()
+                                                    } else {
+                                                        self.theme_mode.label()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgba(theme.fg1))
+                                                    .child("⌄"),
+                                            ),
+                                    )
+                                    .when(self.settings_theme_menu, |menu| {
+                                        menu.child(
+                                            div()
+                                                .absolute()
+                                                .top(px(34.))
+                                                .right(px(0.))
+                                                .w(px(210.))
+                                                .bg(rgba(theme.bg1))
+                                                .border_1()
+                                                .border_color(rgba(theme.line))
+                                                .shadow_lg()
+                                                .children(ThemeMode::ALL.into_iter().map(|mode| {
+                                                    let selected = mode == self.theme_mode;
+                                                    let swatch = Theme::for_mode(mode);
+                                                    div()
+                                                        .id(gpui::ElementId::Name(
+                                                            format!(
+                                                                "settings-theme-option-{}",
+                                                                mode.id()
+                                                            )
+                                                            .into(),
+                                                        ))
+                                                        .h(px(30.))
+                                                        .px_2()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .when(selected, |el| el.bg(rgba(theme.bg2)))
+                                                        .when(!selected, |el| {
+                                                            el.hover(|s| s.bg(rgba(theme.bg2)))
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _event, _window, cx| {
+                                                                this.set_theme(mode, cx);
+                                                            },
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .w(px(22.))
+                                                                .h(px(14.))
+                                                                .bg(rgba(swatch.bg0))
+                                                                .border_1()
+                                                                .border_color(rgba(swatch.accent)),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .text_size(px(11.))
+                                                                .text_color(rgba(theme.fg0))
+                                                                .child(
+                                                                    if self.language
+                                                                        == Language::English
+                                                                    {
+                                                                        mode.label_en()
+                                                                    } else {
+                                                                        mode.label()
+                                                                    },
+                                                                ),
+                                                        )
+                                                        .child(if selected { "✓" } else { "" })
+                                                })),
+                                        )
+                                    })
+                            }),
+                    )
                     .child(
                         div()
                             .px_4()
@@ -2780,46 +2942,227 @@ impl LmuxApp {
                             .text_size(px(10.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg2))
-                            .child("终端字体"),
+                            .child(i18n::text(self.language, "终端字体", "Terminal font")),
                     )
-                    .child(div().px_4().pb_4().flex().flex_col().gap_1().children(
-                        FONT_FAMILIES.iter().map(|family| {
-                            let selected = self.font_family == *family;
-                            let family = (*family).to_string();
-                            div()
-                                .id(gpui::ElementId::Name(
-                                    format!("settings-font-{}", family.replace(' ', "-")).into(),
-                                ))
-                                .h(px(34.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .rounded_sm()
-                                .when(selected, |el| el.bg(rgba(theme.bg2)))
-                                .when(!selected, |el| el.hover(|s| s.bg(rgba(theme.bg2))))
-                                .on_click(cx.listener({
-                                    let family = family.clone();
-                                    move |this, _event, _window, cx| {
-                                        this.set_font_family(&family, cx);
-                                    }
-                                }))
-                                .child(
+                    .child(div().px_4().pb_4().flex().justify_end().child({
+                        div()
+                            .relative()
+                            .child(
+                                div()
+                                    .id("settings-font-select")
+                                    .w(px(260.))
+                                    .h(px(32.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .border_1()
+                                    .border_color(rgba(theme.line))
+                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.settings_font_menu = !this.settings_font_menu;
+                                        this.settings_theme_menu = false;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(11.))
+                                            .text_color(rgba(theme.fg0))
+                                            .font_family(self.font_family.clone())
+                                            .child(self.font_family.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgba(theme.fg1))
+                                            .child("⌄"),
+                                    ),
+                            )
+                            .when(self.settings_font_menu, |menu| {
+                                menu.child(
                                     div()
-                                        .flex_1()
-                                        .text_size(px(12.))
-                                        .text_color(rgba(theme.fg0))
-                                        .font_family(family.clone())
-                                        .child(family),
+                                        .absolute()
+                                        .bottom(px(34.))
+                                        .right(px(0.))
+                                        .w(px(260.))
+                                        .bg(rgba(theme.bg1))
+                                        .border_1()
+                                        .border_color(rgba(theme.line))
+                                        .shadow_lg()
+                                        .children(FONT_FAMILIES.iter().map(|family| {
+                                            let selected = self.font_family == *family;
+                                            let family = (*family).to_string();
+                                            div()
+                                                .id(gpui::ElementId::Name(
+                                                    format!(
+                                                        "settings-font-option-{}",
+                                                        family.replace(' ', "-")
+                                                    )
+                                                    .into(),
+                                                ))
+                                                .h(px(30.))
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .when(selected, |el| el.bg(rgba(theme.bg2)))
+                                                .when(!selected, |el| {
+                                                    el.hover(|s| s.bg(rgba(theme.bg2)))
+                                                })
+                                                .on_click(cx.listener({
+                                                    let family = family.clone();
+                                                    move |this, _event, _window, cx| {
+                                                        this.set_font_family(&family, cx);
+                                                    }
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .text_size(px(11.))
+                                                        .text_color(rgba(theme.fg0))
+                                                        .font_family(family.clone())
+                                                        .child(family),
+                                                )
+                                                .child(if selected { "✓" } else { "" })
+                                        })),
                                 )
-                                .child(
-                                    div()
-                                        .w(px(20.))
-                                        .text_size(px(14.))
-                                        .text_color(rgba(theme.accent))
-                                        .child(if selected { "✓" } else { "" }),
-                                )
-                        }),
-                    )),
+                            })
+                    }))
+                    .child(
+                        div()
+                            .px_4()
+                            .pb_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgba(theme.fg0))
+                                    .child(i18n::text(self.language, "语言", "Language")),
+                            )
+                            .child({
+                                div()
+                                    .relative()
+                                    .child(
+                                        div()
+                                            .id("settings-language-select")
+                                            .w(px(180.))
+                                            .h(px(32.))
+                                            .px_2()
+                                            .flex()
+                                            .items_center()
+                                            .border_1()
+                                            .border_color(rgba(theme.line))
+                                            .hover(|s| s.bg(rgba(theme.bg2)))
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.settings_language_menu =
+                                                    !this.settings_language_menu;
+                                                this.settings_theme_menu = false;
+                                                this.settings_font_menu = false;
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_size(px(11.))
+                                                    .text_color(rgba(theme.fg0))
+                                                    .child(self.language.label()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgba(theme.fg1))
+                                                    .child("⌄"),
+                                            ),
+                                    )
+                                    .when(self.settings_language_menu, |menu| {
+                                        menu.child(
+                                            div()
+                                                .absolute()
+                                                .bottom(px(34.))
+                                                .right(px(0.))
+                                                .w(px(180.))
+                                                .bg(rgba(theme.bg1))
+                                                .border_1()
+                                                .border_color(rgba(theme.line))
+                                                .shadow_lg()
+                                                .children(Language::ALL.into_iter().map(
+                                                    |language| {
+                                                        let selected = language == self.language;
+                                                        div()
+                                                            .id(gpui::ElementId::Name(
+                                                                format!(
+                                                                    "settings-language-option-{}",
+                                                                    language.id()
+                                                                )
+                                                                .into(),
+                                                            ))
+                                                            .h(px(30.))
+                                                            .px_2()
+                                                            .flex()
+                                                            .items_center()
+                                                            .when(selected, |el| {
+                                                                el.bg(rgba(theme.bg2))
+                                                            })
+                                                            .when(!selected, |el| {
+                                                                el.hover(|s| s.bg(rgba(theme.bg2)))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |this, _event, _window, cx| {
+                                                                    this.set_language(language, cx);
+                                                                },
+                                                            ))
+                                                            .child(language.label())
+                                                    },
+                                                )),
+                                        )
+                                    })
+                            }),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pb_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div().text_size(px(12.)).text_color(rgba(theme.fg0)).child(
+                                    i18n::text(self.language, "通知声音", "Notification sound"),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-sound-toggle")
+                                    .h(px(30.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .border_1()
+                                    .border_color(rgba(if self.sound_enabled {
+                                        theme.accent
+                                    } else {
+                                        theme.line
+                                    }))
+                                    .text_size(px(11.))
+                                    .text_color(rgba(if self.sound_enabled {
+                                        theme.accent
+                                    } else {
+                                        theme.fg2
+                                    }))
+                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.sound_enabled = !this.sound_enabled;
+                                        this.persist();
+                                        cx.notify();
+                                    }))
+                                    .child(if self.sound_enabled {
+                                        i18n::text(self.language, "已开启", "Enabled")
+                                    } else {
+                                        i18n::text(self.language, "已关闭", "Disabled")
+                                    }),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -4409,18 +4752,6 @@ impl LmuxApp {
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
-                    .border_1()
-                    .border_color(rgba(
-                        if let Some(alert_color) =
-                            pane_att.border_color.filter(|_| pane_att.is_alerting)
-                        {
-                            alert_color
-                        } else if is_focused_pane {
-                            theme.accent
-                        } else {
-                            theme.line
-                        },
-                    ))
                     .when(is_focused_pane || pane_att.is_alerting, |el| el.shadow_md())
                     .on_hover(cx.listener({
                         let pane_id = pane_click_id.clone();
@@ -5338,7 +5669,7 @@ impl Render for LmuxApp {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child("NOTIFICATIONS")
+                            .child(i18n::text(self.language, "通知", "Notifications"))
                             .when(unread_count > 0, |header| {
                                 header.child(
                                     div()
@@ -5362,13 +5693,14 @@ impl Render for LmuxApp {
                                 this.notifications.clear();
                                 cx.notify();
                             }))
-                            .child("清空"),
+                            .child(i18n::text(self.language, "清空", "Clear")),
                     ),
             )
             .child(
                 div()
                     .id("sidebar-notifications-scroll")
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .when(self.notifications.is_empty(), |list| {
                         list.child(
@@ -5377,7 +5709,7 @@ impl Render for LmuxApp {
                                 .py_2()
                                 .text_size(px(11.))
                                 .text_color(rgba(theme.fg2))
-                                .child("暂无通知"),
+                                .child(i18n::text(self.language, "暂无通知", "No notifications")),
                         )
                     })
                     .children(self.notifications.iter().enumerate().map(|(idx, n)| {
@@ -5618,39 +5950,21 @@ impl Render for LmuxApp {
                     .child(notif_section)
                     .child(
                         div()
-                            .h(px(64.))
+                            .h(px(32.))
                             .flex()
-                            .flex_col()
                             .border_t_1()
                             .border_color(rgba(theme.line))
                             .child(
                                 div()
-                                    .id("open-settings")
+                                    .id("connect-machine")
+                                    .flex_1()
                                     .h(px(32.))
-                                    .px_3()
+                                    .px_2()
                                     .flex()
                                     .items_center()
                                     .text_size(px(11.))
                                     .text_color(rgba(theme.fg1))
                                     .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                                    .on_click(cx.listener(|this, _ev, window, cx| {
-                                        this.settings_open = true;
-                                        this.palette_open = false;
-                                        this.focus.focus(window, cx);
-                                        cx.notify();
-                                    }))
-                                    .child("设置"),
-                            )
-                            .child(
-                                div()
-                                    .id("connect-machine")
-                                    .h(px(32.))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(11.))
-                                    .text_color(rgba(theme.fg1))
-                                    .hover(|s| s.text_color(rgba(theme.fg0)))
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.connect_dialog = true;
                                         this.connect_focus_index = 0;
@@ -5666,7 +5980,26 @@ impl Render for LmuxApp {
                                         this.connect_input.focus_handle(cx).focus(window, cx);
                                         cx.notify();
                                     }))
-                                    .child("+ Connect..."),
+                                    .child(i18n::text(self.language, "+ 机器", "+ Machine")),
+                            )
+                            .child(
+                                div()
+                                    .id("open-settings")
+                                    .flex_1()
+                                    .h(px(32.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(11.))
+                                    .text_color(rgba(theme.fg1))
+                                    .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.settings_open = true;
+                                        this.palette_open = false;
+                                        this.focus.focus(window, cx);
+                                        cx.notify();
+                                    }))
+                                    .child(i18n::text(self.language, "设置", "Settings")),
                             ),
                     ),
             )
@@ -5915,6 +6248,7 @@ fn render_pi_loading_spinner(frame: usize, theme: Theme) -> gpui::Div {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)]
 struct AttentionStyle {
     bg_color: Option<u32>,
     text_color: Option<u32>,

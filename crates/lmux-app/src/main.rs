@@ -1,5 +1,6 @@
 //! lmux GPUI 主程序：三区极简 UI（侧栏机器树 / 贴边终端网格 / 浮层）
 mod app;
+mod i18n;
 mod sound;
 mod term_view;
 mod text_field;
