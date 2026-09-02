@@ -36,6 +36,7 @@ pub struct VTermModes {
     pub alt_screen: bool,
     pub alternate_scroll: bool,
     pub app_cursor: bool,
+    pub bracketed_paste: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,6 +261,7 @@ impl VTerm {
                     alt_screen: mode.contains(TermMode::ALT_SCREEN),
                     alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
                     app_cursor: mode.contains(TermMode::APP_CURSOR),
+                    bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
                 }
             })
             .unwrap_or_default()

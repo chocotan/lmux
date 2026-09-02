@@ -13,7 +13,8 @@ use lmux_term::{PtySession, VTerm};
 use std::sync::Arc;
 
 const FONT_SIZE: f32 = 13.0;
-const TERM_PADDING: f32 = 4.0;
+const TERM_PADDING_X: f32 = 12.0;
+const TERM_PADDING_Y: f32 = 8.0;
 const FALLBACK_CELL_W: f32 = 8.2;
 const FALLBACK_CELL_H: f32 = 17.0;
 const SCROLLBAR_WIDTH: f32 = 10.0;
@@ -421,7 +422,6 @@ impl TermView {
             {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
-            self.vterm.stop_selection();
             handled = true;
         }
         if handled {
@@ -435,6 +435,10 @@ impl TermView {
         if ks.modifiers.control {
             // 全局命令面板快捷键，交给 root action，不发给 PTY。
             if key == "k" || key == "w" || (ks.modifiers.shift && key == "t") {
+                return vec![];
+            }
+            // 粘贴由 TermView 自己处理；Ctrl+C 无选区时仍走 SIGINT。
+            if key == "v" && !ks.modifiers.alt {
                 return vec![];
             }
             if key.len() == 1 {
@@ -478,6 +482,26 @@ impl TermView {
             out.insert(0, 0x1b);
         }
         out
+    }
+
+    fn paste_clipboard(&self, cx: &mut Context<Self>) {
+        let Some(text) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .filter(|text| !text.is_empty())
+        else {
+            return;
+        };
+        let Some(sink) = self.input_sink() else {
+            return;
+        };
+        if self.vterm.modes().bracketed_paste {
+            sink.write(b"\x1b[200~");
+            sink.write(text.as_bytes());
+            sink.write(b"\x1b[201~");
+        } else {
+            sink.write(text.as_bytes());
+        }
     }
 
     fn scroll_wheel(&self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -686,22 +710,33 @@ impl Render for TermView {
             .relative()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
-                if ev.keystroke.modifiers.control
-                    && ev.keystroke.modifiers.shift
-                    && ev.keystroke.key.as_str() == "c"
-                {
+                let ks = &ev.keystroke;
+                let copy_or_paste = (ks.modifiers.control || ks.modifiers.platform)
+                    && !ks.modifiers.alt
+                    && matches!(ks.key.as_str(), "c" | "v");
+                if copy_or_paste && ks.key.as_str() == "c" {
                     if let Some(text) = this
                         .vterm
                         .selection_to_string()
                         .filter(|text| !text.is_empty())
                     {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        cx.stop_propagation();
+                        return;
                     }
+                    if ks.modifiers.shift || ks.modifiers.platform {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // Ctrl+C 且没有选区：继续当 SIGINT 发给 PTY。
+                }
+                if copy_or_paste && ks.key.as_str() == "v" {
+                    this.paste_clipboard(cx);
                     cx.stop_propagation();
                     return;
                 }
                 if let Some(sink) = this.input_sink() {
-                    let bytes = Self::keystroke_bytes(&ev.keystroke);
+                    let bytes = Self::keystroke_bytes(ks);
                     if !bytes.is_empty() {
                         let is_enter = bytes.contains(&b'\r') || bytes.contains(&b'\n');
                         sink.write(&bytes);
@@ -723,12 +758,13 @@ impl Render for TermView {
             .child(
                 canvas(
                     move |bounds, window, _cx| {
-                        let padding = px(TERM_PADDING);
+                        let padding_x = px(TERM_PADDING_X);
+                        let padding_y = px(TERM_PADDING_Y);
                         let inner = Bounds {
-                            origin: point(bounds.origin.x + padding, bounds.origin.y + padding),
+                            origin: point(bounds.origin.x + padding_x, bounds.origin.y + padding_y),
                             size: size(
-                                px((f32::from(bounds.size.width) - TERM_PADDING * 2.0).max(1.0)),
-                                px((f32::from(bounds.size.height) - TERM_PADDING * 2.0).max(1.0)),
+                                px((f32::from(bounds.size.width) - TERM_PADDING_X * 2.0).max(1.0)),
+                                px((f32::from(bounds.size.height) - TERM_PADDING_Y * 2.0).max(1.0)),
                             ),
                         };
 
@@ -1056,7 +1092,7 @@ impl Render for TermView {
                             div()
                                 .absolute()
                                 .right(px(SCROLLBAR_RIGHT))
-                                .top(px(TERM_PADDING))
+                                .top(px(TERM_PADDING_Y))
                                 .w(px(SCROLLBAR_WIDTH))
                                 .h(px(geometry.track_height))
                                 .rounded_sm()
@@ -1210,6 +1246,10 @@ mod tests {
         assert_eq!(
             TermView::keystroke_bytes(&ks("c", Some("c"), true, false)),
             vec![0x03]
+        );
+        assert_eq!(
+            TermView::keystroke_bytes(&ks("v", Some("v"), true, false)),
+            Vec::<u8>::new()
         );
         assert_eq!(
             TermView::keystroke_bytes(&ks("k", Some("k"), true, false)),

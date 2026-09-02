@@ -107,7 +107,7 @@ impl Theme {
                 line: 0xd0ccc3ff,
                 fg0: 0x242831ff,
                 fg1: 0x727783ff,
-                fg2: 0x8b90a0ff,
+                fg2: 0x5c6370ff,
                 accent: 0x3d6cd8ff,
                 green: 0x529633ff,
                 yellow: 0xb88226ff,

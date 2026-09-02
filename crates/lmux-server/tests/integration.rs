@@ -113,7 +113,14 @@ async fn remote_term_input_reaches_pty_and_project_add_validates_path() {
     )
     .await
     .unwrap();
-    let response: Response = serde_json::from_value(read_frame(&mut conn).await.unwrap()).unwrap();
+    // 提交型输入会先广播 agent.status_changed（working）事件，读响应时跳过事件帧。
+    let response: Response = loop {
+        let value = read_frame(&mut conn).await.unwrap();
+        if value.get("event").is_some() {
+            continue;
+        }
+        break serde_json::from_value(value).unwrap();
+    };
     let project: Project = serde_json::from_value(response.result.unwrap()).unwrap();
     assert_eq!(project.name, "remote-project");
     assert!(state

@@ -6,12 +6,28 @@ mod term_view;
 mod text_field;
 mod theme;
 
-use gpui::{px, size, App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions};
+use gpui::{
+    px, size, App, AppContext as _, AssetSource, Bounds, KeyBinding, SharedString, WindowBounds,
+    WindowOptions,
+};
 use lmux_core::model::MachineInfo;
 use lmux_server::{DirtyFlag, LmuxServer, ServerState};
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        Ok(app::svg_asset(path).map(Cow::Borrowed))
+    }
+
+    fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(Vec::new())
+    }
+}
 
 fn data_dir() -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
@@ -348,46 +364,48 @@ fn main() {
     let connect_for_app = connect_to.clone();
     let persisted_for_app = persisted.clone();
     let store_for_app = store_path.clone();
-    gpui_platform::application().run(move |cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("ctrl-k", app::TogglePalette, None),
-            KeyBinding::new("ctrl-w", app::CloseTab, None),
-            KeyBinding::new("ctrl-shift-t", app::NewShellTab, None),
-            KeyBinding::new("ctrl-tab", app::NextTab, None),
-            KeyBinding::new("ctrl-shift-tab", app::PrevTab, None),
-            KeyBinding::new("alt-1", app::SelectTab1, None),
-            KeyBinding::new("alt-2", app::SelectTab2, None),
-            KeyBinding::new("alt-3", app::SelectTab3, None),
-            KeyBinding::new("alt-4", app::SelectTab4, None),
-            KeyBinding::new("alt-5", app::SelectTab5, None),
-            KeyBinding::new("alt-6", app::SelectTab6, None),
-            KeyBinding::new("alt-7", app::SelectTab7, None),
-            KeyBinding::new("alt-8", app::SelectTab8, None),
-            KeyBinding::new("alt-9", app::SelectTab9, None),
-            KeyBinding::new("alt-left", app::FocusPaneLeft, None),
-            KeyBinding::new("alt-right", app::FocusPaneRight, None),
-            KeyBinding::new("alt-up", app::FocusPaneUp, None),
-            KeyBinding::new("alt-down", app::FocusPaneDown, None),
-        ]);
-        let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
-        let _ = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                window.set_window_title("lmux");
-                cx.new(|cx| {
-                    app::LmuxApp::new(
-                        cx,
-                        Arc::clone(&server_for_app),
-                        connect_for_app.clone(),
-                        persisted_for_app.clone(),
-                        store_for_app.clone(),
-                    )
-                })
-            },
-        );
-        cx.activate(true);
-    });
+    gpui_platform::application()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-k", app::TogglePalette, None),
+                KeyBinding::new("ctrl-w", app::CloseTab, None),
+                KeyBinding::new("ctrl-shift-t", app::NewShellTab, None),
+                KeyBinding::new("ctrl-tab", app::NextTab, None),
+                KeyBinding::new("ctrl-shift-tab", app::PrevTab, None),
+                KeyBinding::new("alt-1", app::SelectTab1, None),
+                KeyBinding::new("alt-2", app::SelectTab2, None),
+                KeyBinding::new("alt-3", app::SelectTab3, None),
+                KeyBinding::new("alt-4", app::SelectTab4, None),
+                KeyBinding::new("alt-5", app::SelectTab5, None),
+                KeyBinding::new("alt-6", app::SelectTab6, None),
+                KeyBinding::new("alt-7", app::SelectTab7, None),
+                KeyBinding::new("alt-8", app::SelectTab8, None),
+                KeyBinding::new("alt-9", app::SelectTab9, None),
+                KeyBinding::new("alt-left", app::FocusPaneLeft, None),
+                KeyBinding::new("alt-right", app::FocusPaneRight, None),
+                KeyBinding::new("alt-up", app::FocusPaneUp, None),
+                KeyBinding::new("alt-down", app::FocusPaneDown, None),
+            ]);
+            let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+            let _ = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    window.set_window_title("lmux");
+                    cx.new(|cx| {
+                        app::LmuxApp::new(
+                            cx,
+                            Arc::clone(&server_for_app),
+                            connect_for_app.clone(),
+                            persisted_for_app.clone(),
+                            store_for_app.clone(),
+                        )
+                    })
+                },
+            );
+            cx.activate(true);
+        });
 }

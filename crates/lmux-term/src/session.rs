@@ -398,7 +398,12 @@ fn update_tmux_environment(session: &str, env: &[(String, String)]) {
 }
 
 fn configure_tmux_server() {
-    for (option, value) in [("status", "off"), ("mouse", "on"), ("extended-keys", "on")] {
+    for (option, value) in [
+        ("status", "off"),
+        ("mouse", "on"),
+        ("extended-keys", "on"),
+        ("extended-keys-format", "csi-u"),
+    ] {
         let _ = std::process::Command::new("tmux")
             .args(["-L", "lmux", "set-option", "-g", option, value])
             .stdout(std::process::Stdio::null())
@@ -446,7 +451,7 @@ fn tmux_config_path() -> PathBuf {
         let _ = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
     }
     let path = base.join("tmux.conf");
-    const CONFIG: &str = "set -g status off\nset -g mouse on\nunbind -n MouseDrag1Pane\nunbind -n MouseDrag1Border\nunbind -T copy-mode MouseDrag1Pane\nunbind -T copy-mode-vi MouseDrag1Pane\nset -g extended-keys on\nset -g default-terminal tmux-256color\nset -ag terminal-overrides ',xterm-256color:RGB'\n";
+    const CONFIG: &str = "set -g status off\nset -g mouse on\nunbind -n MouseDrag1Pane\nunbind -n MouseDrag1Border\nunbind -T copy-mode MouseDrag1Pane\nunbind -T copy-mode-vi MouseDrag1Pane\nset -g extended-keys on\nset -g extended-keys-format csi-u\nset -g default-terminal tmux-256color\nset -ag terminal-overrides ',xterm-256color:RGB'\n";
     if std::fs::read_to_string(&path).ok().as_deref() != Some(CONFIG) {
         let _ = std::fs::write(&path, CONFIG);
         #[cfg(unix)]
@@ -498,6 +503,8 @@ mod tests {
         let config = std::fs::read_to_string(tmux_config_path()).unwrap();
         assert!(config.contains("set -g mouse on"));
         assert!(config.contains("set -g status off"));
+        assert!(config.contains("set -g extended-keys on"));
+        assert!(config.contains("set -g extended-keys-format csi-u"));
     }
 
     #[tokio::test]

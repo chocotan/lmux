@@ -336,6 +336,17 @@ impl LmuxServer {
                                                 Some(session) => {
                                                     let data = lmux_term::b64_decode(&params.data_b64)?;
                                                     session.write_input(&data);
+                                                    // 提交型输入（含换行）→ working；命令结束后
+                                                    // 屏幕检测（提示符规则）自动 Working→Idle。
+                                                    if data.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+                                                        let mut st = self.state.write().await;
+                                                        let events = st.mark_screen_working(&params.agent);
+                                                        drop(st);
+                                                        for event in events {
+                                                            let _ = self.events.send(event);
+                                                        }
+                                                        self.dirty.bump();
+                                                    }
                                                     write_frame(&mut write_half, &Response::ok(req.id, serde_json::json!({"ok": true}))).await?;
                                                 }
                                                 None => write_frame(&mut write_half, &Response::err(req.id, "no_such_agent", params.agent)).await?,

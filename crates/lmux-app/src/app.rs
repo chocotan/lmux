@@ -5,8 +5,9 @@ use crate::term_view::TermView;
 use crate::text_field::TextField;
 use crate::theme::{Theme, ThemeMode};
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgba, Context, Entity, FocusHandle, Focusable,
-    MouseButton, ParentElement, Pixels, Point, Render, SharedString, Styled, Window,
+    canvas, div, prelude::*, px, relative, rgba, svg, Context, Entity, FocusHandle, Focusable,
+    MouseButton, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Svg,
+    Window,
 };
 use lmux_core::model::{AgentId, Snapshot};
 use lmux_core::{PaneId, PaneNode, SplitAxis};
@@ -40,25 +41,28 @@ gpui::actions!(
     ]
 );
 
-fn format_relative_time(then: u64) -> String {
-    let now = lmux_core::model::now_secs();
-    let diff = now.saturating_sub(then);
-    if diff < 10 {
-        "刚刚".into()
-    } else if diff < 60 {
-        format!("{diff}s 前")
-    } else if diff < 3600 {
-        format!("{}m 前", diff / 60)
-    } else {
-        format!("{}h 前", diff / 3600)
-    }
-}
-
 const SPLIT_HORIZONTAL_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='2'/><path d='M12 4v16'/></svg>"#;
 const SPLIT_VERTICAL_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='2'/><path d='M3 12h18'/></svg>"#;
 const MAXIMIZE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5'/></svg>"#;
 const RESTORE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='7' y='7' width='13' height='13' rx='1'/><path d='M17 7V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h3'/></svg>"#;
 const CLOSE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round'><path d='M6 6l12 12M18 6L6 18'/></svg>"#;
+const CONNECT_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M7 7h10v10H7z'/><path d='M4 4h10M4 4v10M20 20H10M20 20V10'/></svg>"#;
+const THEME_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M20 15.5A8.5 8.5 0 1 1 8.5 4 6.5 6.5 0 0 0 20 15.5z'/></svg>"#;
+const NOTIFICATION_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9'/><path d='M10 21h4'/></svg>"#;
+const PLUS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round'><path d='M12 5v14M5 12h14'/></svg>"#;
+const SETTINGS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='3'/><path d='M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.41 1.41-.06-.06A1.7 1.7 0 0 0 16.45 18a1.7 1.7 0 0 0-1 .62 1.7 1.7 0 0 0-.4 1.1V20h-2v-.28a1.7 1.7 0 0 0-1.1-1.57 1.7 1.7 0 0 0-1.88.34l-.06.06-1.41-1.41.06-.06A1.7 1.7 0 0 0 8 15.55a1.7 1.7 0 0 0-.62-1 1.7 1.7 0 0 0-1.1-.4H6v-2h.28a1.7 1.7 0 0 0 1.57-1.1A1.7 1.7 0 0 0 7.5 9.17l-.06-.06 1.41-1.41.06.06A1.7 1.7 0 0 0 10.55 8a1.7 1.7 0 0 0 1-.62 1.7 1.7 0 0 0 .4-1.1V6h2v.28a1.7 1.7 0 0 0 1.1 1.57 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.41 1.41-.06.06A1.7 1.7 0 0 0 16 10.45a1.7 1.7 0 0 0 .62 1 1.7 1.7 0 0 0 1.1.4H18v2h-.28A1.7 1.7 0 0 0 16.15 15z'/></svg>"#;
+const SVG_ASSETS: &[(&str, &[u8])] = &[
+    ("icons/split-horizontal.svg", SPLIT_HORIZONTAL_ICON),
+    ("icons/split-vertical.svg", SPLIT_VERTICAL_ICON),
+    ("icons/maximize.svg", MAXIMIZE_ICON),
+    ("icons/restore.svg", RESTORE_ICON),
+    ("icons/close.svg", CLOSE_ICON),
+    ("icons/connect.svg", CONNECT_ICON),
+    ("icons/theme.svg", THEME_ICON),
+    ("icons/notification.svg", NOTIFICATION_ICON),
+    ("icons/plus.svg", PLUS_ICON),
+    ("icons/settings.svg", SETTINGS_ICON),
+];
 const FONT_FAMILIES: &[&str] = &[
     "Noto Sans Mono",
     "JetBrains Mono",
@@ -68,26 +72,18 @@ const FONT_FAMILIES: &[&str] = &[
 ];
 const DEFAULT_FONT_FAMILY: &str = "Noto Sans Mono";
 
-fn panel_icon(data: &[u8], color: u32) -> gpui::Div {
-    let glyph = if data == SPLIT_HORIZONTAL_ICON {
-        "↔"
-    } else if data == SPLIT_VERTICAL_ICON {
-        "↕"
-    } else if data == MAXIMIZE_ICON {
-        "⛶"
-    } else if data == RESTORE_ICON {
-        "❐"
-    } else {
-        "×"
-    };
-    div()
-        .w(px(14.))
-        .h(px(14.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(rgba(color))
-        .child(glyph)
+pub(crate) fn svg_asset(path: &str) -> Option<&'static [u8]> {
+    SVG_ASSETS
+        .iter()
+        .find_map(|(asset_path, data)| (*asset_path == path).then_some(*data))
+}
+
+fn panel_icon(data: &[u8], color: u32) -> Svg {
+    let path = SVG_ASSETS
+        .iter()
+        .find_map(|(path, bytes)| (*bytes == data).then_some(*path))
+        .expect("panel icon must be registered");
+    svg().path(path).size(px(14.)).text_color(rgba(color))
 }
 #[derive(Clone)]
 struct DragTab {
@@ -98,6 +94,7 @@ struct DragTab {
 struct DragGhost {
     label: SharedString,
     offset: Point<Pixels>,
+    theme: Theme,
 }
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -108,11 +105,11 @@ impl Render for DragGhost {
                 div()
                     .px_2()
                     .py_1()
-                    .bg(rgba(0xffffffff))
+                    .bg(rgba(self.theme.bg2))
                     .border_1()
-                    .border_color(rgba(0x3d6cd8ff))
+                    .border_color(rgba(self.theme.line))
                     .text_size(px(11.))
-                    .text_color(rgba(0x242831ff))
+                    .text_color(rgba(self.theme.fg0))
                     .child(self.label.clone()),
             )
     }
@@ -249,6 +246,7 @@ pub struct LmuxApp {
     language: Language,
     palette_open: bool,
     palette_index: usize,
+    palette_scroll: ScrollHandle,
     palette_input: Entity<TextField>,
     presets: Vec<lmux_core::AgentPreset>,
     connect_dialog: bool,
@@ -363,14 +361,6 @@ pub struct ToastNotification {
 
 #[derive(Clone)]
 enum PaletteItem {
-    AgentJump {
-        agent_id: AgentId,
-        machine_name: String,
-        project_name: String,
-        title: String,
-        agent_type: lmux_core::model::AgentType,
-        status: lmux_core::model::AgentStatus,
-    },
     Preset {
         preset: lmux_core::AgentPreset,
     },
@@ -378,7 +368,7 @@ enum PaletteItem {
         id: &'static str,
         label: &'static str,
         shortcut: Option<&'static str>,
-        icon: &'static str,
+        icon: &'static [u8],
     },
 }
 
@@ -697,6 +687,7 @@ impl LmuxApp {
             language,
             palette_open: false,
             palette_index: 0,
+            palette_scroll: ScrollHandle::new(),
             palette_input,
             presets: lmux_core::builtin_presets(lmux_term::default_shell_program()),
             connect_dialog: false,
@@ -2170,20 +2161,6 @@ impl LmuxApp {
                         "删除会话"
                     }),
             )
-            .child(
-                div()
-                    .id("session-menu-cancel")
-                    .px_3()
-                    .py_2()
-                    .text_size(px(11.))
-                    .text_color(rgba(theme.fg1))
-                    .hover(|s| s.bg(rgba(theme.bg2)))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.session_menu = None;
-                        cx.notify();
-                    }))
-                    .child("取消"),
-            )
             .into_any_element()
     }
 
@@ -2302,20 +2279,6 @@ impl LmuxApp {
                             }))
                             .child("删除远程机器…"),
                     )
-                    .child(
-                        div()
-                            .id("tree-menu-cancel")
-                            .px_3()
-                            .py_2()
-                            .text_size(px(11.))
-                            .text_color(rgba(theme.fg1))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.tree_menu = None;
-                                cx.notify();
-                            }))
-                            .child("取消"),
-                    )
             }
             DeleteTarget::LocalProject { .. } | DeleteTarget::RemoteProject { .. } => {
                 let label = match &menu.target {
@@ -2346,20 +2309,6 @@ impl LmuxApp {
                                 }
                             }))
                             .child(label),
-                    )
-                    .child(
-                        div()
-                            .id("tree-menu-cancel")
-                            .px_3()
-                            .py_2()
-                            .text_size(px(11.))
-                            .text_color(rgba(theme.fg1))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.tree_menu = None;
-                                cx.notify();
-                            }))
-                            .child("取消"),
                     )
             }
         };
@@ -2687,10 +2636,15 @@ impl LmuxApp {
             .into_any_element()
     }
 
-    fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
-        self.theme_mode = mode;
+    fn dismiss_settings_menus(&mut self) {
         self.settings_theme_menu = false;
         self.settings_font_menu = false;
+        self.settings_language_menu = false;
+    }
+
+    fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
+        self.theme_mode = mode;
+        self.dismiss_settings_menus();
         self.apply_theme_to_inputs(cx);
         self.persist();
         cx.notify();
@@ -2698,8 +2652,7 @@ impl LmuxApp {
 
     fn set_font_family(&mut self, font_family: &str, cx: &mut Context<Self>) {
         self.font_family = font_family.to_string();
-        self.settings_font_menu = false;
-        self.settings_theme_menu = false;
+        self.dismiss_settings_menus();
         let family = self.font_family.clone();
         let theme = Theme::for_mode(self.theme_mode);
         for term in self.terms.values() {
@@ -2715,9 +2668,7 @@ impl LmuxApp {
 
     fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
         self.language = language;
-        self.settings_language_menu = false;
-        self.settings_theme_menu = false;
-        self.settings_font_menu = false;
+        self.dismiss_settings_menus();
         self.persist();
         cx.notify();
     }
@@ -2747,7 +2698,6 @@ impl LmuxApp {
                     .occlude()
                     .w(px(560.))
                     .max_h(px(620.))
-                    .overflow_y_scroll()
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
@@ -2838,9 +2788,9 @@ impl LmuxApp {
                                             .border_color(rgba(theme.line))
                                             .hover(|s| s.bg(rgba(theme.bg2)))
                                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.settings_theme_menu =
-                                                    !this.settings_theme_menu;
-                                                this.settings_font_menu = false;
+                                                let open = !this.settings_theme_menu;
+                                                this.dismiss_settings_menus();
+                                                this.settings_theme_menu = open;
                                                 cx.notify();
                                             }))
                                             .child(
@@ -2872,10 +2822,13 @@ impl LmuxApp {
                                     .when(self.settings_theme_menu, |menu| {
                                         menu.child(
                                             div()
+                                                .id("settings-theme-menu")
                                                 .absolute()
                                                 .top(px(34.))
                                                 .right(px(0.))
                                                 .w(px(210.))
+                                                .max_h(px(280.))
+                                                .overflow_y_scroll()
                                                 .bg(rgba(theme.bg1))
                                                 .border_1()
                                                 .border_color(rgba(theme.line))
@@ -2959,8 +2912,9 @@ impl LmuxApp {
                                     .border_color(rgba(theme.line))
                                     .hover(|s| s.bg(rgba(theme.bg2)))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.settings_font_menu = !this.settings_font_menu;
-                                        this.settings_theme_menu = false;
+                                        let open = !this.settings_font_menu;
+                                        this.dismiss_settings_menus();
+                                        this.settings_font_menu = open;
                                         cx.notify();
                                     }))
                                     .child(
@@ -2982,7 +2936,7 @@ impl LmuxApp {
                                 menu.child(
                                     div()
                                         .absolute()
-                                        .bottom(px(34.))
+                                        .top(px(34.))
                                         .right(px(0.))
                                         .w(px(260.))
                                         .bg(rgba(theme.bg1))
@@ -3055,10 +3009,9 @@ impl LmuxApp {
                                             .border_color(rgba(theme.line))
                                             .hover(|s| s.bg(rgba(theme.bg2)))
                                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.settings_language_menu =
-                                                    !this.settings_language_menu;
-                                                this.settings_theme_menu = false;
-                                                this.settings_font_menu = false;
+                                                let open = !this.settings_language_menu;
+                                                this.dismiss_settings_menus();
+                                                this.settings_language_menu = open;
                                                 cx.notify();
                                             }))
                                             .child(
@@ -3079,7 +3032,7 @@ impl LmuxApp {
                                         menu.child(
                                             div()
                                                 .absolute()
-                                                .bottom(px(34.))
+                                                .top(px(34.))
                                                 .right(px(0.))
                                                 .w(px(180.))
                                                 .bg(rgba(theme.bg1))
@@ -3799,36 +3752,7 @@ impl LmuxApp {
                 }
             }
         } else {
-            // 全局命令面板 (Ctrl+K)：
-            // 1. 本地与远程所有 Agent（会话快速跳转）
-            for project in &self.last_snapshot.projects {
-                for agent in self.last_snapshot.agents_of(&project.id) {
-                    items.push(PaletteItem::AgentJump {
-                        agent_id: agent.id.clone(),
-                        machine_name: "local".into(),
-                        project_name: project.name.clone(),
-                        title: agent.title.clone(),
-                        agent_type: agent.agent_type,
-                        status: agent.status,
-                    });
-                }
-            }
-            for (host_name, snap) in &self.remote_snaps {
-                for project in &snap.projects {
-                    for agent in snap.agents_of(&project.id) {
-                        items.push(PaletteItem::AgentJump {
-                            agent_id: agent.id.clone(),
-                            machine_name: host_name.clone(),
-                            project_name: project.name.clone(),
-                            title: agent.title.clone(),
-                            agent_type: agent.agent_type,
-                            status: agent.status,
-                        });
-                    }
-                }
-            }
-
-            // 2. 预设
+            // 全局命令面板 (Ctrl+K)：预设 + 操作，不含会话列表。
             let project_path = self.palette_project_path();
             for preset in self.presets.clone().into_iter().filter(|p| {
                 project_path
@@ -3841,55 +3765,51 @@ impl LmuxApp {
             // 3. 操作指令
             items.push(PaletteItem::Action {
                 id: "cmd-split-h",
-                label: "水平分屏 (Horizontal Split)",
+                label: "水平分屏",
                 shortcut: Some("h"),
-                icon: "◫",
+                icon: SPLIT_HORIZONTAL_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-split-v",
-                label: "垂直分屏 (Vertical Split)",
+                label: "垂直分屏",
                 shortcut: Some("v"),
-                icon: "⊟",
+                icon: SPLIT_VERTICAL_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-max",
                 label: "最大化 / 还原当前面板",
                 shortcut: Some("m"),
-                icon: "⤢",
+                icon: MAXIMIZE_ICON,
             });
             if self.pane_tree.leaf_count() > 1 {
                 items.push(PaletteItem::Action {
                     id: "cmd-close-pane",
                     label: "关闭当前分屏",
                     shortcut: Some("x"),
-                    icon: "×",
+                    icon: CLOSE_ICON,
                 });
             }
             items.push(PaletteItem::Action {
                 id: "cmd-connect",
                 label: "连接远程开发机…",
                 shortcut: None,
-                icon: "⧉",
+                icon: CONNECT_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-toggle-theme",
                 label: if self.theme_mode.is_dark() {
-                    "切换为纯净浅色模式 (Light Mode)"
+                    "切换为浅色模式"
                 } else {
-                    "切换为极简深色模式 (Dark Mode)"
+                    "切换为深色模式"
                 },
                 shortcut: None,
-                icon: if self.theme_mode.is_dark() {
-                    "☀️"
-                } else {
-                    "🌙"
-                },
+                icon: THEME_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-clear-notifs",
                 label: "清空所有通知",
                 shortcut: None,
-                icon: "🔔",
+                icon: NOTIFICATION_ICON,
             });
         }
 
@@ -3899,20 +3819,6 @@ impl LmuxApp {
             items
                 .into_iter()
                 .filter(|item| match item {
-                    PaletteItem::AgentJump {
-                        machine_name,
-                        project_name,
-                        title,
-                        agent_type,
-                        ..
-                    } => {
-                        let text = format!(
-                            "{machine_name} {project_name} {title} {}",
-                            agent_type.as_str()
-                        )
-                        .to_lowercase();
-                        text.contains(&query)
-                    }
                     PaletteItem::Preset { preset } => {
                         let text =
                             format!("新建 {} {}", preset.label, preset.program).to_lowercase();
@@ -3934,10 +3840,6 @@ impl LmuxApp {
         // 注意：new_session_target 由消费方（spawn_preset 的远程/本地分支）
         // 自行读取并清除，此处不能提前清空，否则远程会话会回退到本地项目。
         match item {
-            PaletteItem::AgentJump { agent_id, .. } => {
-                self.new_session_target = None;
-                self.jump_to_agent(&agent_id, window, cx);
-            }
             PaletteItem::Preset { preset } => {
                 self.spawn_preset(&preset, window, cx);
             }
@@ -4029,12 +3931,14 @@ impl LmuxApp {
         match ks.key.as_str() {
             "up" => {
                 self.palette_index = self.palette_index.saturating_sub(1);
+                self.palette_scroll.scroll_to_item(self.palette_index);
                 cx.notify();
                 true
             }
             "down" => {
                 if !items.is_empty() {
                     self.palette_index = (self.palette_index + 1).min(items.len() - 1);
+                    self.palette_scroll.scroll_to_item(self.palette_index);
                     cx.notify();
                 }
                 true
@@ -4066,8 +3970,9 @@ impl LmuxApp {
             .id("palette-items-scroll")
             .flex()
             .flex_col()
-            .max_h(px(340.))
-            .overflow_y_scroll();
+            .max_h(px(324.))
+            .overflow_y_scroll()
+            .track_scroll(&self.palette_scroll);
 
         if items.is_empty() {
             list_container = list_container.child(
@@ -4083,61 +3988,6 @@ impl LmuxApp {
                 let is_selected = index == current_index;
                 let item_for_click = item.clone();
                 let row = match item {
-                    PaletteItem::AgentJump {
-                        machine_name,
-                        project_name,
-                        title,
-                        agent_type,
-                        status,
-                        ..
-                    } => {
-                        let dot_color = match status {
-                            lmux_core::model::AgentStatus::Blocked => theme.yellow,
-                            lmux_core::model::AgentStatus::Done => theme.green,
-                            lmux_core::model::AgentStatus::Working => theme.accent,
-                            _ => theme.fg2,
-                        };
-                        div()
-                            .id(gpui::ElementId::Name(format!("pal-agent-{index}").into()))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .text_size(px(12.))
-                            .text_color(rgba(theme.fg0))
-                            .when(is_selected, |el| el.bg(rgba(theme.bg2)))
-                            .hover(|s| s.bg(rgba(theme.bg2)))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                this.execute_palette_item(item_for_click.clone(), window, cx);
-                            }))
-                            .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(rgba(dot_color)))
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child(format!("{machine_name} · {project_name}")),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgba(theme.fg1))
-                                    .child(truncate(&title, 24)),
-                            )
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .px_1()
-                                    .rounded_xs()
-                                    .bg(rgba(theme.bg2))
-                                    .text_size(px(9.))
-                                    .text_color(rgba(theme.fg2))
-                                    .child(format!(
-                                        "{} · {}",
-                                        agent_type.as_str(),
-                                        status.as_str()
-                                    )),
-                            )
-                    }
                     PaletteItem::Preset { preset } => div()
                         .id(gpui::ElementId::Name(
                             format!("pal-preset-{}", preset.id).into(),
@@ -4155,12 +4005,7 @@ impl LmuxApp {
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.execute_palette_item(item_for_click.clone(), window, cx);
                         }))
-                        .child(
-                            div()
-                                .text_color(rgba(theme.accent))
-                                .text_size(px(12.))
-                                .child("＋"),
-                        )
+                        .child(panel_icon(PLUS_ICON, theme.accent))
                         .child(format!("新建 {}", preset.label))
                         .child(
                             div()
@@ -4189,7 +4034,7 @@ impl LmuxApp {
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.execute_palette_item(item_for_click.clone(), window, cx);
                         }))
-                        .child(div().w(px(16.)).text_color(rgba(theme.accent)).child(icon))
+                        .child(panel_icon(icon, theme.accent))
                         .child(label)
                         .when_some(shortcut, |row, sc| {
                             row.child(
@@ -4211,17 +4056,14 @@ impl LmuxApp {
         }
 
         let panel = div()
-            .absolute()
-            .top(px(56.))
-            .left(px(340.))
             .occlude()
-            .w(px(520.))
-            .max_h(px(520.))
+            .w(px(560.))
+            .max_w(relative(0.92))
+            .max_h(relative(0.75))
             .overflow_hidden()
             .bg(rgba(theme.bg1))
             .border_1()
             .border_color(rgba(theme.line))
-            .rounded_lg()
             .shadow_xl()
             .on_mouse_down(
                 MouseButton::Left,
@@ -4242,6 +4084,9 @@ impl LmuxApp {
             .id("palette-backdrop")
             .absolute()
             .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
             .bg(rgba(0x00000044))
             .on_mouse_down(
                 MouseButton::Left,
@@ -4407,6 +4252,7 @@ impl LmuxApp {
                                         .h_full()
                                         .ml(px(-3.))
                                         .mr(px(-3.))
+                                        .cursor_col_resize()
                                         .child(div().w(px(1.)).h_full().bg(rgba(theme.line)))
                                 })
                                 .when(axis == SplitAxis::Vertical, |el| {
@@ -4414,6 +4260,7 @@ impl LmuxApp {
                                         .w_full()
                                         .mt(px(-3.))
                                         .mb(px(-3.))
+                                        .cursor_row_resize()
                                         .child(div().h(px(1.)).w_full().bg(rgba(theme.line)))
                                 })
                                 .on_click(cx.listener({
@@ -4486,7 +4333,7 @@ impl LmuxApp {
                 let mut tabs = div()
                     .flex()
                     .items_center()
-                    .h(px(28.))
+                    .h(px(34.))
                     .bg(rgba(theme.bg1))
                     .border_b_1()
                     .border_color(rgba(theme.line));
@@ -4539,7 +4386,11 @@ impl LmuxApp {
                         .when(att.is_alerting && att.bg_color.is_some(), |el| {
                             el.bg(rgba(att.bg_color.unwrap()))
                         })
-                        .when(!att.is_alerting && is_active, |el| el.bg(rgba(theme.bg0)))
+                        .when(is_active, |el| {
+                            el.bg(rgba(theme.bg0))
+                                .border_t_2()
+                                .border_color(rgba(theme.accent))
+                        })
                         .border_r_1()
                         .border_color(rgba(theme.line))
                         .hover(|s| s.bg(rgba(theme.bg2)))
@@ -4573,7 +4424,11 @@ impl LmuxApp {
                                 let label = drag_label;
                                 move |_, offset, _, cx| {
                                     let label = label.clone();
-                                    cx.new(move |_| DragGhost { label, offset })
+                                    cx.new(move |_| DragGhost {
+                                        label,
+                                        offset,
+                                        theme,
+                                    })
                                 }
                             },
                         )
@@ -4626,7 +4481,7 @@ impl LmuxApp {
                             let pane = pane_id.clone();
                             move |this, _ev, window, cx| this.new_shell_tab(&pane, window, cx)
                         }))
-                        .child("＋"),
+                        .child(panel_icon(PLUS_ICON, theme.fg1)),
                 );
                 // 显式分屏/最大化 controls：没有隐式 split。
                 tabs = tabs.child(
@@ -4742,6 +4597,7 @@ impl LmuxApp {
                 let target_pane = pane_id.clone();
                 let pane_click_id = pane_id.clone();
                 let pane_click_active = active_id.clone();
+                let pane_drop_bg = (theme.accent & 0xffffff00) | 0x1a;
                 let mut pane = div()
                     .id(gpui::ElementId::Name(
                         format!("pane-container-{}", pane_id).into(),
@@ -4753,34 +4609,6 @@ impl LmuxApp {
                     .min_h_0()
                     .overflow_hidden()
                     .when(is_focused_pane || pane_att.is_alerting, |el| el.shadow_md())
-                    .on_hover(cx.listener({
-                        let pane_id = pane_click_id.clone();
-                        let active_id = pane_click_active.clone();
-                        move |this, hovered: &bool, window, cx| {
-                            if !*hovered
-                                || this.palette_open
-                                || this.connect_dialog
-                                || this.project_dialog
-                                || this.remote_project_dialog.is_some()
-                                || this.session_menu.is_some()
-                                || this.tree_menu.is_some()
-                                || this.split_drag.is_some()
-                            {
-                                return;
-                            }
-                            if this.active_pane != pane_id
-                                || this.active.as_ref() != active_id.as_ref()
-                            {
-                                if let Some(agent_id) = &active_id {
-                                    this.activate_tab(&pane_id, agent_id);
-                                    this.focus_agent(agent_id, window, cx);
-                                } else {
-                                    this.active_pane = pane_id.clone();
-                                }
-                                cx.notify();
-                            }
-                        }
-                    }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener({
@@ -4800,7 +4628,7 @@ impl LmuxApp {
                     .on_drop::<DragTab>(cx.listener(move |this, drag: &DragTab, _window, cx| {
                         this.move_dragged_tab(drag, &target_pane, tab_count, cx)
                     }))
-                    .drag_over::<DragTab>(|s, _, _, _| s.bg(rgba(0xf5f7ffff)))
+                    .drag_over::<DragTab>(move |s, _, _, _| s.bg(rgba(pane_drop_bg)))
                     .child(tabs);
                 if let Some(term) = content {
                     pane = pane.child(div().flex_1().min_h_0().child(term));
@@ -4850,6 +4678,17 @@ impl Render for LmuxApp {
         let mut tree = div().flex().flex_col().py_1();
         tree = tree.child(
             div()
+                .h(px(28.))
+                .px_3()
+                .flex()
+                .items_center()
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgba(theme.fg1))
+                .child("MACHINES"),
+        );
+        tree = tree.child(
+            div()
                 .id("machine-local")
                 .flex()
                 .items_center()
@@ -4860,6 +4699,7 @@ impl Render for LmuxApp {
                 .text_size(px(12.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.fg0))
+                .group("local-machine")
                 .hover(|style| style.bg(rgba(theme.bg2)))
                 .on_click(cx.listener({
                     let key = local_machine_key.clone();
@@ -4892,6 +4732,8 @@ impl Render for LmuxApp {
                         .text_size(px(13.))
                         .font_weight(gpui::FontWeight::NORMAL)
                         .text_color(rgba(theme.fg1))
+                        .invisible()
+                        .group_hover("local-machine", |style| style.visible())
                         .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
                         .on_click(cx.listener(|this, _ev, window, cx| {
                             cx.stop_propagation();
@@ -4902,7 +4744,7 @@ impl Render for LmuxApp {
                             this.project_input.focus_handle(cx).focus(window, cx);
                             cx.notify();
                         }))
-                        .child("＋"),
+                        .child(panel_icon(PLUS_ICON, theme.fg1)),
                 ),
         );
         if !local_collapsed {
@@ -4913,6 +4755,7 @@ impl Render for LmuxApp {
                     .branch
                     .clone()
                     .filter(|branch| !branch.trim().is_empty());
+                let project_group = format!("project-hover-{}", project.id);
                 let mut pnode = div().flex().flex_col().ml(px(18.));
                 let project_id_for_add = project.id.clone();
                 let local_project_target = DeleteTarget::LocalProject {
@@ -4933,6 +4776,7 @@ impl Render for LmuxApp {
                         .text_size(px(12.))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(rgba(theme.fg0))
+                        .group(project_group.clone())
                         .hover(|style| style.bg(rgba(theme.bg2)))
                         .on_click(cx.listener({
                             let key = project_key.clone();
@@ -4991,6 +4835,8 @@ impl Render for LmuxApp {
                                         .text_size(px(13.))
                                         .font_weight(gpui::FontWeight::NORMAL)
                                         .text_color(rgba(theme.fg1))
+                                        .invisible()
+                                        .group_hover(project_group.clone(), |style| style.visible())
                                         .hover(|s| {
                                             s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent))
                                         })
@@ -5001,6 +4847,7 @@ impl Render for LmuxApp {
                                             );
                                             this.palette_open = true;
                                             this.palette_index = 0;
+                                            this.palette_scroll.scroll_to_item(0);
                                             this.palette_input
                                                 .update(cx, |input, cx| input.reset(cx));
                                             this.palette_input.focus_handle(cx).focus(_window, cx);
@@ -5010,7 +4857,7 @@ impl Render for LmuxApp {
                                             );
                                             cx.notify();
                                         }))
-                                        .child("＋"),
+                                        .child(panel_icon(PLUS_ICON, theme.fg1)),
                                 ),
                         ),
                 );
@@ -5033,7 +4880,7 @@ impl Render for LmuxApp {
                             .items_center()
                             .gap_1()
                             .h(px(26.))
-                            .pl_4()
+                            .pl(px(24.))
                             .pr_2()
                             .text_size(px(11.5))
                             .when(att.is_alerting && att.text_color.is_some(), |el| {
@@ -5084,17 +4931,6 @@ impl Render for LmuxApp {
                                     .min_w_0()
                                     .overflow_hidden()
                                     .child(truncate(&agent.title, 20)),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .ml_1()
-                                    .text_size(px(9.))
-                                    .px_1()
-                                    .rounded_xs()
-                                    .bg(rgba(if active { theme.bg3 } else { theme.bg2 }))
-                                    .text_color(rgba(theme.fg2))
-                                    .child(agent.agent_type.as_str().to_string()),
                             );
                         pnode = pnode.child(row);
                     }
@@ -5205,6 +5041,7 @@ impl Render for LmuxApp {
                     .when(machine_attention.is_alerting, |row| {
                         row.bg(rgba(machine_attention.bg_color.unwrap_or(theme.bg2)))
                     })
+                    .group(gpui::SharedString::from(format!("machine-hover-{name}")))
                     .hover(|style| style.bg(rgba(theme.bg2)))
                     .on_click(cx.listener({
                         let key = machine_key.clone();
@@ -5336,6 +5173,8 @@ impl Render for LmuxApp {
                             .text_size(px(13.))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(rgba(theme.fg1))
+                            .invisible()
+                            .group_hover(format!("machine-hover-{name}"), |style| style.visible())
                             .hover(|style| style.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
                             .on_click(cx.listener(move |this, _event, window, cx| {
                                 cx.stop_propagation();
@@ -5346,7 +5185,7 @@ impl Render for LmuxApp {
                                 this.remote_project_input.focus_handle(cx).focus(window, cx);
                                 cx.notify();
                             }))
-                            .child("＋"),
+                            .child(panel_icon(PLUS_ICON, theme.fg1)),
                     )
                     .when_some(remediation, |row, (install, upgrade, binary)| {
                         row.child(
@@ -5436,6 +5275,7 @@ impl Render for LmuxApp {
                         let project_branch = project.branch.clone();
                         let spawn_host = name.clone();
                         let spawn_project = project.id.clone();
+                        let project_group = format!("remote-project-hover-{name}-{}", project.id);
                         let mut pnode = div().flex().flex_col().ml(px(18.));
                         pnode = pnode.child(
                             div()
@@ -5451,6 +5291,7 @@ impl Render for LmuxApp {
                                 .text_size(px(12.))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(rgba(theme.fg0))
+                                .group(project_group.clone())
                                 .hover(|style| style.bg(rgba(theme.bg2)))
                                 .on_click(cx.listener({
                                     let key = project_key.clone();
@@ -5513,6 +5354,10 @@ impl Render for LmuxApp {
                                                 .text_size(px(13.))
                                                 .font_weight(gpui::FontWeight::NORMAL)
                                                 .text_color(rgba(theme.fg1))
+                                                .invisible()
+                                                .group_hover(project_group.clone(), |style| {
+                                                    style.visible()
+                                                })
                                                 .hover(|style| {
                                                     style
                                                         .bg(rgba(theme.bg2))
@@ -5530,6 +5375,7 @@ impl Render for LmuxApp {
                                                             });
                                                         this.palette_open = true;
                                                         this.palette_index = 0;
+                                                        this.palette_scroll.scroll_to_item(0);
                                                         this.palette_input
                                                             .update(cx, |input, cx| {
                                                                 input.reset(cx)
@@ -5544,7 +5390,7 @@ impl Render for LmuxApp {
                                                         cx.notify();
                                                     }
                                                 }))
-                                                .child("＋"),
+                                                .child(panel_icon(PLUS_ICON, theme.fg1)),
                                         ),
                                 ),
                         );
@@ -5568,7 +5414,7 @@ impl Render for LmuxApp {
                                     .items_center()
                                     .gap_1()
                                     .h(px(26.))
-                                    .pl_4()
+                                    .pl(px(24.))
                                     .pr_2()
                                     .text_size(px(11.5))
                                     .when(att.is_alerting && att.text_color.is_some(), |el| {
@@ -5623,17 +5469,6 @@ impl Render for LmuxApp {
                                             .min_w_0()
                                             .overflow_hidden()
                                             .child(truncate(&agent.title, 20)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .ml_1()
-                                            .text_size(px(9.))
-                                            .px_1()
-                                            .rounded_xs()
-                                            .bg(rgba(if active { theme.bg3 } else { theme.bg2 }))
-                                            .text_color(rgba(theme.fg2))
-                                            .child(agent.agent_type.as_str().to_string()),
                                     );
                                 pnode = pnode.child(row);
                             }
@@ -5645,149 +5480,7 @@ impl Render for LmuxApp {
             tree = tree.child(rnode);
         }
 
-        // ── 侧栏通知中心（NOTIFICATIONS）
         let unread_count = self.notifications.iter().filter(|n| n.unread).count();
-        let notif_section = div()
-            .flex()
-            .flex_col()
-            .h(px(200.))
-            .border_t_1()
-            .border_color(rgba(theme.line))
-            .bg(rgba(theme.bg1))
-            .child(
-                div()
-                    .h(px(26.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(10.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgba(theme.fg1))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(i18n::text(self.language, "通知", "Notifications"))
-                            .when(unread_count > 0, |header| {
-                                header.child(
-                                    div()
-                                        .px_1()
-                                        .rounded_xs()
-                                        .bg(rgba(theme.red))
-                                        .text_color(rgba(0xffffffff))
-                                        .text_size(px(9.))
-                                        .child(format!("{unread_count}")),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("clear-notifications")
-                            .cursor_pointer()
-                            .text_size(px(10.))
-                            .text_color(rgba(theme.fg2))
-                            .hover(|s| s.text_color(rgba(theme.accent)))
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.notifications.clear();
-                                cx.notify();
-                            }))
-                            .child(i18n::text(self.language, "清空", "Clear")),
-                    ),
-            )
-            .child(
-                div()
-                    .id("sidebar-notifications-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .when(self.notifications.is_empty(), |list| {
-                        list.child(
-                            div()
-                                .px_3()
-                                .py_2()
-                                .text_size(px(11.))
-                                .text_color(rgba(theme.fg2))
-                                .child(i18n::text(self.language, "暂无通知", "No notifications")),
-                        )
-                    })
-                    .children(self.notifications.iter().enumerate().map(|(idx, n)| {
-                        let dot_color = match n.to {
-                            lmux_core::model::AgentStatus::Blocked => theme.yellow,
-                            lmux_core::model::AgentStatus::Done => theme.green,
-                            lmux_core::model::AgentStatus::Working => theme.accent,
-                            _ => theme.fg2,
-                        };
-                        let agent_id = n.agent.clone();
-                        let is_unread = n.unread;
-                        let time_str = format_relative_time(n.time_secs);
-                        div()
-                            .id(gpui::ElementId::Name(format!("notif-item-{idx}").into()))
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .px_3()
-                            .py_1p5()
-                            .border_b_1()
-                            .border_color(rgba(theme.line))
-                            .when(is_unread, |el| {
-                                el.bg(rgba(theme.bg2))
-                                    .border_l_2()
-                                    .border_color(rgba(theme.accent))
-                            })
-                            .hover(|s| s.bg(rgba(theme.bg2)))
-                            .cursor_pointer()
-                            .on_click(cx.listener({
-                                let agent_id = agent_id.clone();
-                                move |this, _ev, window, cx| {
-                                    this.jump_to_agent(&agent_id, window, cx);
-                                }
-                            }))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .w(px(6.))
-                                            .h(px(6.))
-                                            .rounded_full()
-                                            .bg(rgba(dot_color)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.5))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(rgba(theme.fg0))
-                                            .child(format!(
-                                                "{} · {} · {}",
-                                                n.machine_name, n.project_name, n.agent_type
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .ml_auto()
-                                            .text_size(px(9.))
-                                            .text_color(rgba(theme.fg2))
-                                            .child(time_str),
-                                    ),
-                            )
-                            .when_some(n.message.clone(), |el, msg| {
-                                el.child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(rgba(if is_unread {
-                                            theme.fg0
-                                        } else {
-                                            theme.fg1
-                                        }))
-                                        .child(truncate(&msg, 60)),
-                                )
-                            })
-                    })),
-            );
 
         // ── 终端网格：PaneTree 递归渲染。
         let render_tree = if let Some(max) = &self.maximized_pane {
@@ -5817,6 +5510,7 @@ impl Render for LmuxApp {
                 this.new_session_target = None;
                 if this.palette_open {
                     this.palette_index = 0;
+                    this.palette_scroll.scroll_to_item(0);
                     dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu);
                     this.palette_input.update(cx, |input, cx| input.reset(cx));
                     this.palette_input.focus_handle(cx).focus(window, cx);
@@ -5947,7 +5641,6 @@ impl Render for LmuxApp {
                             .overflow_y_scroll()
                             .child(tree),
                     )
-                    .child(notif_section)
                     .child(
                         div()
                             .h(px(32.))
@@ -5980,7 +5673,24 @@ impl Render for LmuxApp {
                                         this.connect_input.focus_handle(cx).focus(window, cx);
                                         cx.notify();
                                     }))
-                                    .child(i18n::text(self.language, "+ 机器", "+ Machine")),
+                                    .child(i18n::text(self.language, "连接", "Connect")),
+                            )
+                            .child(
+                                div()
+                                    .id("sidebar-notification-count")
+                                    .h(px(32.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(10.))
+                                    .text_color(rgba(theme.fg2))
+                                    .when(unread_count > 0, |el| el.text_color(rgba(theme.accent)))
+                                    .child(if unread_count > 0 {
+                                        format!("● {unread_count}")
+                                    } else {
+                                        String::new()
+                                    }),
                             )
                             .child(
                                 div()
@@ -5999,6 +5709,7 @@ impl Render for LmuxApp {
                                         this.focus.focus(window, cx);
                                         cx.notify();
                                     }))
+                                    .child(panel_icon(SETTINGS_ICON, theme.fg1))
                                     .child(i18n::text(self.language, "设置", "Settings")),
                             ),
                     ),
