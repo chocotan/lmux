@@ -7,7 +7,7 @@ pub mod pane;
 pub mod preset;
 pub mod protocol;
 
-pub use detect::{DetectionEngine, HookEvent, StatusUpdate};
+pub use detect::{DetectionEngine, HookEvent, ScreenStatusUpdate, StatusUpdate};
 pub use model::{
     AgentId, AgentInstance, AgentStatus, AgentType, MachineId, MachineInfo, Project, ProjectId,
     Snapshot,

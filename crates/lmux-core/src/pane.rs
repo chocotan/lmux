@@ -387,6 +387,28 @@ mod tests {
         assert!(!tree.close_tab(&pane, &"a".into()));
     }
     #[test]
+    fn activating_a_tab_preserves_its_pane_identity() {
+        let mut tree = PaneNode::with_tab("a".into());
+        let maximized_pane = tree.first_pane_id();
+
+        assert!(tree.open_tab(&maximized_pane, "b".into()));
+        assert_eq!(
+            tree.pane_for_agent(&"b".into()),
+            Some(maximized_pane.clone())
+        );
+        assert_eq!(
+            tree.group(&maximized_pane).unwrap().active.as_deref(),
+            Some("b")
+        );
+
+        let split_pane = tree
+            .split(&maximized_pane, SplitAxis::Horizontal, "c".into())
+            .unwrap();
+        assert_ne!(split_pane, maximized_pane);
+        assert!(tree.group(&maximized_pane).is_some());
+    }
+
+    #[test]
     fn explicit_split_only() {
         let mut tree = PaneNode::with_tab("a".into());
         let root = tree.first_pane_id();

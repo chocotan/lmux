@@ -181,8 +181,10 @@ import -window "$WID" "$ARTIFACTS/03-session-menu.png"
 xdotool key Escape
 
 # 4. 新建第二个 Shell 会话（Ctrl+K；项目 + 使用同一 preset action）。
+# 命令面板第一项是已有会话跳转，Down 一次选中「新建 Shell」preset。
 xdotool key ctrl+k; sleep .4
 import -window "$WID" "$ARTIFACTS/04-project-add-session.png"
+xdotool key Down; sleep .2
 xdotool key Return; sleep .8
 LMUX_SOCKET="$XDG_DATA_HOME/lmux/lmux.sock" python3 - <<'PY'
 import os,socket,json
@@ -267,8 +269,10 @@ xdotool key ctrl+k; sleep .2; xdotool key m; sleep .4
 STATE="$XDG_DATA_HOME/lmux/state.json" python3 - <<'PY'
 import os,json
 d=json.load(open(os.environ['STATE']))
-assert d['maximized_pane'] is not None
-print('✓ maximize persisted')
+def leaves(n): return 1 if n['kind']=='leaf' else sum(leaves(c) for c in n['children'])
+# maximized_pane 是 transient，不落盘；分屏结构仍应保持完整。
+assert leaves(d['pane_tree'])==2, d['pane_tree']
+print('✓ maximize action kept the split layout intact')
 PY
 import -window "$WID" "$ARTIFACTS/09-maximized.png"
 

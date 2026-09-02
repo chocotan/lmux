@@ -6,6 +6,16 @@ use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use tokio::sync::{mpsc, Mutex, Notify};
 
+/// 从 HostCfg 提取 SSH 目标（bootstrap 仅支持 SSH 远端）
+fn ssh_target(cfg: &HostCfg) -> Result<&str, crate::tunnel::TunnelError> {
+    match &cfg.target {
+        Target::Ssh { host, .. } => Ok(host),
+        Target::Socket(_) => Err(crate::tunnel::TunnelError::Other(
+            "direct socket target cannot be installed".into(),
+        )),
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum SshAuth {
     #[default]
@@ -177,11 +187,78 @@ pub enum RemoteState {
     Offline(String),
 }
 
+/// 远端安装/升级的阶段性进度（上传/安装/重启）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootstrapProgress {
+    pub phase: BootstrapPhase,
+    /// 0..=100，None 表示该阶段无细分进度
+    pub percent: Option<u8>,
+    /// 上传阶段的已传输字节数（gzip 压缩后）
+    pub done_bytes: Option<u64>,
+    /// 上传阶段的总量字节数（gzip 压缩后）
+    pub total_bytes: Option<u64>,
+}
+
+/// 上传回调携带的字节进度（done/total 均为传输流字节，通常已 gzip 压缩）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadProgress {
+    pub done: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapPhase {
+    Upload,
+    Install,
+    Restart,
+}
+
+impl BootstrapPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            BootstrapPhase::Upload => "上传二进制",
+            BootstrapPhase::Install => "安装",
+            BootstrapPhase::Restart => "重启服务",
+        }
+    }
+
+    /// 阶段在总进度里的起始百分比（上传 0-70，安装 70-85，重启 85-100）
+    fn base(self) -> f32 {
+        match self {
+            BootstrapPhase::Upload => 0.0,
+            BootstrapPhase::Install => 70.0,
+            BootstrapPhase::Restart => 85.0,
+        }
+    }
+
+    fn span(self) -> f32 {
+        match self {
+            BootstrapPhase::Upload => 70.0,
+            BootstrapPhase::Install => 15.0,
+            BootstrapPhase::Restart => 15.0,
+        }
+    }
+
+    /// 换算为总进度 0..=100；未知细分进度时取阶段中点
+    pub fn overall(self, percent: Option<u8>) -> u8 {
+        let ratio = percent
+            .map(|p| (p.clamp(0, 100) as f32) / 100.0)
+            .unwrap_or(0.5);
+        (self.base() + self.span() * ratio)
+            .round()
+            .clamp(0.0, 100.0) as u8
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
     StateChanged {
         host: String,
         state: RemoteState,
+    },
+    BootstrapProgress {
+        host: String,
+        progress: BootstrapProgress,
     },
     StatusChanged {
         host: String,
@@ -204,6 +281,9 @@ pub struct RemoteHost {
     stopped: AtomicBool,
     retry: Notify,
     latency_ms: AtomicU64,
+    /// 打包的进度状态：(overall_percent << 8) | phase，0 表示空闲
+    progress: AtomicU64,
+    bootstrap_cancel: Arc<AtomicBool>,
 }
 
 impl RemoteHost {
@@ -216,11 +296,81 @@ impl RemoteHost {
             stopped: AtomicBool::new(false),
             retry: Notify::new(),
             latency_ms: AtomicU64::new(0),
+            progress: AtomicU64::new(0),
+            bootstrap_cancel: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn cancel_bootstrap(&self) {
+        self.bootstrap_cancel.store(true, Ordering::Relaxed);
+        self.progress.store(0, Ordering::Relaxed);
+        self.clear_progress();
     }
 
     pub async fn state(&self) -> RemoteState {
         self.state.lock().await.clone()
+    }
+
+    fn emit_progress(&self, phase: BootstrapPhase, percent: Option<u8>) {
+        self.emit_progress_bytes(phase, percent, None, None);
+    }
+
+    fn emit_progress_bytes(
+        &self,
+        phase: BootstrapPhase,
+        percent: Option<u8>,
+        done_bytes: Option<u64>,
+        total_bytes: Option<u64>,
+    ) {
+        let progress = BootstrapProgress {
+            phase,
+            percent,
+            done_bytes,
+            total_bytes,
+        };
+        self.progress.store(
+            ((progress.phase.overall(percent) as u64) << 8) | phase as u64,
+            Ordering::Relaxed,
+        );
+        let _ = self.events_tx.try_send(ClientEvent::BootstrapProgress {
+            host: self.cfg.name.clone(),
+            progress,
+        });
+    }
+
+    pub fn progress_now(&self) -> Option<BootstrapProgress> {
+        let raw = self.progress.load(Ordering::Relaxed);
+        (raw != 0).then(|| {
+            let phase = match (raw & 0xff) as u8 {
+                1 => BootstrapPhase::Install,
+                2 => BootstrapPhase::Restart,
+                _ => BootstrapPhase::Upload,
+            };
+            BootstrapProgress {
+                phase,
+                percent: Some((raw >> 8) as u8),
+                done_bytes: None,
+                total_bytes: None,
+            }
+        })
+    }
+
+    fn clear_progress(&self) {
+        self.progress.store(0, Ordering::Relaxed);
+        self.retry.notify_one();
+    }
+
+    /// 主动上报 NeedsUpgrade（例如远端对已知方法返回 unknown_method）
+    pub async fn mark_needs_upgrade(&self) {
+        let socket = self.endpoint_now().unwrap_or_default();
+        self.set_state(
+            RemoteState::NeedsUpgrade {
+                remote_socket: socket,
+            },
+            &self.events_tx,
+        )
+        .await;
+        self.retry.notify_one();
     }
 
     /// 本地可连的 socket 路径（直连或隧道端口对应的 socket）
@@ -241,37 +391,94 @@ impl RemoteHost {
         self.endpoint.read().ok().and_then(|v| v.clone())
     }
 
-    pub async fn install_and_start(&self) -> Result<(), crate::tunnel::TunnelError> {
-        let Target::Ssh { host, .. } = &self.cfg.target else {
-            return Err(crate::tunnel::TunnelError::Other(
-                "direct socket target cannot be installed".into(),
-            ));
-        };
-        crate::tunnel::install_and_start(host, &self.cfg.auth).await?;
-        self.retry.notify_one();
+    /// 上传字节进度 → 带字节数的 BootstrapProgress 事件
+    fn upload_reporter(me: Arc<Self>) -> impl Fn(crate::UploadProgress) + Send + Sync + 'static {
+        move |upload: crate::UploadProgress| {
+            let percent = upload
+                .done
+                .min(upload.total)
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(upload.total))
+                .unwrap_or(100) as u8;
+            me.emit_progress_bytes(
+                BootstrapPhase::Upload,
+                Some(percent),
+                Some(upload.done),
+                Some(upload.total),
+            );
+        }
+    }
+
+    pub async fn install_and_start(self: Arc<Self>) -> Result<(), crate::tunnel::TunnelError> {
+        self.bootstrap_cancel.store(false, Ordering::Relaxed);
+        self.emit_progress(BootstrapPhase::Upload, Some(0));
+        let reporter = Self::upload_reporter(Arc::clone(&self));
+        let host = ssh_target(&self.cfg)?.to_string();
+        let auth = self.cfg.auth.clone();
+        let cancel = Arc::clone(&self.bootstrap_cancel);
+        let result = crate::tunnel::install_and_start(&host, &auth, reporter, cancel).await;
+        if let Err(error) = result {
+            self.progress.store(0, Ordering::Relaxed);
+            self.clear_progress();
+            return Err(error);
+        }
+        if self.bootstrap_cancel.load(Ordering::Relaxed) {
+            self.clear_progress();
+            return Err(crate::tunnel::TunnelError::Other("已取消上传".into()));
+        }
+        self.emit_progress(BootstrapPhase::Restart, Some(0));
+        let result =
+            crate::tunnel::start_remote(ssh_target(&self.cfg)?, &self.cfg.auth, None).await;
+        if let Err(error) = result {
+            self.progress.store(0, Ordering::Relaxed);
+            self.clear_progress();
+            return Err(error);
+        }
+        self.clear_progress();
         Ok(())
     }
 
-    pub async fn start_and_retry(&self, binary: &str) -> Result<(), crate::tunnel::TunnelError> {
-        let Target::Ssh { host, .. } = &self.cfg.target else {
-            return Err(crate::tunnel::TunnelError::Other(
-                "direct socket target cannot be started".into(),
-            ));
-        };
-        crate::tunnel::start_remote(host, &self.cfg.auth, Some(binary)).await?;
-        self.retry.notify_one();
-        Ok(())
+    pub async fn start_and_retry(
+        self: Arc<Self>,
+        binary: &str,
+    ) -> Result<(), crate::tunnel::TunnelError> {
+        self.emit_progress(BootstrapPhase::Restart, Some(0));
+        let result =
+            crate::tunnel::start_remote(ssh_target(&self.cfg)?, &self.cfg.auth, Some(binary)).await;
+        if result.is_err() {
+            self.progress.store(0, Ordering::Relaxed);
+        } else {
+            self.clear_progress();
+        }
+        result
     }
 
-    pub async fn upgrade_and_retry(&self) -> Result<(), crate::tunnel::TunnelError> {
-        let Target::Ssh { host, .. } = &self.cfg.target else {
-            return Err(crate::tunnel::TunnelError::Other(
-                "direct socket target cannot be upgraded".into(),
-            ));
-        };
-        crate::tunnel::install_and_restart(host, &self.cfg.auth).await?;
-        self.retry.notify_one();
-        Ok(())
+    pub async fn upgrade_and_retry(self: Arc<Self>) -> Result<(), crate::tunnel::TunnelError> {
+        self.bootstrap_cancel.store(false, Ordering::Relaxed);
+        self.emit_progress(BootstrapPhase::Upload, Some(0));
+        let reporter = Self::upload_reporter(Arc::clone(&self));
+        let host = ssh_target(&self.cfg)?.to_string();
+        let auth = self.cfg.auth.clone();
+        let cancel = Arc::clone(&self.bootstrap_cancel);
+        let result = crate::tunnel::install_and_restart(&host, &auth, reporter, cancel).await;
+        if let Err(error) = result {
+            self.progress.store(0, Ordering::Relaxed);
+            self.clear_progress();
+            return Err(error);
+        }
+        if self.bootstrap_cancel.load(Ordering::Relaxed) {
+            self.clear_progress();
+            return Err(crate::tunnel::TunnelError::Other("已取消上传".into()));
+        }
+        self.emit_progress(BootstrapPhase::Restart, Some(0));
+        let result =
+            crate::tunnel::start_remote(ssh_target(&self.cfg)?, &self.cfg.auth, None).await;
+        if result.is_err() {
+            self.progress.store(0, Ordering::Relaxed);
+        } else {
+            self.clear_progress();
+        }
+        result
     }
 
     pub fn stop(&self) {
@@ -523,5 +730,28 @@ impl RemoteHost {
                 state: s,
             })
             .await;
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_phase_overall_spans_upload_install_restart() {
+        // 上传阶段：0% → 0，100% → 70
+        assert_eq!(BootstrapPhase::Upload.overall(Some(0)), 0);
+        assert_eq!(BootstrapPhase::Upload.overall(Some(100)), 70);
+        assert_eq!(BootstrapPhase::Upload.overall(Some(50)), 35);
+        // 安装阶段：70-85
+        assert_eq!(BootstrapPhase::Install.overall(Some(0)), 70);
+        assert_eq!(BootstrapPhase::Install.overall(Some(100)), 85);
+        // 重启阶段：85-100
+        assert_eq!(BootstrapPhase::Restart.overall(Some(0)), 85);
+        assert_eq!(BootstrapPhase::Restart.overall(Some(100)), 100);
+        // 无细分进度取阶段中点
+        assert_eq!(BootstrapPhase::Install.overall(None), 78);
+        // 边界钳制
+        assert_eq!(BootstrapPhase::Upload.overall(Some(255)), 70);
     }
 }

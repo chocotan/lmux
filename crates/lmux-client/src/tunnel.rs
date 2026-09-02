@@ -1,8 +1,9 @@
 //! SSH 隧道：复用 ControlMaster，把远端 lmux.sock 转发到本地（P1 收尾接入 RemoteHost）
 #![allow(dead_code)]
 use crate::host::SshAuth;
+use crate::UploadProgress;
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -257,7 +258,12 @@ fi"#;
     parse_probe_output(&line)
 }
 
-async fn upload_binary(host: &str, auth: &SshAuth) -> Result<(), TunnelError> {
+async fn upload_binary(
+    host: &str,
+    auth: &SshAuth,
+    on_progress: impl Fn(UploadProgress) + Send + Sync + 'static,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), TunnelError> {
     let destination = auth.destination(host);
     let binary = if let Some(path) = std::env::var_os("LMUX_BOOTSTRAP_BINARY") {
         PathBuf::from(path)
@@ -270,17 +276,59 @@ async fn upload_binary(host: &str, auth: &SshAuth) -> Result<(), TunnelError> {
             .map(|target| target.join("release/lmux"));
         release.filter(|path| path.is_file()).unwrap_or(current)
     };
-    let bytes = tokio::fs::read(binary)
+    let mut raw_bytes = tokio::fs::read(&binary)
         .await
         .map_err(|error| TunnelError::Other(error.to_string()))?;
+
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(TunnelError::Other("已取消上传".into()));
+    }
+
+    // 如果二进制大于 50MB (例如未 strip 的 debug 产物)，尝试就地 strip 去掉调试符号
+    if raw_bytes.len() > 50 * 1024 * 1024 {
+        if let Ok(temp_file) = tempfile::NamedTempFile::new() {
+            let temp_path = temp_file.path();
+            if tokio::fs::write(temp_path, &raw_bytes).await.is_ok() {
+                if let Ok(status) = std::process::Command::new("strip")
+                    .arg("-s")
+                    .arg(temp_path)
+                    .status()
+                {
+                    if status.success() {
+                        if let Ok(stripped) = tokio::fs::read(temp_path).await {
+                            if !stripped.is_empty() {
+                                raw_bytes = stripped;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 采用 Gzip 高效压缩流传输
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut encoder, &raw_bytes)
+        .map_err(|e| TunnelError::Other(format!("Compression error: {e}")))?;
+    let compressed_bytes = encoder
+        .finish()
+        .map_err(|e| TunnelError::Other(format!("Compression error: {e}")))?;
+
     let script = r#"set -eu
 data=${XDG_DATA_HOME:-$HOME/.local/share}/lmux
 mkdir -p "$data/bin" "$data/logs"
 tmp=$data/bin/.lmux-upload-$$
-cat > "$tmp"
+if command -v gzip >/dev/null 2>&1; then
+  gzip -dc > "$tmp"
+elif command -v gunzip >/dev/null 2>&1; then
+  gunzip -c > "$tmp"
+else
+  cat > "$tmp"
+fi
 chmod 700 "$tmp"
 "$tmp" --version >/dev/null
 mv "$tmp" "$data/bin/lmux""#;
+
     let mut child = ssh_command(auth)
         .arg(&destination)
         .arg(script)
@@ -289,32 +337,76 @@ mv "$tmp" "$data/bin/lmux""#;
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| TunnelError::Other(error.to_string()))?;
+
     let mut stdin = child
         .stdin
         .take()
         .ok_or_else(|| TunnelError::Other("SSH upload stdin unavailable".into()))?;
+
+    let total = compressed_bytes.len().max(1);
+    let mut done: u64 = 0;
+    let mut last_percent: Option<u8> = None;
+    const CHUNK: usize = 128 * 1024;
+    for chunk in compressed_bytes.chunks(CHUNK) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = child.kill().await;
+            return Err(TunnelError::Other("已取消上传".into()));
+        }
+        stdin
+            .write_all(chunk)
+            .await
+            .map_err(|error| TunnelError::Other(error.to_string()))?;
+        done += chunk.len() as u64;
+        // 按百分比变化节流，避免每个 128KB 块都发一次事件
+        let percent = Some(((done.min(total as u64) * 100) / total as u64) as u8);
+        if percent != last_percent {
+            last_percent = percent;
+            on_progress(UploadProgress {
+                done: done.min(total as u64),
+                total: total as u64,
+            });
+        }
+    }
+    on_progress(UploadProgress {
+        done: total as u64,
+        total: total as u64,
+    });
     stdin
-        .write_all(&bytes)
+        .flush()
         .await
         .map_err(|error| TunnelError::Other(error.to_string()))?;
     drop(stdin);
+
     let output = child
         .wait_with_output()
         .await
         .map_err(|error| TunnelError::Other(error.to_string()))?;
     if !output.status.success() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(TunnelError::Other("已取消上传".into()));
+        }
         return Err(classify_failure(&output.stderr));
     }
     Ok(())
 }
 
-pub async fn install_and_start(host: &str, auth: &SshAuth) -> Result<(), TunnelError> {
-    upload_binary(host, auth).await?;
+pub async fn install_and_start(
+    host: &str,
+    auth: &SshAuth,
+    on_upload_progress: impl Fn(UploadProgress) + Send + Sync + 'static,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), TunnelError> {
+    upload_binary(host, auth, on_upload_progress, cancel).await?;
     start_remote(host, auth, None).await
 }
 
-pub async fn install_and_restart(host: &str, auth: &SshAuth) -> Result<(), TunnelError> {
-    upload_binary(host, auth).await?;
+pub async fn install_and_restart(
+    host: &str,
+    auth: &SshAuth,
+    on_upload_progress: impl Fn(UploadProgress) + Send + Sync + 'static,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), TunnelError> {
+    upload_binary(host, auth, on_upload_progress, cancel).await?;
     let destination = auth.destination(host);
     let command = r#"data=${XDG_DATA_HOME:-$HOME/.local/share}/lmux
 pkill -TERM -f '[l]mux.*--headless' 2>/dev/null || true

@@ -27,6 +27,8 @@ pub struct PersistedApp {
     pub maximized_pane: Option<PaneId>,
     #[serde(default)]
     pub window: Option<WindowGeometry>,
+    #[serde(default)]
+    pub dark_mode: Option<bool>,
 }
 
 impl Default for PersistedApp {
@@ -42,6 +44,7 @@ impl Default for PersistedApp {
             active_pane: None,
             maximized_pane: None,
             window: None,
+            dark_mode: None,
         }
     }
 }
@@ -56,10 +59,11 @@ pub enum PersistedRemoteAuth {
         #[serde(default)]
         identity_file: Option<String>,
     },
-    /// Password is intentionally not stored; restart requires re-entry.
     Password {
         #[serde(default)]
         username: String,
+        #[serde(default)]
+        password: Option<String>,
     },
 }
 
@@ -169,7 +173,6 @@ mod tests {
             .split(&root, lmux_core::SplitAxis::Horizontal, "b".into())
             .unwrap();
         app.active_pane = Some(second.clone());
-        app.maximized_pane = Some(second);
         app.projects.push(Project {
             id: "p".into(),
             name: "repo".into(),

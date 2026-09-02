@@ -320,6 +320,63 @@ impl VTerm {
             guard.damage = ContentDamage::Full;
         }
     }
+
+    pub fn line_text(&self, visual: usize) -> Option<String> {
+        let guard = self.inner.lock().ok()?;
+        let grid = guard.term.grid();
+        if visual >= grid.screen_lines() {
+            return None;
+        }
+        let buffer_line = visual as i32 - grid.display_offset() as i32;
+        let mut line = String::new();
+        for col in 0..grid.columns() {
+            let cell = &grid[Point::new(Line(buffer_line), Column(col))];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                line.push(cell.c);
+            }
+        }
+        Some(line)
+    }
+
+    pub fn url_at(&self, visual: usize, col: usize) -> Option<String> {
+        let text = self.line_text(visual)?;
+        let mut start_idx = 0;
+        for token in text.split_inclusive(|c: char| {
+            c.is_whitespace()
+                || c == '"'
+                || c == '\''
+                || c == '<'
+                || c == '>'
+                || c == '('
+                || c == ')'
+                || c == '['
+                || c == ']'
+        }) {
+            let token_len = token.chars().count();
+            let end_idx = start_idx + token_len;
+            let trimmed = token.trim_matches(|c: char| {
+                c.is_whitespace()
+                    || c == '"'
+                    || c == '\''
+                    || c == '<'
+                    || c == '>'
+                    || c == '('
+                    || c == ')'
+                    || c == '['
+                    || c == ']'
+                    || c == ','
+                    || c == ';'
+            });
+            if col >= start_idx
+                && col < end_idx
+                && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+            {
+                return Some(trimmed.to_string());
+            }
+            start_idx = end_idx;
+        }
+        None
+    }
 }
 
 fn merge_damage(a: ContentDamage, b: ContentDamage) -> ContentDamage {

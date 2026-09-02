@@ -1,8 +1,8 @@
-# 通用 shell：基本只有 idle（没有 agent 语义）
+# 通用 shell：执行结束回到 prompt 即为 idle
 [[rules]]
 status = "idle"
 region = "bottom"
 regex = [
-    "[$#] $",
-    "❯ $",
+    "[$#%>❯➜]\\s*$",
+    "(?i)(?:bash|zsh|fish|sh)[\\-\\d\\.]*[$#%>❯➜]\\s*$",
 ]

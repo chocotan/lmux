@@ -1,0 +1,96 @@
+//! Sound notifications and desktop alerts for agent state changes.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SOUND_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
+static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.mp3");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundKind {
+    Done,
+    Request,
+}
+
+pub fn play_sound(sound: SoundKind) {
+    if std::env::var_os("LMUX_DISABLE_SOUND").is_some() || std::env::var_os("NEXTEST").is_some() {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        let data = match sound {
+            SoundKind::Done => SOUND_DONE,
+            SoundKind::Request => SOUND_REQUEST,
+        };
+
+        let tmp = temp_sound_path();
+        if let Ok(mut file) = std::fs::File::create(&tmp) {
+            if file.write_all(data).is_ok() {
+                drop(file);
+                let _ = run_player(&tmp);
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
+    });
+}
+
+fn temp_sound_path() -> PathBuf {
+    let count = SOUND_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("lmux-sound-{pid}-{count}.mp3"))
+}
+
+fn run_player(path: &Path) -> Result<Output, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("afplay")
+            .arg(path)
+            .output()
+            .map_err(|e| e.to_string());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Try common linux players in order
+        let players = [
+            ("paplay", vec![]),
+            ("pw-play", vec![]),
+            ("aplay", vec![]),
+            ("mpv", vec!["--no-terminal", "--really-quiet"]),
+            ("ffplay", vec!["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+        ];
+
+        for (player, extra_args) in players {
+            let mut cmd = Command::new(player);
+            for arg in extra_args {
+                cmd.arg(arg);
+            }
+            cmd.arg(path);
+            if let Ok(output) = cmd.output() {
+                if output.status.success() {
+                    return Ok(output);
+                }
+            }
+        }
+        Err("No audio player found".to_string())
+    }
+}
+
+pub fn send_desktop_notification(title: &str, body: &str) {
+    if std::env::var_os("LMUX_DISABLE_NOTIFY").is_some() || std::env::var_os("NEXTEST").is_some() {
+        return;
+    }
+
+    let title = title.to_string();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .appname("lmux")
+            .summary(&title)
+            .body(&body)
+            .show();
+    });
+}

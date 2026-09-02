@@ -128,6 +128,9 @@ impl Snapshot {
     pub fn agent(&self, id: &AgentId) -> Option<&AgentInstance> {
         self.agents.iter().find(|a| &a.id == id)
     }
+    pub fn agent_mut(&mut self, id: &AgentId) -> Option<&mut AgentInstance> {
+        self.agents.iter_mut().find(|a| &a.id == id)
+    }
     pub fn project(&self, id: &ProjectId) -> Option<&Project> {
         self.projects.iter().find(|p| &p.id == id)
     }

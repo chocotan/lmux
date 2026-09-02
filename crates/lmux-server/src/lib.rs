@@ -150,6 +150,7 @@ impl LmuxServer {
                 })
             })
             .collect();
+        persisted.maximized_pane = None;
         lmux_store::save(&path, &persisted)
     }
 
@@ -367,11 +368,36 @@ impl LmuxServer {
                                                 .cloned();
                                             match project {
                                                 Some(project) => {
-                                                    let agent_id = lmux_core::model::new_id("shell");
-                                                    let mut cfg = lmux_term::LaunchCfg::shell(
-                                                        agent_id.clone(),
-                                                        project.path.clone(),
-                                                    );
+                                                    let agent_type = params.agent_type.unwrap_or(lmux_core::model::AgentType::Shell);
+                                                    let agent_id = lmux_core::model::new_id(agent_type.as_str());
+                                                    let tmux_name = format!("lmux-{}", agent_id);
+                                                    let title = params.preset_name.unwrap_or_else(|| {
+                                                        if agent_type == lmux_core::model::AgentType::Shell {
+                                                            lmux_term::default_shell_program().rsplit('/').next().unwrap_or("shell").into()
+                                                        } else {
+                                                            agent_type.as_str().to_string()
+                                                        }
+                                                    });
+                                                    let mut cfg = if agent_type == lmux_core::model::AgentType::Shell && params.program.is_none() {
+                                                        lmux_term::LaunchCfg::shell(
+                                                            agent_id.clone(),
+                                                            project.path.clone(),
+                                                        )
+                                                    } else {
+                                                        let program = params.program.unwrap_or_else(|| agent_type.as_str().to_string());
+                                                        lmux_term::LaunchCfg {
+                                                            agent: agent_id.clone(),
+                                                            agent_type,
+                                                            cwd: project.path.clone(),
+                                                            env: params.env.unwrap_or_default(),
+                                                            program_override: Some(program),
+                                                            args: params.args.unwrap_or_default(),
+                                                            cols: 120,
+                                                            rows: 32,
+                                                            tmux_session: Some(tmux_name.clone()),
+                                                        }
+                                                    };
+                                                    cfg.tmux_session = Some(tmux_name.clone());
                                                     cfg.env.push(("LMUX_AGENT_ID".into(), agent_id.clone()));
                                                     cfg.env.push(("LMUX_SOCKET".into(), self.socket_path.display().to_string()));
                                                     cfg.env.push(("LMUX_HOOK_TOKEN".into(), self.hook_token(&agent_id)));
@@ -382,8 +408,8 @@ impl LmuxServer {
                                                             let instance = lmux_core::model::AgentInstance {
                                                                 id: agent_id.clone(),
                                                                 project: project.id.clone(),
-                                                                agent_type: lmux_core::model::AgentType::Shell,
-                                                                title: lmux_term::default_shell_program().rsplit('/').next().unwrap_or("shell").into(),
+                                                                agent_type,
+                                                                title,
                                                                 status: lmux_core::model::AgentStatus::Idle,
                                                                 status_since: lmux_core::model::now_secs(),
                                                                 seen: true,

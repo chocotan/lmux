@@ -1,13 +1,29 @@
-# pi 屏幕状态规则（兜底）
+# pi 屏幕状态规则（兜底；插件可用时插件权威）
 [[rules]]
 status = "blocked"
 region = "bottom"
 contains = [
     "waiting for approval",
+    "Do you want to proceed?",
+    "Confirm [y/n]",
 ]
+
 [[rules]]
-status = "done"
+status = "working"
 region = "bottom"
 contains = [
-    "agent_end",
+    "Working...",
+    "Thinking…",
+    "Generating…",
+]
+regex = [
+    "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓]",
+]
+
+[[rules]]
+status = "idle"
+region = "bottom"
+regex = [
+    "[>❯✳*]\\s*$",
+    "(?i)pi\\s*[>❯]\\s*$",
 ]

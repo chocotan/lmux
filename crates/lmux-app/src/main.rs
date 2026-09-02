@@ -1,7 +1,9 @@
 //! lmux GPUI 主程序：三区极简 UI（侧栏机器树 / 贴边终端网格 / 浮层）
 mod app;
+mod sound;
 mod term_view;
 mod text_field;
+mod theme;
 
 use gpui::{px, size, App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions};
 use lmux_core::model::MachineInfo;
@@ -201,27 +203,22 @@ fn main() {
         let socket_path = dir.join("lmux.sock");
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
 
-        // claude: settings.json hooks（Stop→done / Notification→blocked）
-        let claude_settings = PathBuf::from(&home).join(".claude/settings.json");
-        if claude_settings
-            .parent()
-            .map(|p| p.exists())
-            .unwrap_or(false)
-        {
-            let hooks =
-                lmux_core::hook::claude_hooks_value(&scripts_dir, "claude-hook", &socket_path);
-            if let Err(e) = lmux_core::hook::inject_claude_hooks(&claude_settings, hooks) {
-                tracing::warn!(error = %e, "claude hooks 注入失败");
-            }
+        // claude: settings.json hooks（UserPromptSubmit/PreToolUse→working / Stop→done / Notification→blocked）
+        let claude_dir = PathBuf::from(&home).join(".claude");
+        let _ = std::fs::create_dir_all(&claude_dir);
+        let claude_settings = claude_dir.join("settings.json");
+        let hooks = lmux_core::hook::claude_hooks_value(&scripts_dir, "claude-hook", &socket_path);
+        if let Err(e) = lmux_core::hook::inject_claude_hooks(&claude_settings, hooks) {
+            tracing::warn!(error = %e, "claude hooks 注入失败");
         }
         // codex: config.toml notify
-        let codex_config = PathBuf::from(&home).join(".codex/config.toml");
-        if codex_config.exists() {
-            if let Err(e) =
-                lmux_core::hook::inject_codex_notify(&codex_config, &scripts_dir, &socket_path)
-            {
-                tracing::warn!(error = %e, "codex notify 注入失败");
-            }
+        let codex_dir = PathBuf::from(&home).join(".codex");
+        let _ = std::fs::create_dir_all(&codex_dir);
+        let codex_config = codex_dir.join("config.toml");
+        if let Err(e) =
+            lmux_core::hook::inject_codex_notify(&codex_config, &scripts_dir, &socket_path)
+        {
+            tracing::warn!(error = %e, "codex notify 注入失败");
         }
         if let Err(e) = lmux_core::hook::install_agent_plugins(std::path::Path::new(&home)) {
             tracing::warn!(error = %e, "OpenCode/Pi plugins 安装失败");
@@ -307,6 +304,7 @@ fn main() {
                 })
             })
             .collect();
+        persisted.maximized_pane = None;
         let _ = lmux_store::save(&store_path, &persisted);
     }
 
@@ -337,6 +335,7 @@ fn main() {
                         })
                     })
                     .collect();
+                headless_persisted.maximized_pane = None;
                 if let Err(error) = lmux_store::save(&headless_store_path, &headless_persisted) {
                     tracing::warn!(%error, "persist headless state failed");
                 }
@@ -353,6 +352,21 @@ fn main() {
             KeyBinding::new("ctrl-k", app::TogglePalette, None),
             KeyBinding::new("ctrl-w", app::CloseTab, None),
             KeyBinding::new("ctrl-shift-t", app::NewShellTab, None),
+            KeyBinding::new("ctrl-tab", app::NextTab, None),
+            KeyBinding::new("ctrl-shift-tab", app::PrevTab, None),
+            KeyBinding::new("alt-1", app::SelectTab1, None),
+            KeyBinding::new("alt-2", app::SelectTab2, None),
+            KeyBinding::new("alt-3", app::SelectTab3, None),
+            KeyBinding::new("alt-4", app::SelectTab4, None),
+            KeyBinding::new("alt-5", app::SelectTab5, None),
+            KeyBinding::new("alt-6", app::SelectTab6, None),
+            KeyBinding::new("alt-7", app::SelectTab7, None),
+            KeyBinding::new("alt-8", app::SelectTab8, None),
+            KeyBinding::new("alt-9", app::SelectTab9, None),
+            KeyBinding::new("alt-left", app::FocusPaneLeft, None),
+            KeyBinding::new("alt-right", app::FocusPaneRight, None),
+            KeyBinding::new("alt-up", app::FocusPaneUp, None),
+            KeyBinding::new("alt-down", app::FocusPaneDown, None),
         ]);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         let _ = cx.open_window(

@@ -2,9 +2,10 @@
 //! 架构直接遵循 muxel：TermView 在 GPUI task 内 drain PTY 输出，chunk 到达即 process + notify。
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, ClipboardItem, Context,
-    FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla,
-    InputHandler, MouseButton, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    ShapedLine, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
+    Hsla, InputHandler, MouseButton, ParentElement, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, ShapedLine, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
+    Window,
 };
 use lmux_core::model::AgentId;
 use lmux_term::{PtySession, VTerm};
@@ -220,7 +221,11 @@ impl InputHandler for TerminalInputHandler {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TermEnterEvent(pub AgentId);
+
 pub struct TermView {
+    pub agent: AgentId,
     pub vterm: VTerm,
     pub focus: FocusHandle,
     writer: Option<Arc<PtySession>>,
@@ -236,6 +241,8 @@ pub struct TermView {
     _drain: Task<()>,
 }
 
+impl EventEmitter<TermEnterEvent> for TermView {}
+
 impl Focusable for TermView {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -244,7 +251,7 @@ impl Focusable for TermView {
 
 impl TermView {
     /// 本地 PTY：订阅 replay+增量，输出到达即 `cx.notify()`，无 1 秒轮询。
-    pub fn new_local(_agent: AgentId, session: Arc<PtySession>, cx: &mut Context<Self>) -> Self {
+    pub fn new_local(agent: AgentId, session: Arc<PtySession>, cx: &mut Context<Self>) -> Self {
         let vterm = VTerm::new(120, 32);
         let (replay, mut rx) = session.subscribe();
         vterm.feed(&replay);
@@ -287,6 +294,7 @@ impl TermView {
             }
         });
         Self {
+            agent,
             vterm,
             focus: cx.focus_handle(),
             writer: Some(session),
@@ -305,7 +313,7 @@ impl TermView {
 
     /// 远程镜像：P2 客户端把 TermData 喂入同一个 VTerm；输入保持 None（v1 只读）。
     pub fn new_remote(
-        _agent: AgentId,
+        agent: AgentId,
         vterm: VTerm,
         remote_input: tokio::sync::mpsc::UnboundedSender<RemoteTermCommand>,
         cx: &mut Context<Self>,
@@ -314,6 +322,7 @@ impl TermView {
             std::future::pending::<()>().await;
         });
         Self {
+            agent,
             vterm,
             focus: cx.focus_handle(),
             writer: None,
@@ -410,11 +419,7 @@ impl TermView {
                 }
             }
         }
-        // 可打印文本（含 IME）由 InputHandler 提交，避免与 KeyDown 重复写入。
-        let printable = ks.key_char.as_ref().is_some_and(|text| !text.is_empty());
-        if printable && !ks.modifiers.control && !ks.modifiers.alt {
-            return vec![];
-        }
+
         let mut out = match key {
             "enter" => b"\r".to_vec(),
             "tab" => b"\t".to_vec(),
@@ -430,13 +435,19 @@ impl TermView {
             "pagedown" => b"\x1b[6~".to_vec(),
             "delete" => b"\x1b[3~".to_vec(),
             "space" => b" ".to_vec(),
-            _ => ks
-                .key_char
-                .as_ref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&ks.key)
-                .as_bytes()
-                .to_vec(),
+            _ => {
+                // 普通可打印文本（含 IME 汉字输入等）由 InputHandler 提交，避免与 KeyDown 重复写入。
+                let printable = ks.key_char.as_ref().is_some_and(|text| !text.is_empty());
+                if printable && !ks.modifiers.control && !ks.modifiers.alt {
+                    return vec![];
+                }
+                ks.key_char
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&ks.key)
+                    .as_bytes()
+                    .to_vec()
+            }
         };
         if ks.modifiers.alt && !out.is_empty() {
             out.insert(0, 0x1b);
@@ -665,7 +676,11 @@ impl Render for TermView {
                 if let Some(sink) = this.input_sink() {
                     let bytes = Self::keystroke_bytes(&ev.keystroke);
                     if !bytes.is_empty() {
+                        let is_enter = bytes.contains(&b'\r') || bytes.contains(&b'\n');
                         sink.write(&bytes);
+                        if is_enter {
+                            cx.emit(TermEnterEvent(this.agent.clone()));
+                        }
                         cx.stop_propagation();
                     }
                 }
@@ -897,6 +912,17 @@ impl Render for TermView {
                             let Some((line, col, right)) = this.grid_point(event.position) else {
                                 return;
                             };
+                            if event.modifiers.control || event.modifiers.platform {
+                                if let Some(url) = this.vterm.url_at(line.max(0) as usize, col) {
+                                    #[cfg(target_os = "macos")]
+                                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                                    #[cfg(not(target_os = "macos"))]
+                                    let _ =
+                                        std::process::Command::new("xdg-open").arg(&url).spawn();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                            }
                             let modes = this.vterm.modes();
                             if modes.mouse && !event.modifiers.shift {
                                 if let Some(sink) = this.input_sink() {
@@ -1164,8 +1190,24 @@ mod tests {
             Vec::<u8>::new()
         );
         assert_eq!(
-            TermView::keystroke_bytes(&ks("中", Some("中"), false, false)),
-            Vec::<u8>::new()
+            TermView::keystroke_bytes(&ks("escape", Some("\x1b"), false, false)),
+            b"\x1b".to_vec()
+        );
+        assert_eq!(
+            TermView::keystroke_bytes(&ks("escape", None, false, false)),
+            b"\x1b".to_vec()
+        );
+        assert_eq!(
+            TermView::keystroke_bytes(&ks("enter", Some("\r"), false, false)),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TermView::keystroke_bytes(&ks("tab", Some("\t"), false, false)),
+            b"\t".to_vec()
+        );
+        assert_eq!(
+            TermView::keystroke_bytes(&ks("backspace", Some("\x08"), false, false)),
+            vec![0x7f]
         );
         assert_eq!(
             TermView::keystroke_bytes(&ks("s", Some("ß"), false, true)),

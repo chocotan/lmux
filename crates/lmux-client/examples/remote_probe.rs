@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
             RemoteState::NeedsStart { .. } => anyhow::bail!("remote lmux needs start"),
             RemoteState::NeedsUpgrade { .. } => {
                 if std::env::var("LMUX_TEST_UPGRADE").as_deref() == Ok("1") && !upgraded {
-                    remote.upgrade_and_retry().await?;
+                    std::sync::Arc::clone(&remote).upgrade_and_retry().await?;
                     upgraded = true;
                 } else if !upgraded {
                     anyhow::bail!("remote lmux needs upgrade");

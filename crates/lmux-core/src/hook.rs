@@ -28,7 +28,12 @@ pub fn claude_hooks_value(
             }]
         })
     };
-    serde_json::json!({ "Stop": [mk("done")], "Notification": [mk("blocked")] })
+    serde_json::json!({
+        "UserPromptSubmit": [mk("working")],
+        "PreToolUse": [mk("working")],
+        "Stop": [mk("done")],
+        "Notification": [mk("blocked")]
+    })
 }
 
 fn value_has_report_command(value: &serde_json::Value) -> bool {
@@ -392,21 +397,36 @@ function openCodeAssistantText(messages: any[]) {
 
 export const Lmux = async ({ client }: any) => ({
   event: async ({ event }: any) => {
-    if (event.type !== "session.idle") return
-    let message = ""
-    const sessionID = event?.properties?.sessionID
-    if (sessionID && client?.session?.messages) {
-      try {
-        const response = await client.session.messages({ path: { id: sessionID } })
-        message = openCodeAssistantText(response?.data || response || [])
-      } catch {}
+    if (event.type === "session.idle") {
+      let message = ""
+      const sessionID = event?.properties?.sessionID
+      if (sessionID && client?.session?.messages) {
+        try {
+          const response = await client.session.messages({ path: { id: sessionID } })
+          message = openCodeAssistantText(response?.data || response || [])
+        } catch {}
+      }
+      await report("done", message || "任务已完成")
+    } else if (event.type === "session.error") {
+      const err = event?.error?.message || event?.error || "执行出错"
+      await report("done", `任务异常: ${err}`)
+    } else if (event.type === "permission.ask" || event.type === "tool.confirm" || event.type === "prompt.ask") {
+      const question = event?.properties?.question || event?.properties?.message || "等待用户确认授权"
+      await report("blocked", question)
+    } else if (event.type === "subagent.completed") {
+      const summary = event?.properties?.summary || "Subagent 任务已完成"
+      await report("working", summary)
+    } else if (event.type === "subagent.failed" || event.type === "subagent.error") {
+      const err = event?.properties?.error || "Subagent 执行异常"
+      await report("done", `Subagent 异常: ${err}`)
+    } else if (event.type === "session.prompt" || event.type === "message.created" || event.type === "tool.call") {
+      await report("working", "")
     }
-    await report("done", message || "任务已完成")
   }
 })
 "#;
 
-/// Pi extension：agent_settled 表示 retry/compaction/follow-up 全部结束。
+/// Pi extension：基于 pi-wechat-notifier 模式支持待确认(ask_user)、Subagent 状态区分及异常捕获。
 pub const PI_EXTENSION: &str = r#"import net from "node:net"
 import { execFileSync } from "node:child_process"
 
@@ -454,15 +474,82 @@ function assistantText(messages: any[]) {
   return ""
 }
 
+function shortText(value: any, max = 160) {
+  if (typeof value !== "string") return ""
+  const t = value.replace(/\s+/g, " ").trim()
+  return t.length <= max ? t : t.slice(0, max - 1) + "…"
+}
+
 export default function (pi: any) {
   let latestAssistant = ""
+  const seenAskUserCalls = new Set<string>()
+
+  pi.on("session_start", async () => {
+    latestAssistant = ""
+    seenAskUserCalls.clear()
+  })
+  pi.on("turn_start", async () => {
+    await report("working", "")
+  })
+  pi.on("agent_start", async () => {
+    await report("working", "")
+  })
+
+  // 待确认：捕获 ask_user, confirm, prompt_user 等工具
+  pi.on("tool_execution_start", async (event: any) => {
+    const toolName = event?.toolName || ""
+    if (toolName === "ask_user" || toolName === "confirm" || toolName === "prompt_user" || toolName === "user_input") {
+      const callId = event?.toolCallId || String(Date.now())
+      if (seenAskUserCalls.has(callId)) return
+      seenAskUserCalls.add(callId)
+      const args = event?.args || {}
+      const question = shortText(args.question || args.message || args.prompt || "等待用户确认")
+      await report("blocked", question)
+      return
+    }
+    // Subagent 派发
+    if (toolName.includes("subagent") || toolName.includes("delegate") || toolName.includes("agent_call")) {
+      const subName = event?.args?.agent || event?.args?.role || "Subagent"
+      await report("working", `正在运行: ${subName}`)
+    }
+  })
+
+  // Subagent 执行结束状态区分（成功 / 错误 / 异常）
+  pi.on("tool_execution_end", async (event: any) => {
+    const toolName = event?.toolName || ""
+    if (toolName.includes("subagent") || toolName.includes("delegate") || toolName.includes("agent_call")) {
+      const subName = event?.args?.agent || event?.args?.role || "Subagent"
+      if (event?.isError || event?.error || event?.exception) {
+        const err = shortText(event.error || event.exception || "执行异常")
+        await report("done", `${subName} 异常: ${err}`)
+      } else {
+        await report("working", `${subName} 完成`)
+      }
+    }
+  })
+
+  pi.on("message_end", (event: any) => {
+    const message = event?.message
+    if (message?.role === "assistant") {
+      const text = typeof message.content === "string" ? message.content : assistantText([message])
+      if (text) latestAssistant = shortText(text, 180)
+    }
+  })
+
   pi.on("agent_end", async (event: any) => {
     const text = assistantText(event?.messages || [])
-    if (text) latestAssistant = text
+    if (text) latestAssistant = shortText(text, 180)
   })
-  pi.on("agent_settled", async (_event: any, ctx: any) => {
+
+  // 任务结算（完成或异常）
+  pi.on("agent_settled", async (event: any, ctx: any) => {
     if (ctx?.isIdle && !ctx.isIdle()) return
-    await report("done", latestAssistant || "任务已完成")
+    let msg = latestAssistant
+    if (event?.error || ctx?.error) {
+      const err = shortText(event?.error || ctx?.error || "执行出错")
+      msg = `任务异常: ${err}`
+    }
+    await report("done", msg || "任务已完成")
     latestAssistant = ""
   })
 }

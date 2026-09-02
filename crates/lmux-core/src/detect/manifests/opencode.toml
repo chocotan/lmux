@@ -4,11 +4,22 @@ status = "blocked"
 region = "bottom"
 contains = [
     "Allow tool?",
-    "confirm",
+    "permission.ask",
 ]
+
 [[rules]]
-status = "done"
+status = "working"
 region = "bottom"
 contains = [
-    "session.idle",
+    "Thinking…",
+    "Thinking...",
+]
+regex = ["[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓]"]
+
+[[rules]]
+status = "idle"
+region = "bottom"
+regex = [
+    "[>❯]\\s*$",
+    "(?i)opencode\\s*[>❯]\\s*$",
 ]

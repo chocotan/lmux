@@ -153,6 +153,16 @@ pub struct AgentDeleteParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSpawnParams {
     pub project: ProjectId,
+    #[serde(default)]
+    pub agent_type: Option<crate::model::AgentType>,
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    pub preset_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -70,6 +70,10 @@ pub fn strip_ansi(buf: &[u8]) -> Vec<String> {
                         break;
                     }
                 }
+            } else if chars.peek() == Some(&'(') || chars.peek() == Some(&')') {
+                // ISO-2022 字符集切换，例如 \x1b(B；跳过 ESC + 括号 + 一个字符。
+                chars.next();
+                chars.next();
             } else if chars.peek() == Some(&']') {
                 chars.next();
                 // OSC: 直到 BEL 或 ESC \
@@ -108,9 +112,10 @@ mod tests {
 
     #[test]
     fn strip_ansi_basic() {
-        let data = b"\x1b[31mHello\x1b[0m world\r\n\x1b]0;title\x07\x1b[1;32mnext line\x1b[0m";
+        let data =
+            b"\x1b[31mHello\x1b[0m world\r\n\x1b(B$ \r\n\x1b]0;title\x07\x1b[1;32mnext line\x1b[0m";
         let lines = strip_ansi(data);
-        assert_eq!(lines, vec!["Hello world", "next line"]);
+        assert_eq!(lines, vec!["Hello world", "$", "next line"]);
     }
 
     #[test]

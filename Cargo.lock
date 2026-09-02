@@ -3048,6 +3048,7 @@ dependencies = [
  "lmux-store",
  "lmux-term",
  "notify-rust",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -3060,6 +3061,7 @@ name = "lmux-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "lmux-core",
  "lmux-server",
  "lmux-term",

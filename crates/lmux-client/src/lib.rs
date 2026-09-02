@@ -3,7 +3,8 @@ mod host;
 mod tunnel;
 
 pub use host::{
-    parse_target, ClientEvent, HostCfg, RemoteHost, RemoteStage, RemoteState, SshAuth, Target,
+    parse_target, BootstrapPhase, BootstrapProgress, ClientEvent, HostCfg, RemoteHost, RemoteStage,
+    RemoteState, SshAuth, Target, UploadProgress,
 };
 
 pub async fn release_remote_tunnel(host: &str) {
@@ -195,9 +196,10 @@ pub async fn fetch_snapshot(conn: &mut Connection) -> Result<Snapshot> {
     Ok(serde_json::from_value(v)?)
 }
 
-pub async fn spawn_shell_agent(
+pub async fn spawn_agent(
     socket: &str,
     project: &lmux_core::model::ProjectId,
+    preset: Option<&lmux_core::AgentPreset>,
 ) -> anyhow::Result<lmux_core::model::AgentInstance> {
     let mut conn = open(socket).await?;
     let value = conn
@@ -205,10 +207,40 @@ pub async fn spawn_shell_agent(
             lmux_core::protocol::methods::AGENT_SPAWN,
             serde_json::to_value(lmux_core::protocol::AgentSpawnParams {
                 project: project.clone(),
+                agent_type: preset.map(|p| p.agent_type),
+                // Shell 预设的 program 来自本机 default_shell_program；远程应
+                // 使用远端自己的默认 shell，不能把本机路径（或 basename）当作
+                // 远程 override 传过去。
+                program: preset.and_then(|p| {
+                    (p.agent_type != lmux_core::model::AgentType::Shell).then(|| p.program.clone())
+                }),
+                args: preset.map(|p| p.args.clone()),
+                env: preset.map(|p| p.env.clone().into_iter().collect()),
+                preset_name: preset.map(|p| p.label.clone()),
             })?,
         )
         .await?;
-    Ok(serde_json::from_value(value)?)
+    let agent: lmux_core::model::AgentInstance = serde_json::from_value(value)?;
+    if let Some(expected) = preset.map(|p| p.agent_type) {
+        if agent.agent_type != expected {
+            // 旧版远端会忽略 agent_type，表面返回成功但实际创建 Shell；
+            // 清理误创建的会话，并把版本不兼容明确反馈给 UI。
+            let _ = delete_agent(socket, &agent.id).await;
+            anyhow::bail!(
+                "远端 lmux 版本过旧：请求创建 {}，远端实际创建了 {}，请先更新远端 lmux",
+                expected.as_str(),
+                agent.agent_type.as_str()
+            );
+        }
+    }
+    Ok(agent)
+}
+
+pub async fn spawn_shell_agent(
+    socket: &str,
+    project: &lmux_core::model::ProjectId,
+) -> anyhow::Result<lmux_core::model::AgentInstance> {
+    spawn_agent(socket, project, None).await
 }
 
 pub async fn send_term_input(

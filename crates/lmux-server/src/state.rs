@@ -202,6 +202,25 @@ impl ServerState {
         self.apply_status(agent, to, message)
     }
 
+    /// 按键触发的 working 标记：与屏幕采样同走 DetectionEngine，
+    /// 保证引擎内部状态与服务器状态一致（否则屏幕推导的 idle 候选
+    /// 会因等于引擎陈旧内部状态而永不提交，状态卡死）。
+    pub fn mark_screen_working(&mut self, agent: &AgentId) -> Vec<EventMsg> {
+        let Some(current) = self
+            .agents
+            .iter()
+            .find(|a| &a.id == agent)
+            .map(|a| a.status)
+        else {
+            return vec![];
+        };
+        if let Some(update) = self.detector.mark_working(agent, current) {
+            self.apply_status(agent, update.to, None)
+        } else {
+            vec![]
+        }
+    }
+
     fn apply_status(
         &mut self,
         agent: &AgentId,

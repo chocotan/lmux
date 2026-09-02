@@ -72,6 +72,11 @@ pub struct StatusUpdate {
     pub seq: u64,
 }
 
+/// 按键触发（非 hook、非屏幕规则）的状态更新
+pub struct ScreenStatusUpdate {
+    pub to: AgentStatus,
+}
+
 pub struct DetectionEngine {
     manifests: HashMap<String, CompiledManifest>,
     states: HashMap<AgentId, AgentDetectState>,
@@ -103,8 +108,28 @@ impl DetectionEngine {
             .unwrap_or(false)
     }
 
+    /// 按键触发的 working 标记：立即生效，绕过屏幕防抖，
+    /// 但与屏幕采样共享同一份引擎状态（screen authority）。
+    /// hook 权威窗口内不覆写 hook 状态。
+    pub fn mark_working(
+        &mut self,
+        agent: &AgentId,
+        current: AgentStatus,
+    ) -> Option<ScreenStatusUpdate> {
+        let st = self.state_mut(agent, current);
+        if matches!(st.authority, Authority::Hook) {
+            return None;
+        }
+        st.pending = None;
+        st.status = AgentStatus::Working;
+        Some(ScreenStatusUpdate {
+            to: AgentStatus::Working,
+        })
+    }
+
     fn state_mut(&mut self, agent: &AgentId, current: AgentStatus) -> &mut AgentDetectState {
-        self.states
+        let st = self
+            .states
             .entry(agent.clone())
             .or_insert_with(|| AgentDetectState {
                 status: current,
@@ -112,7 +137,12 @@ impl DetectionEngine {
                 hook_last_seen: None,
                 pending: None,
                 seq: 0,
-            })
+            });
+        if st.status != current {
+            st.status = current;
+            st.pending = None;
+        }
+        st
     }
 
     pub fn forget(&mut self, agent: &AgentId) {
@@ -313,6 +343,32 @@ mod tests {
         let mut e = engine();
         let a: AgentId = "pi_C03".into();
         assert_eq!(e.report(&a, AgentStatus::Done, HookEvent::Done), None);
+    }
+
+    #[test]
+    fn keypress_working_does_not_block_screen_idle() {
+        // 回归：键入命令 → mark_working → 屏幕 idle 规则必须能正常提交回
+        // idle，否则 spinner 永久卡死（引擎内部状态与服务器状态脱节）。
+        let mut e = engine();
+        let a: AgentId = "shell_S01".into();
+        let prompt = input(["~/proj ❯"]);
+        assert_eq!(e.observe(&a, AgentStatus::Idle, &prompt), None);
+        // 用户按 Enter，按键触发 working（无防抖，立即生效）
+        let upd = e.mark_working(&a, AgentStatus::Idle).unwrap();
+        assert_eq!(upd.to, AgentStatus::Working);
+        // 命令执行完成，屏幕回到 prompt：防抖两拍后应提交 idle
+        assert_eq!(e.observe(&a, AgentStatus::Working, &prompt), None);
+        let upd = e.observe(&a, AgentStatus::Working, &prompt).unwrap();
+        assert_eq!(upd.to, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn keypress_working_respects_hook_authority() {
+        // hook 窗口内按键不覆写 hook 状态，防止屏幕侧抢夺权威
+        let mut e = engine();
+        let a: AgentId = "claude_A01".into();
+        e.report(&a, AgentStatus::Working, HookEvent::Working);
+        assert!(e.mark_working(&a, AgentStatus::Working).is_none());
     }
 
     #[test]

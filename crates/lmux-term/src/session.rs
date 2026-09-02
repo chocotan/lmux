@@ -405,6 +405,33 @@ fn configure_tmux_server() {
             .stderr(std::process::Stdio::null())
             .status();
     }
+    // 禁用 tmux 内置鼠标拖拽进入 copy-mode（避免拖拽调整大小时被 tmux 截获并卡在 0/0，同时保留鼠标滚轮滚动）
+    for cmd in [
+        &["-L", "lmux", "unbind-key", "-n", "MouseDrag1Pane"][..],
+        &["-L", "lmux", "unbind-key", "-n", "MouseDrag1Border"][..],
+        &[
+            "-L",
+            "lmux",
+            "unbind-key",
+            "-T",
+            "copy-mode",
+            "MouseDrag1Pane",
+        ][..],
+        &[
+            "-L",
+            "lmux",
+            "unbind-key",
+            "-T",
+            "copy-mode-vi",
+            "MouseDrag1Pane",
+        ][..],
+    ] {
+        let _ = std::process::Command::new("tmux")
+            .args(cmd)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 fn tmux_config_path() -> PathBuf {
@@ -419,7 +446,7 @@ fn tmux_config_path() -> PathBuf {
         let _ = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
     }
     let path = base.join("tmux.conf");
-    const CONFIG: &str = "set -g status off\nset -g mouse on\nset -g extended-keys on\nset -g default-terminal tmux-256color\nset -ag terminal-overrides ',xterm-256color:RGB'\n";
+    const CONFIG: &str = "set -g status off\nset -g mouse on\nunbind -n MouseDrag1Pane\nunbind -n MouseDrag1Border\nunbind -T copy-mode MouseDrag1Pane\nunbind -T copy-mode-vi MouseDrag1Pane\nset -g extended-keys on\nset -g default-terminal tmux-256color\nset -ag terminal-overrides ',xterm-256color:RGB'\n";
     if std::fs::read_to_string(&path).ok().as_deref() != Some(CONFIG) {
         let _ = std::fs::write(&path, CONFIG);
         #[cfg(unix)]

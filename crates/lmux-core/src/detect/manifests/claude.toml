@@ -6,7 +6,6 @@ contains = [
     "Do you want to proceed?",
     "Do you want to make this edit",
     "Waiting for your input",
-    "esc to interrupt (fix",
 ]
 regex = [
     "^❯\\s+1\\.\\s+Yes",
@@ -15,8 +14,22 @@ regex = [
 
 [[rules]]
 status = "working"
+region = "bottom"
+contains = [
+    "esc to interrupt",
+    "Thinking…",
+    "Claude is thinking",
+    "Baking",
+]
+regex = [
+    "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓]",
+    "esc to interrupt",
+]
+
+[[rules]]
+status = "working"
 region = "osc_title"
-regex = ["⏺|✳|Baking"]
+regex = ["⏺|Baking|Thinking"]
 
 [[rules]]
 status = "done"
@@ -24,4 +37,12 @@ region = "bottom"
 contains = [
     "Task complete",
     "hook: Stop",
+]
+
+[[rules]]
+status = "idle"
+region = "bottom"
+regex = [
+    "[>❯✳]\\s*$",
+    "(?i)claude\\s*[>❯]\\s*$",
 ]

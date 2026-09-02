@@ -14,6 +14,8 @@ tracing.workspace = true
 serde.workspace = true
 lmux-term = { path = "../lmux-term" }
 lmux-server = { path = "../lmux-server" }
+flate2 = "1.0"
+tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -5,11 +5,30 @@ region = "bottom"
 contains = [
     "Allow command?",
     "approve?",
-    "y/n",
+    "Action Required",
 ]
 regex = ["^\\s*\\(y\\)es / \\(n\\)o"]
 
 [[rules]]
 status = "working"
+region = "bottom"
+contains = [
+    "Thinking…",
+    "Thinking...",
+]
+regex = [
+    "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓]",
+]
+
+[[rules]]
+status = "working"
 region = "osc_title"
-contains = ["⋯", "thinking"]
+contains = ["⋯", "Thinking", "thinking"]
+
+[[rules]]
+status = "idle"
+region = "bottom"
+regex = [
+    "[>❯]\\s*$",
+    "(?i)codex\\s*[>❯]\\s*$",
+]
