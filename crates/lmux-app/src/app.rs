@@ -2,7 +2,7 @@
 use crate::term_view::TermView;
 use crate::text_field::TextField;
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgba, Context, Entity, FocusHandle, Focusable,
+    canvas, div, prelude::*, px, relative, rgba, svg, Context, Entity, FocusHandle, Focusable,
     MouseButton, ParentElement, Pixels, Point, Render, SharedString, Styled, Window,
 };
 use lmux_core::model::{AgentId, Snapshot};
@@ -25,6 +25,20 @@ const ACCENT: u32 = 0x3d6cd8ff;
 const GREEN: u32 = 0x529633ff;
 const YELLOW: u32 = 0xb88226ff;
 const RED: u32 = 0xd13e50ff;
+
+const SPLIT_HORIZONTAL_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='2'/><path d='M12 4v16'/></svg>"#;
+const SPLIT_VERTICAL_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='2'/><path d='M3 12h18'/></svg>"#;
+const MAXIMIZE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5'/></svg>"#;
+const RESTORE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='7' y='7' width='13' height='13' rx='1'/><path d='M17 7V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h3'/></svg>"#;
+const CLOSE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round'><path d='M6 6l12 12M18 6L6 18'/></svg>"#;
+
+fn panel_icon(data: &[u8], color: u32) -> gpui::Svg {
+    svg()
+        .data(data)
+        .w(px(14.))
+        .h(px(14.))
+        .text_color(rgba(color))
+}
 #[derive(Clone)]
 struct DragTab {
     agent: AgentId,
@@ -2949,7 +2963,7 @@ impl LmuxApp {
                                         this.split_pane(&pane, SplitAxis::Horizontal, window, cx)
                                     }
                                 }))
-                                .child("◫"),
+                                .child(panel_icon(SPLIT_HORIZONTAL_ICON, FG1)),
                         )
                         .child(
                             div()
@@ -2966,7 +2980,7 @@ impl LmuxApp {
                                         this.split_pane(&pane, SplitAxis::Vertical, window, cx)
                                     }
                                 }))
-                                .child("⊟"),
+                                .child(panel_icon(SPLIT_VERTICAL_ICON, FG1)),
                         )
                         .child(
                             div()
@@ -2981,11 +2995,14 @@ impl LmuxApp {
                                     let pane = pane_id.clone();
                                     move |this, _ev, _window, cx| this.toggle_maximize(&pane, cx)
                                 }))
-                                .child(if self.maximized_pane.as_ref() == Some(&pane_id) {
-                                    "❐"
-                                } else {
-                                    "⤢"
-                                }),
+                                .child(panel_icon(
+                                    if self.maximized_pane.as_ref() == Some(&pane_id) {
+                                        RESTORE_ICON
+                                    } else {
+                                        MAXIMIZE_ICON
+                                    },
+                                    FG1,
+                                )),
                         )
                         .when(self.pane_tree.leaf_count() > 1, |controls| {
                             controls.child(
@@ -3006,7 +3023,7 @@ impl LmuxApp {
                                             this.close_split_pane(&pane, window, cx)
                                         }
                                     }))
-                                    .child("×"),
+                                    .child(panel_icon(CLOSE_ICON, RED)),
                             )
                         }),
                 );
@@ -3081,7 +3098,8 @@ impl Render for LmuxApp {
                 .items_center()
                 .gap_1()
                 .h(px(32.))
-                .px_2()
+                .pl_4()
+                .pr_2()
                 .text_size(px(12.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(FG0))
@@ -3095,12 +3113,6 @@ impl Render for LmuxApp {
                         cx.notify();
                     }
                 }))
-                .child(
-                    div()
-                        .w(px(14.))
-                        .text_color(rgba(FG1))
-                        .child(if local_collapsed { "▸" } else { "▾" }),
-                )
                 .child(machine_name.clone())
                 .child(
                     div()
@@ -3149,7 +3161,7 @@ impl Render for LmuxApp {
                 let mut pnode = div()
                     .flex()
                     .flex_col()
-                    .ml_4()
+                    .ml_6()
                     .border_l_1()
                     .border_color(rgba(LINE));
                 let project_id_for_add = project.id.clone();
@@ -3166,7 +3178,7 @@ impl Render for LmuxApp {
                         .items_center()
                         .gap_1()
                         .h(px(28.))
-                        .pl_2()
+                        .pl_4()
                         .pr_2()
                         .text_size(px(12.))
                         .font_weight(gpui::FontWeight::MEDIUM)
@@ -3197,12 +3209,6 @@ impl Render for LmuxApp {
                                     cx.notify();
                                 }
                             }),
-                        )
-                        .child(
-                            div()
-                                .w(px(12.))
-                                .text_color(rgba(FG1))
-                                .child(if project_collapsed { "▸" } else { "▾" }),
                         )
                         .child(project.name.clone())
                         .child(
@@ -3263,7 +3269,7 @@ impl Render for LmuxApp {
                             .items_center()
                             .gap_1()
                             .h(px(26.))
-                            .pl_6()
+                            .pl_8()
                             .pr_2()
                             .rounded_sm()
                             .text_size(px(11.5))
@@ -3380,7 +3386,8 @@ impl Render for LmuxApp {
                     .items_center()
                     .gap_1()
                     .h(px(32.))
-                    .px_2()
+                    .pl_4()
+                    .pr_2()
                     .text_size(px(12.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgba(FG0))
@@ -3409,12 +3416,6 @@ impl Render for LmuxApp {
                                 cx.notify();
                             }
                         }),
-                    )
-                    .child(
-                        div()
-                            .w(px(14.))
-                            .text_color(rgba(FG1))
-                            .child(if machine_collapsed { "▸" } else { "▾" }),
                     )
                     .child(name.clone())
                     .child(
@@ -3508,7 +3509,7 @@ impl Render for LmuxApp {
                         };
                         let spawn_host = name.clone();
                         let spawn_project = project.id.clone();
-                        let mut pnode = div().flex().flex_col().ml_2();
+                        let mut pnode = div().flex().flex_col().ml_6();
                         pnode = pnode.child(
                             div()
                                 .id(gpui::ElementId::Name(
@@ -3518,7 +3519,7 @@ impl Render for LmuxApp {
                                 .items_center()
                                 .gap_1()
                                 .h(px(28.))
-                                .pl_2()
+                                .pl_4()
                                 .pr_2()
                                 .text_size(px(12.))
                                 .font_weight(gpui::FontWeight::MEDIUM)
@@ -3549,12 +3550,6 @@ impl Render for LmuxApp {
                                             cx.notify();
                                         }
                                     }),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(12.))
-                                        .text_color(rgba(FG1))
-                                        .child(if project_collapsed { "▸" } else { "▾" }),
                                 )
                                 .child(project.name.clone())
                                 .child(
@@ -3601,7 +3596,7 @@ impl Render for LmuxApp {
                                     .items_center()
                                     .gap_1()
                                     .h(px(26.))
-                                    .pl_4()
+                                    .pl_8()
                                     .pr_2()
                                     .rounded_sm()
                                     .text_size(px(11.5))
