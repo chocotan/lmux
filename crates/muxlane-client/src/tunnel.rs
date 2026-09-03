@@ -76,7 +76,18 @@ fn ssh_command(auth: &SshAuth) -> Command {
         }
         _ => Command::new("ssh"),
     };
-    command.args(["-o", "ConnectTimeout=5", "-o", "NumberOfPasswordPrompts=1"]);
+    command.args([
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "NumberOfPasswordPrompts=1",
+        // 对端死掉（断网/休眠/宕机）时 ~60s 内让 ssh 主动退出，
+        // 否则要靠 TCP 默认 keepalive（约 2 小时）才发现隧道已死。
+        "-o",
+        "ServerAliveInterval=20",
+        "-o",
+        "ServerAliveCountMax=3",
+    ]);
     match auth {
         SshAuth::SshConfig => {
             command.args(["-o", "BatchMode=yes"]);
@@ -114,6 +125,27 @@ fn ssh_command(auth: &SshAuth) -> Command {
         }
     }
     command
+}
+
+/// exec 类 ssh 调用（probe/upload/start）共享的每台主机一条 ControlMaster。
+/// 只有第一次调用做 TCP+认证握手，后续复用。
+/// 注意：隧道进程（start_tunnel）不能用这个 socket——`-L` 转发只在 master
+/// 连接上生效，复用已有 master 时转发会被静默丢弃。
+fn shared_ctl(destination: &str) -> PathBuf {
+    let dir = data_dir().join("ssh");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join(format!("cm-{}.ctl", sanitize(destination)))
+}
+
+fn shared_master_args(destination: &str) -> [String; 6] {
+    [
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        "ControlPersist=600".into(),
+        "-o".into(),
+        format!("ControlPath={}", shared_ctl(destination).display()),
+    ]
 }
 
 fn classify_failure(stderr: &[u8]) -> TunnelError {
@@ -156,6 +188,16 @@ pub async fn release_tunnel(host: &str) {
             .output()
             .await;
         let _ = std::fs::remove_file(entry.control_path);
+        // 一并关掉该主机的共享 exec master，断开即不再保留已认证连接。
+        let shared = shared_ctl(&entry.destination);
+        let _ = Command::new("ssh")
+            .arg("-S")
+            .arg(&shared)
+            .args(["-O", "exit"])
+            .arg(&entry.destination)
+            .output()
+            .await;
+        let _ = std::fs::remove_file(shared);
     }
 }
 
@@ -246,6 +288,7 @@ elif [ -x "$managed" ]; then printf 'STOPPED\t%s\t%s\n' "$socket" "$managed"
 else printf 'MISSING\t%s\n' "$socket"
 fi"#;
     let output = ssh_command(auth)
+        .args(shared_master_args(&destination))
         .arg(&destination)
         .arg(script)
         .output()
@@ -330,6 +373,7 @@ chmod 700 "$tmp"
 mv "$tmp" "$data/bin/muxlane""#;
 
     let mut child = ssh_command(auth)
+        .args(shared_master_args(&destination))
         .arg(&destination)
         .arg(script)
         .stdin(std::process::Stdio::piped())
@@ -432,6 +476,7 @@ if [ "$stopped" -eq 0 ]; then
 fi
 rm -f -- "$data/muxlane.sock""#;
     let output = ssh_command(auth)
+        .args(shared_master_args(&destination))
         .arg(&destination)
         .arg(command)
         .output()
@@ -473,6 +518,7 @@ exit 1"#,
         sh_quote(explicit)
     );
     let output = ssh_command(auth)
+        .args(shared_master_args(&destination))
         .arg(&destination)
         .arg(command)
         .output()
@@ -556,6 +602,7 @@ async fn start_tunnel_socat(
         let local_port = 44_700 + offset;
         let remote_socket_q = sh_quote(remote_socket);
         let probe = ssh_command(auth)
+            .args(shared_master_args(host))
             .args(["-o", "ConnectTimeout=5"])
             .arg(host)
             .arg(format!(
@@ -674,6 +721,20 @@ mod tests {
         assert_eq!(
             streamlocal_spec(std::path::Path::new("/tmp/local.sock"), "/run/remote.sock"),
             "/tmp/local.sock:/run/remote.sock"
+        );
+    }
+
+    #[test]
+    fn shared_master_uses_sanitized_per_host_control_path() {
+        let args = shared_master_args("user@host.example");
+        let rendered = args.join(" ");
+        assert!(rendered.contains("ControlMaster=auto"));
+        assert!(rendered.contains("ControlPersist=600"));
+        assert!(rendered.contains("cm-user_host.example.ctl"));
+        // 同主机两次调用拿到同一路径（才能复用 master）
+        assert_eq!(
+            shared_ctl("user@host.example"),
+            shared_ctl("user@host.example")
         );
     }
 }
