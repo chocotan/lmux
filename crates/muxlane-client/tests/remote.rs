@@ -1,8 +1,7 @@
 //! 客户端集成测试：对端起真 muxlane-server，RemoteHost 完整走 连接→快照→事件→term 流
 use muxlane_client::{ClientEvent, HostCfg, RemoteHost, Target};
-use muxlane_core::model::{AgentId, AgentInstance, AgentStatus, AgentType, MachineInfo, Project};
+use muxlane_core::model::{AgentInstance, AgentStatus, AgentType, MachineInfo, Project};
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
@@ -164,9 +163,6 @@ async fn remote_host_connects_and_receives_events() {
 }
 
 use muxlane_client::RemoteState;
-
-#[allow(dead_code)]
-fn _type_check(_: HashMap<AgentId, Arc<muxlane_term::PtySession>>) {}
 
 #[test]
 fn parses_socket_and_ssh_targets() {

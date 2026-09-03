@@ -3349,7 +3349,6 @@ name = "muxlane-server"
 version = "0.0.3"
 dependencies = [
  "anyhow",
- "base64",
  "bytes",
  "fs2",
  "muxlane-core",
@@ -3357,7 +3356,6 @@ dependencies = [
  "muxlane-term",
  "serde_json",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
  "tracing",
  "ulid",
@@ -3384,10 +3382,8 @@ dependencies = [
  "bytes",
  "muxlane-core",
  "portable-pty",
- "thiserror 2.0.20",
  "tokio",
  "tracing",
- "ulid",
  "vte 0.13.1",
 ]
 

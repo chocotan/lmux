@@ -360,13 +360,10 @@ struct BootstrapConfirm {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct Notification {
-    pub id: u64,
     pub agent: AgentId,
     pub machine_name: String,
     pub project_name: String,
-    pub agent_type: String,
     pub to: muxlane_core::model::AgentStatus,
     pub message: Option<String>,
     pub unread: bool,
@@ -908,7 +905,7 @@ impl MuxlaneApp {
         let focused = self.active.as_ref() == Some(&agent);
         let now_secs = muxlane_core::model::now_secs();
 
-        let (machine_name, project_name, agent_type) = {
+        let (machine_name, project_name) = {
             if let Some(a) = self.last_snapshot.agent(&agent) {
                 let proj = self
                     .last_snapshot
@@ -917,7 +914,7 @@ impl MuxlaneApp {
                     .find(|p| p.id == a.project)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "project".into());
-                ("local".to_string(), proj, a.agent_type.as_str().to_string())
+                ("local".to_string(), proj)
             } else {
                 let mut found = None;
                 for (host, snap) in &self.remote_snaps {
@@ -928,11 +925,11 @@ impl MuxlaneApp {
                             .find(|p| p.id == a.project)
                             .map(|p| p.name.clone())
                             .unwrap_or_else(|| "project".into());
-                        found = Some((host.clone(), proj, a.agent_type.as_str().to_string()));
+                        found = Some((host.clone(), proj));
                         break;
                     }
                 }
-                found.unwrap_or_else(|| ("remote".into(), "project".into(), "agent".into()))
+                found.unwrap_or_else(|| ("remote".into(), "project".into()))
             }
         };
 
@@ -959,11 +956,9 @@ impl MuxlaneApp {
         self.notifications.insert(
             0,
             Notification {
-                id: self.toast_seq,
                 agent: agent.clone(),
                 machine_name: machine_name.clone(),
                 project_name: project_name.clone(),
-                agent_type,
                 to,
                 message: Some(body.clone()),
                 unread: !focused,
@@ -3791,7 +3786,9 @@ impl MuxlaneApp {
                 }
                 Ok(Err(error)) => {
                     let text = error.to_string();
-                    if text.contains("unknown_method") && text.contains("project.add") {
+                    if text.contains("unknown_method")
+                        && text.contains(muxlane_core::protocol::features::PROJECT_ADD)
+                    {
                         // 旧版远端没有 project.add：转入升级引导，而不是弹原始错误
                         this.remote_project_dialog = None;
                         this.dialog_error = None;
@@ -4558,11 +4555,7 @@ impl MuxlaneApp {
         }
     }
 
-    fn render_pane_node(
-        &mut self,
-        node: PaneNode,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_pane_node(&mut self, node: PaneNode, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
         match node {
             PaneNode::Split {
@@ -6474,7 +6467,6 @@ fn render_pi_loading_spinner(frame: usize, theme: Theme) -> gpui::Div {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-#[allow(dead_code)]
 struct AttentionStyle {
     bg_color: Option<u32>,
     text_color: Option<u32>,

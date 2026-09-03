@@ -65,7 +65,7 @@
 ## 🚀 快速开始
 
 ### 依赖环境
-- Linux (X11 / Wayland)
+- Linux / macOS (Unix)
 - Rust 1.80+ (推荐最新 stable)
 - tmux 3.2+
 - 系统字体与渲染依赖：`fontconfig`, `freetype`, `libxkbcommon`, `wayland` / `xcb` 相关开发包

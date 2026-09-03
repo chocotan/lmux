@@ -59,12 +59,7 @@ pub fn default_shell_program() -> String {
     }
     #[cfg(not(unix))]
     {
-        if let Ok(pwsh) = std::env::var("COMSPEC") {
-            if !pwsh.trim().is_empty() {
-                return pwsh;
-            }
-        }
-        "powershell.exe".into()
+        "sh".into()
     }
 }
 
@@ -126,7 +121,6 @@ pub struct PtySession {
     tap_tx: broadcast::Sender<bytes::Bytes>,
     shared: Arc<Shared>,
     exit_rx: Mutex<mpsc::Receiver<SessionEvent>>,
-    reader_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     last_input_ms: AtomicU64,
     focused: AtomicBool,
     tmux_server_name: Option<String>,
@@ -237,7 +231,6 @@ impl PtySession {
             writer: std::sync::Mutex::new(writer),
             tap_tx: tap_tx.clone(),
             exit_rx: Mutex::new(exit_rx),
-            reader_handle: std::sync::Mutex::new(None),
             shared: Arc::clone(&shared),
             last_input_ms: AtomicU64::new(0),
             focused: AtomicBool::new(false),
@@ -252,7 +245,7 @@ impl PtySession {
         let agent_id = cfg.agent.clone();
         let tap_tx_reader = tap_tx.clone();
         let shared_ref = Arc::clone(&shared);
-        let handle = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name(format!("pty-read-{agent_id}"))
             .spawn(move || {
                 let mut reader = BufReader::with_capacity(16 * 1024, reader);
@@ -284,7 +277,6 @@ impl PtySession {
                 let _ = exit_tx.try_send(SessionEvent::Exit { code });
             })
             .context("spawn reader thread")?;
-        *session.reader_handle.lock().unwrap() = Some(handle);
 
         Ok(session)
     }
@@ -333,12 +325,6 @@ impl PtySession {
             let _ = w.write_all(input);
             let _ = w.flush();
         }
-    }
-
-    /// 兼容旧测试/API：直接调用同步路径。
-    pub async fn write(&self, input: &[u8]) -> Result<()> {
-        self.write_input(input);
-        Ok(())
     }
 
     pub fn interaction_recent(&self) -> bool {
@@ -851,7 +837,7 @@ mod tests {
         let s = PtySession::spawn(cfg).unwrap();
         let (_snap, mut rx) = s.subscribe();
         tokio::time::sleep(Duration::from_millis(200)).await;
-        s.write(b"ping\r\n").await.unwrap();
+        s.write_input(b"ping\r\n");
         let mut got = Vec::new();
         for _ in 0..50 {
             match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {

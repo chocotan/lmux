@@ -1,5 +1,4 @@
 //! SSH 隧道：复用 ControlMaster，把远端 muxlane.sock 转发到本地（P1 收尾接入 RemoteHost）
-#![allow(dead_code)]
 use crate::host::SshAuth;
 use crate::UploadProgress;
 use std::path::PathBuf;
@@ -201,7 +200,6 @@ pub async fn release_tunnel(host: &str) {
     }
 }
 
-#[allow(dead_code)]
 pub fn data_dir() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -588,70 +586,6 @@ async fn wait_healthy(socket: &std::path::Path) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     false
-}
-
-async fn start_tunnel_socat(
-    host: &str,
-    remote_socket: &str,
-    local_sock: &std::path::Path,
-    ctl: &std::path::Path,
-    auth: &SshAuth,
-) -> Result<String, TunnelError> {
-    for offset in 0..20u16 {
-        let remote_port = 43_700 + offset;
-        let local_port = 44_700 + offset;
-        let remote_socket_q = sh_quote(remote_socket);
-        let probe = ssh_command(auth)
-            .args(shared_master_args(host))
-            .args(["-o", "ConnectTimeout=5"])
-            .arg(host)
-            .arg(format!(
-                "if ! ss -ltn | grep -q ':{remote_port} '; then (socat TCP-LISTEN:{remote_port},bind=127.0.0.1,fork UNIX-CONNECT:{remote_socket_q} >/dev/null 2>&1 &) ; fi; sleep 0.2; ss -ltn | grep -q ':{remote_port} ' && echo OK"
-            ))
-            .output()
-            .await
-            .map_err(|error| TunnelError::Other(error.to_string()))?;
-        if !probe.status.success() || !String::from_utf8_lossy(&probe.stdout).contains("OK") {
-            continue;
-        }
-
-        // 本地 TCP 端口通过 SSH 送到远端 socat listener。
-        let ssh = ssh_command(auth)
-            .arg("-S")
-            .arg(ctl)
-            .args([
-                "-fN",
-                "-o",
-                "ControlMaster=auto",
-                "-o",
-                "ControlPersist=600",
-                "-o",
-                "BatchMode=yes",
-                "-L",
-            ])
-            .arg(format!("{local_port}:127.0.0.1:{remote_port}"))
-            .arg(host)
-            .output()
-            .await
-            .map_err(|error| TunnelError::Other(error.to_string()))?;
-        if !ssh.status.success() {
-            continue;
-        }
-
-        let local = local_sock.display().to_string();
-        let _ = std::fs::remove_file(local_sock);
-        Command::new("socat")
-            .args([
-                format!("UNIX-LISTEN:{local},fork"),
-                format!("TCP:127.0.0.1:{local_port}"),
-            ])
-            .spawn()
-            .map_err(|error| TunnelError::Other(error.to_string()))?;
-        if wait_healthy(local_sock).await {
-            return Ok(local);
-        }
-    }
-    Err(TunnelError::Other("unable to establish SSH tunnel".into()))
 }
 
 fn sh_quote(s: &str) -> String {

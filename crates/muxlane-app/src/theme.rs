@@ -77,9 +77,7 @@ impl ThemeMode {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct Theme {
-    pub mode: ThemeMode,
     pub bg0: u32,
     pub bg1: u32,
     pub bg2: u32,
@@ -93,7 +91,6 @@ pub struct Theme {
     pub green: u32,
     pub yellow: u32,
     pub red: u32,
-    pub cyan: u32,
 }
 
 impl Theme {
@@ -124,7 +121,6 @@ impl Theme {
     pub fn for_mode(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Light => Self {
-                mode,
                 bg0: 0xfaf9f6ff,
                 bg1: 0xece8e1ff,
                 bg2: 0xdbd7cfff,
@@ -138,10 +134,8 @@ impl Theme {
                 green: 0x529633ff,
                 yellow: 0xb88226ff,
                 red: 0xd13e50ff,
-                cyan: 0x2a92b0ff,
             },
             ThemeMode::Paper => Self {
-                mode,
                 bg0: 0xf4ecdfff,
                 bg1: 0xeadfceff,
                 bg2: 0xdfd0bcff,
@@ -155,10 +149,8 @@ impl Theme {
                 green: 0x4e8c62ff,
                 yellow: 0xb8872eff,
                 red: 0xc94b4bff,
-                cyan: 0x368ca1ff,
             },
             ThemeMode::Sky => Self {
-                mode,
                 bg0: 0xf2f7ffff,
                 bg1: 0xe3edfcff,
                 bg2: 0xd2e0f4ff,
@@ -172,10 +164,8 @@ impl Theme {
                 green: 0x16805cff,
                 yellow: 0xb7791fff,
                 red: 0xdc3f51ff,
-                cyan: 0x1689a8ff,
             },
             ThemeMode::Jade => Self {
-                mode,
                 bg0: 0xeff8f2ff,
                 bg1: 0xe0f0e6ff,
                 bg2: 0xcfe4d8ff,
@@ -189,10 +179,8 @@ impl Theme {
                 green: 0x2f855aff,
                 yellow: 0xb7791fff,
                 red: 0xc94b4bff,
-                cyan: 0x1689a8ff,
             },
             ThemeMode::Sakura => Self {
-                mode,
                 bg0: 0xfff2f5ff,
                 bg1: 0xf9e3eaff,
                 bg2: 0xf1d0dcff,
@@ -206,10 +194,8 @@ impl Theme {
                 green: 0x378557ff,
                 yellow: 0xb7791fff,
                 red: 0xc2415aff,
-                cyan: 0x1689a8ff,
             },
             ThemeMode::Dark => Self {
-                mode,
                 bg0: 0x181a1fff,
                 bg1: 0x21252bff,
                 bg2: 0x282c34ff,
@@ -223,10 +209,8 @@ impl Theme {
                 green: 0x98c379ff,
                 yellow: 0xe5c07bff,
                 red: 0xe06c75ff,
-                cyan: 0x56b6c2ff,
             },
             ThemeMode::Synthwave => Self {
-                mode,
                 bg0: 0x1b1029ff,
                 bg1: 0x28163bff,
                 bg2: 0x38204dff,
@@ -240,10 +224,8 @@ impl Theme {
                 green: 0x7ee2b8ff,
                 yellow: 0xf5ca7aff,
                 red: 0xfb7185ff,
-                cyan: 0x67e8f9ff,
             },
             ThemeMode::OneDark => Self {
-                mode,
                 bg0: 0x282c34ff,
                 bg1: 0x21252bff,
                 bg2: 0x313640ff,
@@ -257,7 +239,6 @@ impl Theme {
                 green: 0x98c379ff,
                 yellow: 0xe5c07bff,
                 red: 0xe06c75ff,
-                cyan: 0x56b6c2ff,
             },
         }
     }

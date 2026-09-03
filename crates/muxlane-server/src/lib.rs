@@ -278,12 +278,12 @@ impl MuxlaneServer {
                                             req.id,
                                             serde_json::to_value(muxlane_core::protocol::HelloResult {
                                                 version: env!("CARGO_PKG_VERSION").into(),
-                                                protocol: 2,
+                                                protocol: muxlane_core::protocol::PROTOCOL_VERSION,
                                                 features: vec![
-                                                    "project.add".into(),
-                                                    "agent.spawn".into(),
-                                                    "term.input".into(),
-                                                    "term.resize".into(),
+                                                    muxlane_core::protocol::features::PROJECT_ADD.into(),
+                                                    muxlane_core::protocol::features::AGENT_SPAWN.into(),
+                                                    muxlane_core::protocol::features::TERM_INPUT.into(),
+                                                    muxlane_core::protocol::features::TERM_RESIZE.into(),
                                                 ],
                                             })?,
                                         ),

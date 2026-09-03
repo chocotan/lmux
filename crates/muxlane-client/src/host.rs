@@ -584,12 +584,13 @@ impl RemoteHost {
                                 .map_err(Into::into)
                         });
                     let compatible = hello.as_ref().is_ok_and(|hello| {
-                        hello.protocol >= 2
-                            && hello.features.iter().any(|feature| feature == "term.input")
-                            && hello
-                                .features
-                                .iter()
-                                .any(|feature| feature == "project.add")
+                        hello.protocol >= muxlane_core::protocol::PROTOCOL_VERSION
+                            && hello.features.iter().any(|feature| {
+                                feature == muxlane_core::protocol::features::TERM_INPUT
+                            })
+                            && hello.features.iter().any(|feature| {
+                                feature == muxlane_core::protocol::features::PROJECT_ADD
+                            })
                     });
                     if !compatible {
                         this.set_state(

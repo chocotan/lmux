@@ -41,12 +41,6 @@ fn data_dir() -> PathBuf {
 }
 
 fn hostname() -> String {
-    if let Ok(name) = std::env::var("COMPUTERNAME") {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
     if let Ok(name) = std::env::var("HOSTNAME") {
         let trimmed = name.trim();
         if !trimmed.is_empty() {

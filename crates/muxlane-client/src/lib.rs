@@ -98,11 +98,6 @@ impl RequestWriter {
         .await?;
         Ok(id)
     }
-
-    pub async fn raw(&mut self, v: &impl serde::Serialize) -> Result<()> {
-        write_frame(&mut self.writer, v).await?;
-        Ok(())
-    }
 }
 
 pub struct ResponseReader {

@@ -10,7 +10,7 @@ pub mod protocol;
 
 pub use error::{Error, Result};
 
-pub use detect::{DetectionEngine, HookEvent, ScreenStatusUpdate, StatusUpdate};
+pub use detect::DetectionEngine;
 pub use model::{
     AgentId, AgentInstance, AgentStatus, AgentType, MachineId, MachineInfo, Project, ProjectId,
     Snapshot,

@@ -4,6 +4,41 @@ use muxlane_core::{PaneId, PaneNode};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+fn temporary_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state.json");
+    path.with_file_name(format!(
+        "{name}.tmp.{}",
+        muxlane_core::model::new_id("write")
+    ))
+}
+
+fn cleanup_temporary_files(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state.json");
+    let prefix = format!("{name}.tmp.");
+    let legacy = path.with_file_name(format!("{name}.tmp"));
+    let _ = std::fs::remove_file(legacy);
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|candidate| candidate.starts_with(&prefix))
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 pub const STORE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -105,24 +140,42 @@ pub struct WindowGeometry {
 }
 
 pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
-    if !path.exists() {
-        return Ok(PersistedApp::default());
+    let result = (|| {
+        if !path.exists() {
+            return Ok(PersistedApp::default());
+        }
+        let bytes = std::fs::read(path)?;
+        let mut app: PersistedApp = serde_json::from_slice(&bytes)?;
+        migrate(&mut app)?;
+        Ok(app)
+    })();
+    if result.is_err() {
+        cleanup_temporary_files(path);
     }
-    let bytes = std::fs::read(path)?;
-    let mut app: PersistedApp = serde_json::from_slice(&bytes)?;
-    migrate(&mut app)?;
-    Ok(app)
+    result
 }
 
 pub fn save(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(app)?;
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    let tmp = temporary_path(path);
+    let result = (|| {
+        let data = serde_json::to_vec_pretty(app)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)?;
+        use std::io::Write;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn migrate(app: &mut PersistedApp) -> anyhow::Result<()> {
@@ -155,6 +208,27 @@ pub fn default_path(data_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn concurrent_saves_leave_valid_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join("state.json"));
+        let app = std::sync::Arc::new(PersistedApp::default());
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let path = std::sync::Arc::clone(&path);
+                let app = std::sync::Arc::clone(&app);
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        save(&path, &app).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        load(&path).unwrap();
+    }
     #[test]
     fn roundtrip_atomic() {
         let dir = tempfile::tempdir().unwrap();
@@ -195,7 +269,10 @@ mod tests {
         save(&p, &app).unwrap();
         let back = load(&p).unwrap();
         assert_eq!(back, app);
-        assert!(!p.with_extension("json.tmp").exists());
+        assert!(std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .all(|entry| entry.file_name() != "state.json.tmp"));
     }
     #[test]
     fn legacy_remote_targets_migrate_to_remote_configs() {

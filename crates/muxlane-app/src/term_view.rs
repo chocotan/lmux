@@ -303,7 +303,22 @@ impl TermView {
             loop {
                 let first = match rx.recv().await {
                     Ok(b) => b,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let (snapshot, synced_rx) = session_for_task.subscribe();
+                        rx = synced_rx;
+                        let vterm = vterm_for_task.clone();
+                        let stop = view
+                            .update(cx, move |_view, cx| {
+                                vterm.feed(b"\x1bc");
+                                vterm.feed(&snapshot);
+                                cx.notify();
+                            })
+                            .is_err();
+                        if stop {
+                            break;
+                        }
+                        continue;
+                    }
                     Err(_) => break,
                 };
                 // 参考 muxel paint scheduler：交互 8ms / 聚焦 stream 33ms / 后台 100ms。
@@ -316,12 +331,32 @@ impl TermView {
                 };
                 cx.background_executor().timer(delay).await;
                 let mut output = first.to_vec();
+                let mut lagged = false;
                 while output.len() < 256 * 1024 {
                     match rx.try_recv() {
                         Ok(b) => output.extend_from_slice(&b),
-                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                            lagged = true;
+                            break;
+                        }
                         Err(_) => break,
                     }
+                }
+                if lagged {
+                    let (snapshot, synced_rx) = session_for_task.subscribe();
+                    rx = synced_rx;
+                    let vterm = vterm_for_task.clone();
+                    let stop = view
+                        .update(cx, move |_view, cx| {
+                            vterm.feed(b"\x1bc");
+                            vterm.feed(&snapshot);
+                            cx.notify();
+                        })
+                        .is_err();
+                    if stop {
+                        break;
+                    }
+                    continue;
                 }
                 let vterm = vterm_for_task.clone();
                 let stop = view

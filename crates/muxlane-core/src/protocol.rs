@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MAX_FRAME: usize = 1024 * 1024; // 1 MiB
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -73,6 +74,13 @@ pub mod events {
     pub const TERM_EXIT: &str = "term.exit";
 }
 
+/// 特性名常量
+pub mod features {
+    pub const PROJECT_ADD: &str = "project.add";
+    pub const AGENT_SPAWN: &str = "agent.spawn";
+    pub const TERM_INPUT: &str = "term.input";
+    pub const TERM_RESIZE: &str = "term.resize";
+}
 /// 方法名常量
 pub mod methods {
     pub const STATE_LIST: &str = "state.list";

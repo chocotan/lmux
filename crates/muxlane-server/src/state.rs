@@ -192,16 +192,6 @@ impl ServerState {
         }
     }
 
-    /// 检测引擎（屏幕采样）提交的状态更新
-    pub async fn apply_screen_update(
-        &mut self,
-        agent: &AgentId,
-        to: AgentStatus,
-        message: Option<String>,
-    ) -> Vec<EventMsg> {
-        self.apply_status(agent, to, message)
-    }
-
     /// 按键触发的 working 标记：与屏幕采样同走 DetectionEngine，
     /// 保证引擎内部状态与服务器状态一致（否则屏幕推导的 idle 候选
     /// 会因等于引擎陈旧内部状态而永不提交，状态卡死）。

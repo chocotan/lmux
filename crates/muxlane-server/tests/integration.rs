@@ -1,6 +1,8 @@
 //! 服务端集成测试：真 UnixListener + 真 PTY + 裸 TCP 客户端模拟
 use muxlane_core::model::{AgentId, AgentInstance, AgentStatus, AgentType, MachineInfo, Project};
-use muxlane_core::protocol::{methods, read_frame, write_frame, EventMsg, Request, Response};
+use muxlane_core::protocol::{
+    events, methods, read_frame, write_frame, EventMsg, Request, Response,
+};
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -223,7 +225,7 @@ async fn term_subscribe_replay_and_incremental() {
                 .await;
         match frame {
             Ok(Ok(v)) => {
-                if v["event"] == "term.data" {
+                if v["event"] == events::TERM_DATA {
                     let data = muxlane_term::b64_decode(v["params"]["data_b64"].as_str().unwrap())
                         .unwrap();
                     if data.windows(10).any(|w| w == b"second-out") {
@@ -287,7 +289,7 @@ async fn events_subscribe_receives_status_change() {
             .await
         {
             Ok(Ok(v)) => {
-                if v["event"] == "agent.status_changed" {
+                if v["event"] == events::AGENT_STATUS {
                     got = Some(v);
                     break;
                 }
