@@ -3,6 +3,7 @@ mod app;
 mod bootstrap;
 mod i18n;
 mod icons;
+mod notifications;
 mod remotes;
 mod sessions;
 mod sound;

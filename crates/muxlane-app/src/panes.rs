@@ -30,7 +30,7 @@ pub(super) struct SplitDrag {
 }
 
 impl MuxlaneApp {
-    pub(crate) fn activate_tab(&mut self, pane: &PaneId, agent: &AgentId) {
+    pub(crate) fn activate_tab(&mut self, pane: &PaneId, agent: &AgentId, cx: &mut Context<Self>) {
         self.pane_tree.open_tab(pane, agent.clone());
         // 跨 pane 的显式导航必须揭示目标 pane；同 pane 切 tab 保留 zoom。
         if self
@@ -43,10 +43,8 @@ impl MuxlaneApp {
         self.active_pane = pane.clone();
         self.active = Some(agent.clone());
         // 清理当前 agent 的 Toast 与标记通知已读
-        self.toasts.retain(|t| &t.agent != agent);
-        for n in self.notifications.iter_mut().filter(|n| &n.agent == agent) {
-            n.unread = false;
-        }
+        self.notifications
+            .update(cx, |center, cx| center.mark_agent_read(agent, cx));
         if let Some(a) = self.last_snapshot.agent_mut(agent) {
             a.seen = true;
             if a.status == muxlane_core::model::AgentStatus::Done {
@@ -74,7 +72,7 @@ impl MuxlaneApp {
         if let Some(group) = self.pane_tree.group(&self.active_pane) {
             if let Some(agent) = group.tabs.get(index).cloned() {
                 let pane = self.active_pane.clone();
-                self.activate_tab(&pane, &agent);
+                self.activate_tab(&pane, &agent, cx);
                 self.focus_agent(&agent, window, cx);
                 cx.notify();
             }
@@ -94,7 +92,7 @@ impl MuxlaneApp {
             let next = (cur + 1) % group.tabs.len();
             if let Some(agent) = group.tabs.get(next).cloned() {
                 let pane = self.active_pane.clone();
-                self.activate_tab(&pane, &agent);
+                self.activate_tab(&pane, &agent, cx);
                 self.focus_agent(&agent, window, cx);
                 cx.notify();
             }
@@ -118,7 +116,7 @@ impl MuxlaneApp {
             };
             if let Some(agent) = group.tabs.get(prev).cloned() {
                 let pane = self.active_pane.clone();
-                self.activate_tab(&pane, &agent);
+                self.activate_tab(&pane, &agent, cx);
                 self.focus_agent(&agent, window, cx);
                 cx.notify();
             }
@@ -229,17 +227,16 @@ impl MuxlaneApp {
                         }
                     } else {
                         this.pane_tree.open_tab(&pane, agent_id.clone());
-                        this.activate_tab(&pane, &agent_id);
+                        this.activate_tab(&pane, &agent_id, cx);
                     }
                     this.focus_agent(&agent_id, window, cx);
                     this.persist();
                     cx.notify();
                 }
                 Err(error) => {
-                    this.error_toast = Some((
-                        format!("创建 Shell 失败：{error}"),
-                        std::time::Instant::now(),
-                    ));
+                    this.notifications.update(cx, |center, cx| {
+                        center.show_error(format!("创建 Shell 失败：{error}"), cx)
+                    });
                     cx.notify();
                 }
             });
@@ -579,7 +576,7 @@ impl MuxlaneApp {
                             let id = tab_id.clone();
                             let pane = pane_for_tab.clone();
                             move |this, _ev, window, cx| {
-                                this.activate_tab(&pane, &id);
+                                this.activate_tab(&pane, &id, cx);
                                 this.focus_agent(&id, window, cx);
                                 cx.notify();
                             }
@@ -822,7 +819,7 @@ impl MuxlaneApp {
                                 || this.active.as_ref() != active_id.as_ref()
                             {
                                 if let Some(agent_id) = &active_id {
-                                    this.activate_tab(&pane_id, agent_id);
+                                    this.activate_tab(&pane_id, agent_id, cx);
                                     this.focus_agent(agent_id, window, cx);
                                 } else {
                                     this.active_pane = pane_id.clone();
@@ -838,7 +835,7 @@ impl MuxlaneApp {
                             let active_id = pane_click_active.clone();
                             move |this, _ev: &gpui::MouseDownEvent, window, cx| {
                                 if let Some(agent_id) = &active_id {
-                                    this.activate_tab(&pane_id, agent_id);
+                                    this.activate_tab(&pane_id, agent_id, cx);
                                     this.focus_agent(agent_id, window, cx);
                                 } else {
                                     this.active_pane = pane_id.clone();

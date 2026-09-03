@@ -136,7 +136,7 @@ impl MuxlaneApp {
                         this.last_snapshot = snapshot;
                         match result {
                             Ok(result) => {
-                                this.cleanup_removed_agents(&result.destroyed_agents);
+                                this.cleanup_removed_agents(&result.destroyed_agents, cx);
                                 if result.failed_agents.is_empty() {
                                     this.delete_confirm = None;
                                 } else {
@@ -152,7 +152,7 @@ impl MuxlaneApp {
                                     .filter(|agent| this.last_snapshot.agent(agent).is_none())
                                     .cloned()
                                     .collect();
-                                this.cleanup_removed_agents(&removed);
+                                this.cleanup_removed_agents(&removed, cx);
                                 this.delete_error = Some(error.to_string());
                             }
                         }
@@ -192,7 +192,7 @@ impl MuxlaneApp {
                                     .agents
                                     .retain(|agent| !result.destroyed_agents.contains(&agent.id));
                             }
-                            this.cleanup_removed_agents(&result.destroyed_agents);
+                            this.cleanup_removed_agents(&result.destroyed_agents, cx);
                             if result.failed_agents.is_empty() {
                                 this.delete_confirm = None;
                             } else {
@@ -241,7 +241,7 @@ impl MuxlaneApp {
                 self.remotes.retain(|remote| remote.cfg.name != host);
                 self.remote_snaps.remove(&host);
                 self.remote_states.remove(&host);
-                self.cleanup_removed_agents(&removed_agents);
+                self.cleanup_removed_agents(&removed_agents, cx);
                 self.delete_confirm = None;
                 self.delete_busy = false;
                 self.persist();
@@ -362,10 +362,9 @@ impl MuxlaneApp {
                 }
                 Err(error) => {
                     let text = error.to_string();
-                    this.error_toast = Some((
-                        format!("远程创建会话失败：{text}"),
-                        std::time::Instant::now(),
-                    ));
+                    this.notifications.update(cx, |center, cx| {
+                        center.show_error(format!("远程创建会话失败：{text}"), cx)
+                    });
                     // 类型不匹配通常意味着远端仍在运行旧版 Muxlane，
                     // 直接切换到已有的更新引导状态。
                     if text.contains("远端 Muxlane 版本过旧") {

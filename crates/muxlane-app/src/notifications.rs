@@ -1,0 +1,697 @@
+//! Notification center state, policy, rendering, and toast lifecycle.
+
+use crate::i18n::{self, Language};
+use crate::icons::{panel_icon, NOTIFICATION_ICON};
+use crate::sound::{self, SoundKind};
+use crate::theme::{Theme, ThemeMode};
+use crate::widgets::{format_relative_time, truncate};
+use gpui::{
+    div, prelude::*, px, rgba, Context, EventEmitter, MouseButton, ParentElement, Render, Styled,
+    Task, Window,
+};
+use muxlane_core::model::{AgentId, AgentStatus, AgentType};
+use std::collections::HashSet;
+use std::time::Instant;
+
+pub(crate) struct NotificationDraft {
+    pub(crate) agent: AgentId,
+    pub(crate) machine_name: String,
+    pub(crate) project_name: String,
+    pub(crate) agent_type: AgentType,
+    pub(crate) focused: bool,
+    pub(crate) from: AgentStatus,
+    pub(crate) to: AgentStatus,
+    pub(crate) message: Option<String>,
+    pub(crate) sound_enabled: bool,
+}
+
+pub(crate) enum NotificationCenterEvent {
+    JumpToAgent(AgentId),
+}
+
+#[derive(Clone)]
+pub struct Notification {
+    pub agent: AgentId,
+    pub machine_name: String,
+    pub project_name: String,
+    pub _agent_type: AgentType,
+    pub to: AgentStatus,
+    pub message: Option<String>,
+    pub unread: bool,
+    pub time_secs: u64,
+}
+
+#[derive(Clone)]
+pub struct ToastNotification {
+    pub id: u64,
+    pub agent: AgentId,
+    pub title: String,
+    pub message: String,
+    pub status: AgentStatus,
+    pub created_at: Instant,
+}
+
+pub(crate) struct NotificationCenter {
+    notifications: Vec<Notification>,
+    toasts: Vec<ToastNotification>,
+    toast_seq: u64,
+    error_toast: Option<(String, Instant)>,
+    open: bool,
+    theme_mode: ThemeMode,
+    language: Language,
+    _animation_task: Task<()>,
+}
+
+impl EventEmitter<NotificationCenterEvent> for NotificationCenter {}
+
+impl NotificationCenter {
+    pub(crate) fn new(theme_mode: ThemeMode, language: Language, cx: &mut Context<Self>) -> Self {
+        let animation_task = cx.spawn(async move |this, cx| loop {
+            let has_activity = match this.update(cx, |this, _| this.has_activity()) {
+                Ok(has_activity) => has_activity,
+                Err(_) => break,
+            };
+            cx.background_executor()
+                .timer(if has_activity {
+                    std::time::Duration::from_millis(100)
+                } else {
+                    std::time::Duration::from_millis(250)
+                })
+                .await;
+            if !has_activity {
+                continue;
+            }
+            if this
+                .update(cx, |this, cx| {
+                    this.toasts
+                        .retain(|toast| toast.created_at.elapsed().as_secs() < 6);
+                    if this
+                        .error_toast
+                        .as_ref()
+                        .is_some_and(|(_, created)| created.elapsed().as_secs() >= 8)
+                    {
+                        this.error_toast = None;
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
+            }
+        });
+
+        Self {
+            notifications: Vec::new(),
+            toasts: Vec::new(),
+            toast_seq: 0,
+            error_toast: None,
+            open: false,
+            theme_mode,
+            language,
+            _animation_task: animation_task,
+        }
+    }
+
+    pub(crate) fn push_notification(&mut self, draft: NotificationDraft, cx: &mut Context<Self>) {
+        let body = effective_notification_body(draft.to, draft.message);
+        let now_secs = muxlane_core::model::now_secs();
+
+        if draft.from == draft.to {
+            if let Some(existing) = self
+                .notifications
+                .iter_mut()
+                .find(|item| item.agent == draft.agent && item.to == draft.to)
+            {
+                existing.message = Some(body);
+                existing.unread = !draft.focused;
+                existing.time_secs = now_secs;
+                cx.notify();
+            }
+            return;
+        }
+        if !matches!(draft.to, AgentStatus::Blocked | AgentStatus::Done) {
+            return;
+        }
+
+        self.toast_seq += 1;
+        self.notifications.insert(
+            0,
+            Notification {
+                agent: draft.agent.clone(),
+                machine_name: draft.machine_name.clone(),
+                project_name: draft.project_name.clone(),
+                _agent_type: draft.agent_type,
+                to: draft.to,
+                message: Some(body.clone()),
+                unread: !draft.focused,
+                time_secs: now_secs,
+            },
+        );
+        if self.notifications.len() > 50 {
+            self.notifications.truncate(50);
+        }
+
+        let toast_title = match draft.to {
+            AgentStatus::Blocked => {
+                format!("{} · {} 等待输入", draft.machine_name, draft.project_name)
+            }
+            AgentStatus::Done => {
+                format!("{} · {} 任务完成", draft.machine_name, draft.project_name)
+            }
+            _ => format!("{} · {}", draft.machine_name, draft.project_name),
+        };
+
+        if draft.focused {
+            sound::send_desktop_notification(&toast_title, &body);
+            cx.notify();
+            return;
+        }
+
+        self.toasts.insert(
+            0,
+            ToastNotification {
+                id: self.toast_seq,
+                agent: draft.agent,
+                title: toast_title.clone(),
+                message: body.clone(),
+                status: draft.to,
+                created_at: Instant::now(),
+            },
+        );
+        if self.toasts.len() > 3 {
+            self.toasts.truncate(3);
+        }
+
+        if draft.sound_enabled {
+            match draft.to {
+                AgentStatus::Blocked => sound::play_sound(SoundKind::Request),
+                AgentStatus::Done => sound::play_sound(SoundKind::Done),
+                _ => {}
+            }
+        }
+        sound::send_desktop_notification(&toast_title, &body);
+        cx.notify();
+    }
+
+    pub(crate) fn set_appearance(
+        &mut self,
+        theme_mode: ThemeMode,
+        language: Language,
+        cx: &mut Context<Self>,
+    ) {
+        self.theme_mode = theme_mode;
+        self.language = language;
+        cx.notify();
+    }
+
+    pub(crate) fn summary(&self) -> (usize, bool, bool) {
+        let unread = self.notifications.iter().filter(|item| item.unread).count();
+        let blocked = self
+            .notifications
+            .iter()
+            .any(|item| item.unread && item.to == AgentStatus::Blocked);
+        (unread, blocked, self.open)
+    }
+
+    pub(crate) fn has_activity(&self) -> bool {
+        !self.toasts.is_empty() || self.error_toast.is_some()
+    }
+
+    pub(crate) fn toggle_open(&mut self, cx: &mut Context<Self>) {
+        self.open = !self.open;
+        cx.notify();
+    }
+
+    pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
+        if self.open {
+            self.open = false;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn mark_agent_read(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+        self.toasts.retain(|toast| &toast.agent != agent);
+        for notification in self
+            .notifications
+            .iter_mut()
+            .filter(|notification| &notification.agent == agent)
+        {
+            notification.unread = false;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn remove_agent(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+        self.toasts.retain(|toast| &toast.agent != agent);
+        self.notifications
+            .retain(|notification| &notification.agent != agent);
+        cx.notify();
+    }
+
+    pub(crate) fn remove_agents(&mut self, agents: &HashSet<AgentId>, cx: &mut Context<Self>) {
+        self.toasts.retain(|toast| !agents.contains(&toast.agent));
+        self.notifications
+            .retain(|notification| !agents.contains(&notification.agent));
+        cx.notify();
+    }
+
+    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
+        self.notifications.clear();
+        cx.notify();
+    }
+
+    pub(crate) fn show_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.error_toast = Some((message, Instant::now()));
+        cx.notify();
+    }
+
+    fn render_notifications_popover(
+        &mut self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let unread_count = self.notifications.iter().filter(|n| n.unread).count();
+
+        div()
+            .id("notifications-backdrop")
+            .absolute()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.close(cx)),
+            )
+            .child(
+                div()
+                    .id("notifications-popover")
+                    .occlude()
+                    .absolute()
+                    .bottom(px(40.))
+                    .left(px(8.))
+                    .w(px(320.))
+                    .max_h(px(420.))
+                    .flex()
+                    .flex_col()
+                    .bg(rgba(theme.bg1))
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .rounded_md()
+                    .shadow_xl()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _event, _window, cx| cx.stop_propagation()),
+                    )
+                    .child(
+                        div()
+                            .h(px(34.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(rgba(theme.line))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(panel_icon(NOTIFICATION_ICON, theme.fg1))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgba(theme.fg0))
+                                            .child(i18n::text(
+                                                self.language,
+                                                "通知中心",
+                                                "Notifications",
+                                            )),
+                                    )
+                                    .when(unread_count > 0, |header| {
+                                        header.child(
+                                            div()
+                                                .px_1p5()
+                                                .py(px(1.))
+                                                .rounded_full()
+                                                .bg(rgba(theme.accent))
+                                                .text_color(rgba(theme.on_accent))
+                                                .text_size(px(9.))
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .child(format!("{unread_count}")),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when(!self.notifications.is_empty(), |el| {
+                                        el.child(
+                                            div()
+                                                .id("clear-notifications")
+                                                .cursor_pointer()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_xs()
+                                                .text_size(px(10.))
+                                                .text_color(rgba(theme.fg2))
+                                                .hover(|s| {
+                                                    s.bg(rgba(theme.bg2))
+                                                        .text_color(rgba(theme.fg0))
+                                                })
+                                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                                    this.clear(cx)
+                                                }))
+                                                .child(i18n::text(self.language, "清空", "Clear")),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .id("close-notifications")
+                                            .cursor_pointer()
+                                            .px_1()
+                                            .text_size(px(14.))
+                                            .text_color(rgba(theme.fg2))
+                                            .hover(|s| s.text_color(rgba(theme.fg0)))
+                                            .on_click(
+                                                cx.listener(|this, _ev, _window, cx| {
+                                                    this.close(cx)
+                                                }),
+                                            )
+                                            .child("×"),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("notifications-scroll")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .when(self.notifications.is_empty(), |list| {
+                                list.child(
+                                    div()
+                                        .py_8()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgba(theme.fg2))
+                                                .child(i18n::text(
+                                                    self.language,
+                                                    "暂无通知",
+                                                    "No notifications",
+                                                )),
+                                        ),
+                                )
+                            })
+                            .children(self.notifications.iter().enumerate().map(|(idx, n)| {
+                                let dot_color = match n.to {
+                                    AgentStatus::Blocked => theme.yellow,
+                                    AgentStatus::Done => theme.green,
+                                    AgentStatus::Working => theme.accent,
+                                    _ => theme.fg2,
+                                };
+                                let status_text = match n.to {
+                                    AgentStatus::Blocked => {
+                                        i18n::text(self.language, "等待输入", "Input required")
+                                    }
+                                    AgentStatus::Done => {
+                                        i18n::text(self.language, "任务完成", "Task completed")
+                                    }
+                                    AgentStatus::Working => {
+                                        i18n::text(self.language, "执行中", "Working")
+                                    }
+                                    _ => i18n::text(self.language, "空闲", "Idle"),
+                                };
+                                let agent_id = n.agent.clone();
+                                let is_unread = n.unread;
+                                let time_str = format_relative_time(n.time_secs, self.language);
+
+                                div()
+                                    .id(gpui::ElementId::Name(
+                                        format!("notif-popover-item-{idx}").into(),
+                                    ))
+                                    .relative()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .px_3()
+                                    .py_2()
+                                    .border_b_1()
+                                    .border_color(rgba(theme.line))
+                                    .when(is_unread, |el| {
+                                        el.bg(rgba(Theme::with_alpha(theme.accent, 0x0f)))
+                                    })
+                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        this.open = false;
+                                        cx.emit(NotificationCenterEvent::JumpToAgent(
+                                            agent_id.clone(),
+                                        ));
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(
+                                                        div()
+                                                            .w(px(6.))
+                                                            .h(px(6.))
+                                                            .rounded_full()
+                                                            .bg(rgba(dot_color)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.))
+                                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                            .text_color(rgba(theme.fg0))
+                                                            .child(format!(
+                                                                "{} · {}",
+                                                                n.machine_name, n.project_name
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(10.))
+                                                            .text_color(rgba(dot_color))
+                                                            .child(status_text),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgba(theme.fg2))
+                                                    .child(time_str),
+                                            ),
+                                    )
+                                    .when_some(n.message.clone(), |row, msg| {
+                                        row.child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgba(if is_unread {
+                                                    theme.fg0
+                                                } else {
+                                                    theme.fg1
+                                                }))
+                                                .child(truncate(&msg, 90)),
+                                        )
+                                    })
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for NotificationCenter {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::for_mode(self.theme_mode);
+        let mut root = div();
+
+        if !self.toasts.is_empty() {
+            root = root.child(
+                div()
+                    .id("toast-overlay")
+                    .absolute()
+                    .bottom(px(16.))
+                    .right(px(16.))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w(px(320.))
+                    .children(self.toasts.iter().map(|toast| {
+                        let dot_color = match toast.status {
+                            AgentStatus::Blocked => theme.yellow,
+                            AgentStatus::Done => theme.green,
+                            AgentStatus::Working => theme.accent,
+                            AgentStatus::Idle | AgentStatus::Unknown => theme.fg2,
+                        };
+                        let agent_id = toast.agent.clone();
+                        let toast_id = toast.id;
+                        div()
+                            .id(gpui::ElementId::Name(format!("toast-{toast_id}").into()))
+                            .relative()
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .p_3()
+                            .pl_4()
+                            .bg(rgba(theme.bg2))
+                            .border_1()
+                            .border_color(rgba(theme.line))
+                            .rounded_md()
+                            .shadow_lg()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(4.))
+                                    .bg(rgba(dot_color)),
+                            )
+                            .on_click(cx.listener(move |_this, _ev, _window, cx| {
+                                cx.emit(NotificationCenterEvent::JumpToAgent(agent_id.clone()));
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(
+                                                div()
+                                                    .w(px(7.))
+                                                    .h(px(7.))
+                                                    .rounded_full()
+                                                    .bg(rgba(dot_color)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(rgba(theme.fg0))
+                                                    .child(toast.title.clone()),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(gpui::ElementId::Name(
+                                                format!("toast-close-{toast_id}").into(),
+                                            ))
+                                            .text_size(px(11.))
+                                            .text_color(rgba(theme.fg2))
+                                            .hover(|s| s.text_color(rgba(theme.fg0)))
+                                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                                cx.stop_propagation();
+                                                this.toasts.retain(|item| item.id != toast_id);
+                                                cx.notify();
+                                            }))
+                                            .child("×"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_size(px(11.5))
+                                    .text_color(rgba(theme.fg1))
+                                    .child(truncate(&toast.message, 120)),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_size(px(9.5))
+                                    .text_color(rgba(theme.fg2))
+                                    .child("点击直达终端"),
+                            )
+                    })),
+            );
+        }
+
+        if let Some((message, _)) = self.error_toast.clone() {
+            root = root.child(
+                div()
+                    .id("error-toast")
+                    .absolute()
+                    .top(px(16.))
+                    .right(px(16.))
+                    .w(px(420.))
+                    .p_3()
+                    .bg(rgba(theme.bg1))
+                    .border_1()
+                    .border_color(rgba(theme.red))
+                    .text_size(px(11.5))
+                    .text_color(rgba(theme.red))
+                    .child(message),
+            );
+        }
+
+        if self.open {
+            root = root.child(self.render_notifications_popover(theme, cx));
+        }
+        root
+    }
+}
+
+fn effective_notification_body(status: AgentStatus, message: Option<String>) -> String {
+    let normalized = message
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.is_empty() {
+        return match status {
+            AgentStatus::Blocked => "等待输入".into(),
+            AgentStatus::Done => "任务已完成".into(),
+            _ => status.as_str().into(),
+        };
+    }
+    let mut chars = normalized.chars();
+    let body: String = chars.by_ref().take(180).collect();
+    if chars.next().is_some() {
+        format!("{body}…")
+    } else {
+        body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_body_preserves_content_and_has_status_fallbacks() {
+        assert_eq!(
+            effective_notification_body(
+                AgentStatus::Done,
+                Some("  完成了修复\n并通过测试  ".into()),
+            ),
+            "完成了修复 并通过测试"
+        );
+        assert_eq!(
+            effective_notification_body(AgentStatus::Done, Some("  ".into())),
+            "任务已完成"
+        );
+        assert_eq!(
+            effective_notification_body(AgentStatus::Blocked, None),
+            "等待输入"
+        );
+    }
+}

@@ -3,7 +3,7 @@
 mod panes;
 use crate::i18n::{self, Language};
 use crate::icons::*;
-use crate::sound::{self, SoundKind};
+use crate::notifications::{NotificationCenter, NotificationCenterEvent, NotificationDraft};
 use crate::term_view::TermView;
 use crate::text_field::TextField;
 use crate::theme::{Theme, ThemeMode};
@@ -100,6 +100,7 @@ pub fn launch(
                     window.set_window_title("Muxlane");
                     cx.new(|cx| {
                         MuxlaneApp::new(
+                            window,
                             cx,
                             Arc::clone(&server),
                             initial_snapshot.clone(),
@@ -156,31 +157,6 @@ fn resolve_local_project_path(raw_path: &str) -> Option<std::path::PathBuf> {
     expanded.canonicalize().ok().filter(|path| path.is_dir())
 }
 
-fn effective_notification_body(
-    status: muxlane_core::model::AgentStatus,
-    message: Option<String>,
-) -> String {
-    let normalized = message
-        .unwrap_or_default()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if normalized.is_empty() {
-        return match status {
-            muxlane_core::model::AgentStatus::Blocked => "等待输入".into(),
-            muxlane_core::model::AgentStatus::Done => "任务已完成".into(),
-            _ => status.as_str().into(),
-        };
-    }
-    let mut chars = normalized.chars();
-    let body: String = chars.by_ref().take(180).collect();
-    if chars.next().is_some() {
-        format!("{body}…")
-    } else {
-        body
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectAuthMode {
     SshConfig,
@@ -212,13 +188,10 @@ pub struct MuxlaneApp {
     pub(crate) remotes: Vec<Arc<muxlane_client::RemoteHost>>,
     pub(crate) remote_snaps: HashMap<String, Snapshot>,
     pub(crate) remote_states: HashMap<String, muxlane_client::RemoteState>,
-    /// 通知中心（新事件 unshift，上限 50）
-    pub(crate) notifications: Vec<Notification>,
-    pub(crate) toasts: Vec<ToastNotification>,
-    toast_seq: u64,
+    /// 通知中心与浮层动画。
+    pub(crate) notifications: Entity<NotificationCenter>,
     pub(crate) theme_mode: ThemeMode,
     pub(crate) font_family: String,
-    notifications_open: bool,
     settings_open: bool,
     settings_theme_menu: bool,
     settings_font_menu: bool,
@@ -261,8 +234,6 @@ pub struct MuxlaneApp {
     pub(crate) collapsed_projects: std::collections::HashSet<String>,
     /// 远端安装/升级进度（host → 进度）
     pub(crate) bootstrap_progress: HashMap<String, muxlane_client::BootstrapProgress>,
-    /// 远程操作失败的短暂提示
-    pub(crate) error_toast: Option<(String, std::time::Instant)>,
 }
 
 #[derive(Clone)]
@@ -319,27 +290,6 @@ pub(crate) struct BootstrapConfirm {
 }
 
 #[derive(Clone)]
-pub struct Notification {
-    pub agent: AgentId,
-    pub machine_name: String,
-    pub project_name: String,
-    pub to: muxlane_core::model::AgentStatus,
-    pub message: Option<String>,
-    pub unread: bool,
-    pub time_secs: u64,
-}
-
-#[derive(Clone)]
-pub struct ToastNotification {
-    pub id: u64,
-    pub agent: AgentId,
-    pub title: String,
-    pub message: String,
-    pub status: muxlane_core::model::AgentStatus,
-    pub created_at: std::time::Instant,
-}
-
-#[derive(Clone)]
 enum PaletteItem {
     Preset {
         preset: muxlane_core::AgentPreset,
@@ -360,6 +310,7 @@ impl Focusable for MuxlaneApp {
 
 impl MuxlaneApp {
     pub fn new(
+        window: &Window,
         cx: &mut Context<Self>,
         server: Arc<MuxlaneServer>,
         initial_snapshot: Snapshot,
@@ -378,7 +329,10 @@ impl MuxlaneApp {
                         >(ev.params)
                         {
                             this.update(cx, |this, cx| {
-                                this.push_notification(p.agent, p.from, p.to, p.message);
+                                let draft =
+                                    this.notification_draft(p.agent, p.from, p.to, p.message);
+                                this.notifications
+                                    .update(cx, |center, cx| center.push_notification(draft, cx));
                                 cx.notify();
                             })
                             .ok();
@@ -409,11 +363,11 @@ impl MuxlaneApp {
         })
         .detach();
 
-        // working spinner / attention pulse / toast 超时只在确实需要动画时运行。
+        // working spinner / attention pulse；通知浮层动画由 NotificationCenter 独立驱动。
         cx.spawn(async move |this, cx| {
             let mut anim_tick: usize = 0;
             loop {
-                let should_animate = match this.update(cx, |this, _cx| this.should_animate()) {
+                let should_animate = match this.update(cx, |this, _cx| this.has_attention()) {
                     Ok(should_animate) => should_animate,
                     Err(_) => break,
                 };
@@ -431,16 +385,6 @@ impl MuxlaneApp {
                         anim_tick = anim_tick.wrapping_add(1);
                         this.spinner_frame = anim_tick % 8; // 100ms 每帧旋转
                         this.pulse_phase = anim_tick % 36; // 3.6s 完整平滑呼吸周期
-                        if anim_tick.is_multiple_of(10) {
-                            this.toasts.retain(|t| t.created_at.elapsed().as_secs() < 6);
-                            if this
-                                .error_toast
-                                .as_ref()
-                                .is_some_and(|(_, created)| created.elapsed().as_secs() >= 8)
-                            {
-                                this.error_toast = None;
-                            }
-                        }
                         cx.notify();
                     })
                     .is_err()
@@ -558,7 +502,9 @@ impl MuxlaneApp {
                                         }
                                     }
                                 }
-                                this.push_notification(agent, from, to, message);
+                                let draft = this.notification_draft(agent, from, to, message);
+                                this.notifications
+                                    .update(cx, |center, cx| center.push_notification(draft, cx));
                             }
                             _ => {}
                         }
@@ -604,6 +550,17 @@ impl MuxlaneApp {
             .as_deref()
             .and_then(Language::from_id)
             .unwrap_or_else(Language::detect);
+        let notifications = cx.new(|cx| NotificationCenter::new(theme_mode, language, cx));
+        cx.subscribe_in(
+            &notifications,
+            window,
+            |this, _center, event: &NotificationCenterEvent, window, cx| match event {
+                NotificationCenterEvent::JumpToAgent(agent) => {
+                    this.jump_to_agent(agent, window, cx)
+                }
+            },
+        )
+        .detach();
         let palette_input = cx.new(|cx| {
             let mut field = TextField::new("输入命令、项目名或 Agent 名…", cx);
             field.set_theme_mode(theme_mode, cx);
@@ -660,12 +617,9 @@ impl MuxlaneApp {
             remotes,
             remote_snaps: HashMap::new(),
             remote_states: HashMap::new(),
-            notifications: Vec::new(),
-            toasts: Vec::new(),
-            toast_seq: 0,
+            notifications,
             theme_mode,
             font_family,
-            notifications_open: false,
             settings_open: false,
             settings_theme_menu: false,
             settings_font_menu: false,
@@ -707,7 +661,6 @@ impl MuxlaneApp {
             collapsed_machines: std::collections::HashSet::new(),
             collapsed_projects: std::collections::HashSet::new(),
             bootstrap_progress: HashMap::new(),
-            error_toast: None,
         };
         app.active = app
             .pane_tree
@@ -821,7 +774,7 @@ impl MuxlaneApp {
         None
     }
 
-    fn should_animate(&self) -> bool {
+    fn has_attention(&self) -> bool {
         let attention = |snapshot: &Snapshot| {
             snapshot.agents.iter().any(|agent| {
                 matches!(
@@ -832,132 +785,56 @@ impl MuxlaneApp {
             })
         };
 
-        !self.toasts.is_empty()
-            || self.error_toast.is_some()
-            || attention(&self.last_snapshot)
-            || self.remote_snaps.values().any(attention)
+        attention(&self.last_snapshot) || self.remote_snaps.values().any(attention)
     }
 
-    fn push_notification(
-        &mut self,
+    fn notification_draft(
+        &self,
         agent: AgentId,
         from: muxlane_core::model::AgentStatus,
         to: muxlane_core::model::AgentStatus,
         message: Option<String>,
-    ) {
-        let body = effective_notification_body(to, message);
-        let focused = self.active.as_ref() == Some(&agent);
-        let now_secs = muxlane_core::model::now_secs();
-
-        let (machine_name, project_name) = {
-            if let Some(a) = self.last_snapshot.agent(&agent) {
-                let proj = self
+    ) -> NotificationDraft {
+        let details = self
+            .last_snapshot
+            .agent(&agent)
+            .map(|instance| {
+                let project_name = self
                     .last_snapshot
-                    .projects
-                    .iter()
-                    .find(|p| p.id == a.project)
-                    .map(|p| p.name.clone())
+                    .project(&instance.project)
+                    .map(|project| project.name.clone())
                     .unwrap_or_else(|| "project".into());
-                ("local".to_string(), proj)
-            } else {
-                let mut found = None;
-                for (host, snap) in &self.remote_snaps {
-                    if let Some(a) = snap.agent(&agent) {
-                        let proj = snap
-                            .projects
-                            .iter()
-                            .find(|p| p.id == a.project)
-                            .map(|p| p.name.clone())
-                            .unwrap_or_else(|| "project".into());
-                        found = Some((host.clone(), proj));
-                        break;
-                    }
-                }
-                found.unwrap_or_else(|| ("remote".into(), "project".into()))
-            }
-        };
+                ("local".to_string(), project_name, instance.agent_type)
+            })
+            .or_else(|| {
+                self.remote_snaps.iter().find_map(|(host, snapshot)| {
+                    let instance = snapshot.agent(&agent)?;
+                    let project_name = snapshot
+                        .project(&instance.project)
+                        .map(|project| project.name.clone())
+                        .unwrap_or_else(|| "project".into());
+                    Some((host.clone(), project_name, instance.agent_type))
+                })
+            })
+            .unwrap_or_else(|| {
+                (
+                    "remote".into(),
+                    "project".into(),
+                    muxlane_core::model::AgentType::Unknown,
+                )
+            });
 
-        if from == to {
-            if let Some(existing) = self
-                .notifications
-                .iter_mut()
-                .find(|item| item.agent == agent && item.to == to)
-            {
-                existing.message = Some(body.clone());
-                existing.unread = !focused;
-                existing.time_secs = now_secs;
-            }
-            return;
-        }
-        // blocked / done 才进通知中心（working/idle 刷屏没意义）
-        if !matches!(
+        NotificationDraft {
+            focused: self.active.as_ref() == Some(&agent),
+            agent,
+            machine_name: details.0,
+            project_name: details.1,
+            agent_type: details.2,
+            from,
             to,
-            muxlane_core::model::AgentStatus::Blocked | muxlane_core::model::AgentStatus::Done
-        ) {
-            return;
+            message,
+            sound_enabled: self.sound_enabled,
         }
-        self.toast_seq += 1;
-        self.notifications.insert(
-            0,
-            Notification {
-                agent: agent.clone(),
-                machine_name: machine_name.clone(),
-                project_name: project_name.clone(),
-                to,
-                message: Some(body.clone()),
-                unread: !focused,
-                time_secs: now_secs,
-            },
-        );
-        if self.notifications.len() > 50 {
-            self.notifications.truncate(50);
-        }
-
-        let toast_title = match to {
-            muxlane_core::model::AgentStatus::Blocked => {
-                format!("{machine_name} · {project_name} 等待输入")
-            }
-            muxlane_core::model::AgentStatus::Done => {
-                format!("{machine_name} · {project_name} 任务完成")
-            }
-            _ => format!("{machine_name} · {project_name}"),
-        };
-
-        if focused {
-            // 当前终端已在看：保留通知记录，但不弹 Toast、不播放声音。
-            sound::send_desktop_notification(&toast_title, &body);
-            return;
-        }
-
-        self.toasts.insert(
-            0,
-            ToastNotification {
-                id: self.toast_seq,
-                agent,
-                title: toast_title.clone(),
-                message: body.clone(),
-                status: to,
-                created_at: std::time::Instant::now(),
-            },
-        );
-        if self.toasts.len() > 3 {
-            self.toasts.truncate(3);
-        }
-
-        if self.sound_enabled {
-            match to {
-                muxlane_core::model::AgentStatus::Blocked => {
-                    sound::play_sound(SoundKind::Request);
-                }
-                muxlane_core::model::AgentStatus::Done => {
-                    sound::play_sound(SoundKind::Done);
-                }
-                _ => {}
-            }
-        }
-
-        // 系统桌面通知
-        sound::send_desktop_notification(&toast_title, &body);
     }
 
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
@@ -973,6 +850,9 @@ impl MuxlaneApp {
 
     fn apply_theme_to_inputs(&mut self, cx: &mut Context<Self>) {
         let mode = self.theme_mode;
+        self.notifications.update(cx, |center, cx| {
+            center.set_appearance(mode, self.language, cx)
+        });
         self.palette_input
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.connect_input
@@ -1063,7 +943,7 @@ impl MuxlaneApp {
                     this.collapsed_projects.remove(&project_key);
                     this.terms.insert(agent_id.clone(), term);
                     this.pane_tree.open_tab(&pane, agent_id.clone());
-                    this.activate_tab(&pane, &agent_id);
+                    this.activate_tab(&pane, &agent_id, cx);
                     this.focus_agent(&agent_id, window, cx);
                     this.palette_open = false;
                     this.new_session_target = None;
@@ -1071,8 +951,9 @@ impl MuxlaneApp {
                     cx.notify();
                 }
                 Err(error) => {
-                    this.error_toast =
-                        Some((format!("创建会话失败：{error}"), std::time::Instant::now()));
+                    this.notifications.update(cx, |center, cx| {
+                        center.show_error(format!("创建会话失败：{error}"), cx)
+                    });
                     cx.notify();
                 }
             });
@@ -1718,6 +1599,9 @@ impl MuxlaneApp {
 
     fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
         self.language = language;
+        self.notifications.update(cx, |center, cx| {
+            center.set_appearance(self.theme_mode, language, cx)
+        });
         self.dismiss_settings_menus();
         self.persist();
         cx.notify();
@@ -1734,259 +1618,6 @@ impl MuxlaneApp {
         cx.notify();
     }
 
-    fn render_notifications_popover(
-        &mut self,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let unread_count = self.notifications.iter().filter(|n| n.unread).count();
-
-        div()
-            .id("notifications-backdrop")
-            .absolute()
-            .size_full()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    this.notifications_open = false;
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .id("notifications-popover")
-                    .occlude()
-                    .absolute()
-                    .bottom(px(40.))
-                    .left(px(8.))
-                    .w(px(320.))
-                    .max_h(px(420.))
-                    .flex()
-                    .flex_col()
-                    .bg(rgba(theme.bg1))
-                    .border_1()
-                    .border_color(rgba(theme.line))
-                    .rounded_md()
-                    .shadow_xl()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_this, _event, _window, cx| {
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(
-                        div()
-                            .h(px(34.))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(rgba(theme.line))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .child(panel_icon(NOTIFICATION_ICON, theme.fg1))
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(rgba(theme.fg0))
-                                            .child(i18n::text(
-                                                self.language,
-                                                "通知中心",
-                                                "Notifications",
-                                            )),
-                                    )
-                                    .when(unread_count > 0, |header| {
-                                        header.child(
-                                            div()
-                                                .px_1p5()
-                                                .py(px(1.))
-                                                .rounded_full()
-                                                .bg(rgba(theme.accent))
-                                                .text_color(rgba(theme.on_accent))
-                                                .text_size(px(9.))
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .child(format!("{unread_count}")),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .when(!self.notifications.is_empty(), |el| {
-                                        el.child(
-                                            div()
-                                                .id("clear-notifications")
-                                                .cursor_pointer()
-                                                .px_1p5()
-                                                .py_0p5()
-                                                .rounded_xs()
-                                                .text_size(px(10.))
-                                                .text_color(rgba(theme.fg2))
-                                                .hover(|s| {
-                                                    s.bg(rgba(theme.bg2))
-                                                        .text_color(rgba(theme.fg0))
-                                                })
-                                                .on_click(cx.listener(|this, _ev, _window, cx| {
-                                                    this.notifications.clear();
-                                                    cx.notify();
-                                                }))
-                                                .child(i18n::text(self.language, "清空", "Clear")),
-                                        )
-                                    })
-                                    .child(
-                                        div()
-                                            .id("close-notifications")
-                                            .cursor_pointer()
-                                            .px_1()
-                                            .text_size(px(14.))
-                                            .text_color(rgba(theme.fg2))
-                                            .hover(|s| s.text_color(rgba(theme.fg0)))
-                                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                                this.notifications_open = false;
-                                                cx.notify();
-                                            }))
-                                            .child("×"),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("notifications-scroll")
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .when(self.notifications.is_empty(), |list| {
-                                list.child(
-                                    div()
-                                        .py_8()
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(rgba(theme.fg2))
-                                                .child(i18n::text(
-                                                    self.language,
-                                                    "暂无通知",
-                                                    "No notifications",
-                                                )),
-                                        ),
-                                )
-                            })
-                            .children(self.notifications.iter().enumerate().map(|(idx, n)| {
-                                let dot_color = match n.to {
-                                    muxlane_core::model::AgentStatus::Blocked => theme.yellow,
-                                    muxlane_core::model::AgentStatus::Done => theme.green,
-                                    muxlane_core::model::AgentStatus::Working => theme.accent,
-                                    _ => theme.fg2,
-                                };
-                                let status_text = match n.to {
-                                    muxlane_core::model::AgentStatus::Blocked => {
-                                        i18n::text(self.language, "等待输入", "Input required")
-                                    }
-                                    muxlane_core::model::AgentStatus::Done => {
-                                        i18n::text(self.language, "任务完成", "Task completed")
-                                    }
-                                    muxlane_core::model::AgentStatus::Working => {
-                                        i18n::text(self.language, "执行中", "Working")
-                                    }
-                                    _ => i18n::text(self.language, "空闲", "Idle"),
-                                };
-                                let agent_id = n.agent.clone();
-                                let is_unread = n.unread;
-                                let time_str = format_relative_time(n.time_secs, self.language);
-
-                                div()
-                                    .id(gpui::ElementId::Name(
-                                        format!("notif-popover-item-{idx}").into(),
-                                    ))
-                                    .relative()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .px_3()
-                                    .py_2()
-                                    .border_b_1()
-                                    .border_color(rgba(theme.line))
-                                    .when(is_unread, |el| {
-                                        el.bg(rgba(Theme::with_alpha(theme.accent, 0x0f)))
-                                    })
-                                    .hover(|s| s.bg(rgba(theme.bg2)))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener({
-                                        let agent_id = agent_id.clone();
-                                        move |this, _ev, window, cx| {
-                                            this.notifications_open = false;
-                                            this.jump_to_agent(&agent_id, window, cx);
-                                        }
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .child(
-                                                        div()
-                                                            .w(px(6.))
-                                                            .h(px(6.))
-                                                            .rounded_full()
-                                                            .bg(rgba(dot_color)),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(11.))
-                                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                            .text_color(rgba(theme.fg0))
-                                                            .child(format!(
-                                                                "{} · {}",
-                                                                n.machine_name, n.project_name
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(10.))
-                                                            .text_color(rgba(dot_color))
-                                                            .child(status_text),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.))
-                                                    .text_color(rgba(theme.fg2))
-                                                    .child(time_str),
-                                            ),
-                                    )
-                                    .when_some(n.message.clone(), |row, msg| {
-                                        row.child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(rgba(if is_unread {
-                                                    theme.fg0
-                                                } else {
-                                                    theme.fg1
-                                                }))
-                                                .child(truncate(&msg, 90)),
-                                        )
-                                    })
-                            })),
-                    ),
-            )
-            .into_any_element()
-    }
     fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
         div()
@@ -3123,7 +2754,7 @@ impl MuxlaneApp {
                         self.toggle_theme(cx);
                     }
                     "cmd-clear-notifs" => {
-                        self.notifications.clear();
+                        self.notifications.update(cx, |center, cx| center.clear(cx));
                     }
                     _ => {}
                 }
@@ -4024,7 +3655,7 @@ impl Render for MuxlaneApp {
             tree = tree.child(rnode);
         }
 
-        let unread_count = self.notifications.iter().filter(|n| n.unread).count();
+        let (unread_count, has_blocked, notifications_open) = self.notifications.read(cx).summary();
 
         // ── 终端网格：PaneTree 递归渲染。
         let render_tree = if let Some(max) = &self.maximized_pane {
@@ -4112,9 +3743,9 @@ impl Render for MuxlaneApp {
                 this.toggle_theme(cx);
             }))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                if this.notifications_open {
+                if this.notifications.read(cx).summary().2 {
                     if ev.keystroke.key.as_str() == "escape" {
-                        this.notifications_open = false;
+                        this.notifications.update(cx, |center, cx| center.close(cx));
                         this.focus.focus(window, cx);
                         cx.stop_propagation();
                         cx.notify();
@@ -4191,9 +3822,6 @@ impl Render for MuxlaneApp {
                             .border_t_1()
                             .border_color(rgba(theme.line))
                             .child({
-                                let has_blocked = self.notifications.iter().any(|n| {
-                                    n.unread && n.to == muxlane_core::model::AgentStatus::Blocked
-                                });
                                 let pulse = (1.0
                                     - (self.pulse_phase as f32 * std::f32::consts::TAU / 36.0)
                                         .cos())
@@ -4232,14 +3860,15 @@ impl Render for MuxlaneApp {
                                     .when(unread_count > 0, |el| {
                                         el.bg(rgba(Theme::with_alpha(badge_color, 0x18)))
                                     })
-                                    .when(self.notifications_open, |el| el.bg(rgba(theme.bg2)))
+                                    .when(notifications_open, |el| el.bg(rgba(theme.bg2)))
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
-                                        this.notifications_open = !this.notifications_open;
+                                        this.notifications
+                                            .update(cx, |center, cx| center.toggle_open(cx));
                                         cx.notify();
                                     }))
                                     .child(panel_icon(
                                         NOTIFICATION_ICON,
-                                        if self.notifications_open || unread_count > 0 {
+                                        if notifications_open || unread_count > 0 {
                                             badge_color
                                         } else {
                                             theme.fg1
@@ -4307,133 +3936,6 @@ impl Render for MuxlaneApp {
             )
             .child(grid);
 
-        // 浮动右下角 Toast 通知
-        if !self.toasts.is_empty() {
-            let toast_container = div()
-                .id("toast-overlay")
-                .absolute()
-                .bottom(px(16.))
-                .right(px(16.))
-                .flex()
-                .flex_col()
-                .gap_2()
-                .w(px(320.))
-                .children(self.toasts.iter().map(|t| {
-                    let dot_color = match t.status {
-                        muxlane_core::model::AgentStatus::Blocked => theme.yellow,
-                        muxlane_core::model::AgentStatus::Done => theme.green,
-                        muxlane_core::model::AgentStatus::Working => theme.accent,
-                        muxlane_core::model::AgentStatus::Idle
-                        | muxlane_core::model::AgentStatus::Unknown => theme.fg2,
-                    };
-                    let agent_id = t.agent.clone();
-                    let toast_id = t.id;
-                    div()
-                        .id(gpui::ElementId::Name(format!("toast-{}", t.id).into()))
-                        .relative()
-                        .overflow_hidden()
-                        .flex()
-                        .flex_col()
-                        .p_3()
-                        .pl_4()
-                        .bg(rgba(theme.bg2))
-                        .border_1()
-                        .border_color(rgba(theme.line))
-                        .rounded_md()
-                        .shadow_lg()
-                        .cursor_pointer()
-                        .child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .top_0()
-                                .bottom_0()
-                                .w(px(4.))
-                                .bg(rgba(dot_color)),
-                        )
-                        .on_click(cx.listener({
-                            let agent_id = agent_id.clone();
-                            move |this, _ev, window, cx| {
-                                this.jump_to_agent(&agent_id, window, cx);
-                            }
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .child(
-                                            div()
-                                                .w(px(7.))
-                                                .h(px(7.))
-                                                .rounded_full()
-                                                .bg(rgba(dot_color)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(12.))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(rgba(theme.fg0))
-                                                .child(t.title.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id(gpui::ElementId::Name(
-                                            format!("toast-close-{toast_id}").into(),
-                                        ))
-                                        .text_size(px(11.))
-                                        .text_color(rgba(theme.fg2))
-                                        .hover(|s| s.text_color(rgba(theme.fg0)))
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.toasts.retain(|item| item.id != toast_id);
-                                            cx.notify();
-                                        }))
-                                        .child("×"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .mt_1()
-                                .text_size(px(11.5))
-                                .text_color(rgba(theme.fg1))
-                                .child(truncate(&t.message, 120)),
-                        )
-                        .child(
-                            div()
-                                .mt_1()
-                                .text_size(px(9.5))
-                                .text_color(rgba(theme.fg2))
-                                .child("点击直达终端"),
-                        )
-                }));
-            root = root.child(toast_container);
-        }
-
-        if let Some((message, _)) = self.error_toast.clone() {
-            root = root.child(
-                div()
-                    .id("error-toast")
-                    .absolute()
-                    .top(px(16.))
-                    .right(px(16.))
-                    .w(px(420.))
-                    .p_3()
-                    .bg(rgba(theme.bg1))
-                    .border_1()
-                    .border_color(rgba(theme.red))
-                    .text_size(px(11.5))
-                    .text_color(rgba(theme.red))
-                    .child(message),
-            );
-        }
-
         if self.split_drag.is_some() {
             let mut overlay = div()
                 .id("split-drag-overlay")
@@ -4500,9 +4002,7 @@ impl Render for MuxlaneApp {
         if self.bootstrap_confirm.is_some() {
             root = root.child(self.render_bootstrap_confirm(cx));
         }
-        if self.notifications_open {
-            root = root.child(self.render_notifications_popover(theme, cx));
-        }
+        root = root.child(self.notifications.clone());
         if self.settings_open {
             root = root.child(self.render_settings(cx));
         }
@@ -4513,25 +4013,6 @@ impl Render for MuxlaneApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn notification_body_preserves_content_and_has_status_fallbacks() {
-        assert_eq!(
-            effective_notification_body(
-                muxlane_core::model::AgentStatus::Done,
-                Some("  完成了修复\n并通过测试  ".into()),
-            ),
-            "完成了修复 并通过测试"
-        );
-        assert_eq!(
-            effective_notification_body(muxlane_core::model::AgentStatus::Done, Some("  ".into())),
-            "任务已完成"
-        );
-        assert_eq!(
-            effective_notification_body(muxlane_core::model::AgentStatus::Blocked, None),
-            "等待输入"
-        );
-    }
 
     #[test]
     fn local_project_path_requires_an_existing_directory() {

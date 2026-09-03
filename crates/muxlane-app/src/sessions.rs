@@ -103,7 +103,7 @@ impl MuxlaneApp {
 
     pub(crate) fn open_agent(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
         if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
-            self.activate_tab(&pane, agent);
+            self.activate_tab(&pane, agent, cx);
             cx.notify();
             return;
         }
@@ -123,13 +123,13 @@ impl MuxlaneApp {
         }
         let pane = self.active_pane.clone();
         self.pane_tree.open_tab(&pane, agent.clone());
-        self.activate_tab(&pane, agent);
+        self.activate_tab(&pane, agent, cx);
         cx.notify();
     }
 
     pub(crate) fn open_remote_agent(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
         if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
-            self.activate_tab(&pane, agent);
+            self.activate_tab(&pane, agent, cx);
             cx.notify();
             return;
         }
@@ -245,7 +245,7 @@ impl MuxlaneApp {
         }
         let pane = self.active_pane.clone();
         self.pane_tree.open_tab(&pane, agent.clone());
-        self.activate_tab(&pane, agent);
+        self.activate_tab(&pane, agent, cx);
         cx.notify();
     }
 
@@ -259,10 +259,8 @@ impl MuxlaneApp {
             term.focus_handle(cx).focus(window, cx);
         }
         // 清理当前 agent 的 Toast 与标记通知已读
-        self.toasts.retain(|t| &t.agent != agent);
-        for n in self.notifications.iter_mut().filter(|n| &n.agent == agent) {
-            n.unread = false;
-        }
+        self.notifications
+            .update(cx, |center, cx| center.mark_agent_read(agent, cx));
         if let Some(a) = self.last_snapshot.agent_mut(agent) {
             a.seen = true;
             if a.status == muxlane_core::model::AgentStatus::Done {
@@ -363,21 +361,24 @@ impl MuxlaneApp {
                         this.finish_delete_session(&agent, window, cx);
                     }
                     Ok(result) => {
-                        this.error_toast = Some((
-                            format!(
-                                "{} 个 tmux 会话未能销毁，会话仍保留",
-                                result.failed_agents.len()
-                            ),
-                            std::time::Instant::now(),
-                        ));
+                        this.notifications.update(cx, |center, cx| {
+                            center.show_error(
+                                format!(
+                                    "{} 个 tmux 会话未能销毁，会话仍保留",
+                                    result.failed_agents.len()
+                                ),
+                                cx,
+                            )
+                        });
                         cx.notify();
                     }
                     Err(error) => {
                         if this.last_snapshot.agent(&agent).is_none() {
                             this.finish_delete_session(&agent, window, cx);
                         }
-                        this.error_toast =
-                            Some((format!("删除会话失败：{error}"), std::time::Instant::now()));
+                        this.notifications.update(cx, |center, cx| {
+                            center.show_error(format!("删除会话失败：{error}"), cx)
+                        });
                         cx.notify();
                     }
                 }
@@ -399,7 +400,8 @@ impl MuxlaneApp {
         if let Some(cancelled) = self.mirror_cancel.remove(agent) {
             cancelled.store(true, std::sync::atomic::Ordering::Release);
         }
-        self.notifications.retain(|item| &item.agent != agent);
+        self.notifications
+            .update(cx, |center, cx| center.remove_agent(agent, cx));
         if self.active.as_ref() == Some(agent) {
             self.active = self
                 .pane_tree
@@ -414,7 +416,7 @@ impl MuxlaneApp {
         cx.notify();
     }
 
-    pub(crate) fn cleanup_removed_agents(&mut self, removed: &[AgentId]) {
+    pub(crate) fn cleanup_removed_agents(&mut self, removed: &[AgentId], cx: &mut Context<Self>) {
         let removed: std::collections::HashSet<_> = removed.iter().cloned().collect();
         self.terms.retain(|agent, _| !removed.contains(agent));
         for agent in &removed {
@@ -423,7 +425,7 @@ impl MuxlaneApp {
             }
         }
         self.notifications
-            .retain(|notification| !removed.contains(&notification.agent));
+            .update(cx, |center, cx| center.remove_agents(&removed, cx));
         let valid: std::collections::HashSet<_> = self
             .last_snapshot
             .agents
