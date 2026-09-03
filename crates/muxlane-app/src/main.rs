@@ -1,11 +1,14 @@
 //! muxlane GPUI 主程序：三区极简 UI（侧栏机器树 / 贴边终端网格 / 浮层）
 mod app;
 mod bootstrap;
+mod dialogs;
 mod i18n;
 mod icons;
+mod menus;
 mod notifications;
 mod remotes;
 mod sessions;
+mod settings;
 mod sound;
 mod term_view;
 mod terminal_keys;

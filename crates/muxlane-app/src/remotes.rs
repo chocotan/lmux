@@ -1,5 +1,7 @@
 //! Remote host connection, bootstrap, deletion, and agent/project flows.
-use crate::app::{ConnectAuthMode, DeleteConfirm, DeleteTarget, MuxlaneApp};
+use crate::app::MuxlaneApp;
+use crate::dialogs::ConnectAuthMode;
+use crate::menus::{DeleteConfirm, DeleteTarget};
 use gpui::{AppContext, Context, Window};
 use std::sync::Arc;
 
