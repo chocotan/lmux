@@ -100,7 +100,8 @@ impl RequestWriter {
     }
 
     pub async fn raw(&mut self, v: &impl serde::Serialize) -> Result<()> {
-        write_frame(&mut self.writer, v).await
+        write_frame(&mut self.writer, v).await?;
+        Ok(())
     }
 }
 

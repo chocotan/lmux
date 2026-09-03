@@ -1,5 +1,5 @@
 //! HookInjector：启动 agent 时注入 hook 配置（幂等 + 旧值备份，pocket-studio 模式）
-use anyhow::{Context, Result};
+use crate::{Error, Result};
 use std::path::{Path, PathBuf};
 
 /// hook 上报脚本会被安装到该目录（由 app 启动时落盘）
@@ -36,35 +36,32 @@ pub fn claude_hooks_value(
     })
 }
 
-fn value_has_report_command(value: &serde_json::Value) -> bool {
-    value
+fn remove_where_command(value: &mut serde_json::Value, pred: &dyn Fn(&str) -> bool) -> bool {
+    if value
         .get("command")
         .and_then(|item| item.as_str())
-        .is_some_and(|command| command.contains("report.mjs"))
-        || value
-            .get("hooks")
-            .and_then(|hooks| hooks.as_array())
-            .is_some_and(|hooks| hooks.iter().any(value_has_report_command))
-}
-
-fn remove_report_commands(value: &mut serde_json::Value) -> bool {
-    if value_has_report_command(value) && value.get("hooks").is_none() {
+        .is_some_and(pred)
+    {
         return false;
     }
     if let Some(hooks) = value
         .get_mut("hooks")
         .and_then(|hooks| hooks.as_array_mut())
     {
-        hooks.retain_mut(remove_report_commands);
+        hooks.retain_mut(|v| remove_where_command(v, pred));
         return !hooks.is_empty();
     }
     true
 }
 
+fn remove_report_commands(value: &mut serde_json::Value) -> bool {
+    remove_where_command(value, &|c| c.contains("report.mjs"))
+}
+
 /// 幂等写文件：内容不同才写，旧内容备份到 <path>.muxlane-bak
 pub fn write_file_if_changed(path: &Path, new_content: &str) -> Result<bool> {
     if path.exists() {
-        let old = std::fs::read_to_string(path).unwrap_or_default();
+        let old = std::fs::read_to_string(path)?;
         if old == new_content {
             return Ok(false);
         }
@@ -74,9 +71,15 @@ pub fn write_file_if_changed(path: &Path, new_content: &str) -> Result<bool> {
         }
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("create parent dir")?;
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoContext {
+            context: "create parent dir",
+            source,
+        })?;
     }
-    std::fs::write(path, new_content).context("write file")?;
+    std::fs::write(path, new_content).map_err(|source| Error::IoContext {
+        context: "write file",
+        source,
+    })?;
     Ok(true)
 }
 
@@ -90,6 +93,14 @@ pub fn inject_claude_hooks(settings_path: &Path, hooks_value: serde_json::Value)
     let mut merged = existing.clone();
     // 只合并 "hooks" 键；用户的其它配置原样保留
     if let (Some(obj), Some(new_hooks)) = (merged.as_object_mut(), hooks_value.as_object()) {
+        // 先清掉旧 lmux 时代的条目（改名的遗留路径），否则下面会误判重复、新 hook 写不进去
+        if let Some(hook_obj) = obj.get_mut("hooks").and_then(|v| v.as_object_mut()) {
+            for value in hook_obj.values_mut() {
+                if let Some(items) = value.as_array_mut() {
+                    items.retain_mut(|v| remove_where_command(v, &|c| c.contains("/lmux/hooks/")));
+                }
+            }
+        }
         let hooks_entry = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
         if let Some(hook_obj) = hooks_entry.as_object_mut() {
             for (event, value) in new_hooks {
@@ -103,11 +114,7 @@ pub fn inject_claude_hooks(settings_path: &Path, hooks_value: serde_json::Value)
                     continue;
                 };
                 for item in new_array {
-                    let duplicate = dest_array.iter().any(|existing| {
-                        existing == item
-                            || (value_has_report_command(item)
-                                && value_has_report_command(existing))
-                    });
+                    let duplicate = dest_array.iter().any(|existing| existing == item);
                     if !duplicate {
                         dest_array.push(item.clone());
                     }
@@ -306,6 +313,43 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert_eq!(v["hooks"]["Stop"][0]["command"], "my-stop");
+    }
+
+    #[test]
+    fn claude_legacy_lmux_entries_are_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"node /home/choco/.local/share/lmux/hooks/report.mjs done"}]}]}}"#,
+        )
+        .unwrap();
+        let hooks = claude_hooks_value(dir.path(), "", Path::new("/tmp/muxlane.sock"));
+        inject_claude_hooks(&settings, hooks).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1); // 旧条目被清掉，新条目写入，不重复
+        assert!(!stop[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("muxlane-bak"));
+        assert!(stop[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("node "));
+        assert!(!serde_json::to_string(&v).unwrap().contains("lmux/hooks"));
+    }
+
+    #[test]
+    fn malformed_claude_settings_returns_json_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(&settings, "{").unwrap();
+
+        let error = inject_claude_hooks(&settings, serde_json::json!({})).unwrap_err();
+
+        assert!(matches!(error, Error::Json(_)));
     }
 
     #[test]
@@ -563,11 +607,18 @@ export default function (pi: any) {
 "#;
 
 /// 安装 OpenCode/Pi 插件（幂等，不覆盖其他插件）。
+/// 同时清掉旧 lmux 时代的插件文件（改名的遗留），避免与新版并存重复上报。
 pub fn install_agent_plugins(home: &Path) -> Result<()> {
     let opencode = home.join(".config/opencode/plugins/muxlane.ts");
     write_file_if_changed(&opencode, OPENCODE_PLUGIN)?;
     let pi = home.join(".pi/agent/extensions/muxlane.ts");
     write_file_if_changed(&pi, PI_EXTENSION)?;
+    for legacy in [
+        ".config/opencode/plugins/lmux.ts",
+        ".pi/agent/extensions/lmux.ts",
+    ] {
+        std::fs::remove_file(home.join(legacy)).ok();
+    }
     Ok(())
 }
 
@@ -588,5 +639,19 @@ mod plugin_tests {
         assert!(pi.contains("assistantText"));
         assert!(pi.contains("isSubagentProcess"));
         assert!(pi.contains("--no-session"));
+    }
+
+    #[test]
+    fn legacy_lmux_plugins_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_oc = dir.path().join(".config/opencode/plugins/lmux.ts");
+        let old_pi = dir.path().join(".pi/agent/extensions/lmux.ts");
+        std::fs::create_dir_all(old_oc.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(old_pi.parent().unwrap()).unwrap();
+        std::fs::write(&old_oc, "old").unwrap();
+        std::fs::write(&old_pi, "old").unwrap();
+        install_agent_plugins(dir.path()).unwrap();
+        assert!(!old_oc.exists());
+        assert!(!old_pi.exists());
     }
 }

@@ -140,6 +140,25 @@ impl Render for DragGhost {
 #[derive(Clone)]
 struct DividerDrag;
 
+/// 与兄弟 pane 交界的侧向集合：交界侧不画边框（多向可叠加，嵌套分屏时沿树累加）。
+#[derive(Clone, Copy, Default)]
+struct BorderSkip {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+impl BorderSkip {
+    /// 在「沿 axis 排列、且不是首个」时插入朝向前一个兄弟的侧向。
+    fn insert(&mut self, axis: SplitAxis) {
+        match axis {
+            SplitAxis::Horizontal => self.left = true,
+            SplitAxis::Vertical => self.top = true,
+        }
+    }
+}
+
 struct DividerDragGhost;
 
 impl Render for DividerDragGhost {
@@ -4558,7 +4577,14 @@ impl MuxlaneApp {
         }
     }
 
-    fn render_pane_node(&mut self, node: PaneNode, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// border_skip：与兄弟 pane 交界的侧向集合（左右上下可叠加，嵌套分屏时累积），
+    /// 交界侧不画分隔线，避免两条 line 边框叠成双线。聚焦/告警只变色不加边。
+    fn render_pane_node(
+        &mut self,
+        node: PaneNode,
+        border_skip: BorderSkip,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
         match node {
             PaneNode::Split {
@@ -4608,20 +4634,18 @@ impl MuxlaneApp {
                                 .items_center()
                                 .justify_center()
                                 .when(axis == SplitAxis::Horizontal, |el| {
-                                    el.w(px(8.))
+                                    el.w(px(2.))
                                         .h_full()
-                                        .ml(px(-3.))
-                                        .mr(px(-3.))
+                                        .ml(px(-1.))
+                                        .mr(px(-1.))
                                         .cursor_col_resize()
-                                        .child(div().w(px(1.)).h_full().bg(rgba(theme.line)))
                                 })
                                 .when(axis == SplitAxis::Vertical, |el| {
-                                    el.h(px(8.))
+                                    el.h(px(2.))
                                         .w_full()
-                                        .mt(px(-3.))
-                                        .mb(px(-3.))
+                                        .mt(px(-1.))
+                                        .mb(px(-1.))
                                         .cursor_row_resize()
-                                        .child(div().h(px(1.)).w_full().bg(rgba(theme.line)))
                                 })
                                 .on_click(cx.listener({
                                     let split_id = split_id.clone();
@@ -4668,7 +4692,12 @@ impl MuxlaneApp {
                                 ),
                         );
                     }
-                    let rendered = self.render_pane_node(child, cx);
+                    let mut child_skip = border_skip;
+                    if index > 0 {
+                        // 交界侧：后一个子 pane 跳过面向前一个的方向（跳 left/top）
+                        child_skip.insert(axis);
+                    }
+                    let rendered = self.render_pane_node(child, child_skip, cx);
                     let share = sizes
                         .get(index)
                         .copied()
@@ -4968,7 +4997,52 @@ impl MuxlaneApp {
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
+                    // 交界侧永不画面向兄弟的边：宽度恒定，聚焦/告警只变色不加边，
+                    // 避免悬停聚焦时 3→4 条边导致 1px 抖动和双线。
+                    .when(!border_skip.left, |el| el.border_l_1())
+                    .when(!border_skip.right, |el| el.border_r_1())
+                    .when(!border_skip.top, |el| el.border_t_1())
+                    .when(!border_skip.bottom, |el| el.border_b_1())
+                    .border_color(rgba(
+                        if let Some(alert_color) =
+                            pane_att.border_color.filter(|_| pane_att.is_alerting)
+                        {
+                            alert_color
+                        } else if is_focused_pane {
+                            theme.accent
+                        } else {
+                            theme.line
+                        },
+                    ))
                     .when(is_focused_pane || pane_att.is_alerting, |el| el.shadow_md())
+                    .on_hover(cx.listener({
+                        let pane_id = pane_click_id.clone();
+                        let active_id = pane_click_active.clone();
+                        move |this, hovered: &bool, window, cx| {
+                            if !*hovered
+                                || this.palette_open
+                                || this.connect_dialog
+                                || this.project_dialog
+                                || this.remote_project_dialog.is_some()
+                                || this.session_menu.is_some()
+                                || this.tree_menu.is_some()
+                                || this.split_drag.is_some()
+                            {
+                                return;
+                            }
+                            if this.active_pane != pane_id
+                                || this.active.as_ref() != active_id.as_ref()
+                            {
+                                if let Some(agent_id) = &active_id {
+                                    this.activate_tab(&pane_id, agent_id);
+                                    this.focus_agent(agent_id, window, cx);
+                                } else {
+                                    this.active_pane = pane_id.clone();
+                                }
+                                cx.notify();
+                            }
+                        }
+                    }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener({
@@ -5920,7 +5994,7 @@ impl Render for MuxlaneApp {
             .min_w_0()
             .min_h_0()
             .bg(rgba(theme.bg0))
-            .child(self.render_pane_node(render_tree, cx));
+            .child(self.render_pane_node(render_tree, BorderSkip::default(), cx));
 
         // ── 根布局：侧栏 + 网格
         let mut root = div()

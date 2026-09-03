@@ -1,4 +1,5 @@
 //! HMAC-SHA256 token（hook / 配对后的 RPC）。格式：v1:<expiry_unix>:<base64url(mac)>。
+use crate::Result;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -15,7 +16,7 @@ impl AuthSecret {
         Self(bytes.to_vec())
     }
 
-    pub fn load_or_create(path: &Path) -> anyhow::Result<Self> {
+    pub fn load_or_create(path: &Path) -> Result<Self> {
         if path.exists() {
             let bytes = std::fs::read(path)?;
             if bytes.len() >= 32 {
@@ -86,7 +87,7 @@ impl AuthSecret {
     }
 }
 
-fn force_private(path: &Path) -> anyhow::Result<()> {
+fn force_private(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

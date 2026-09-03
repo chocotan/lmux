@@ -3329,7 +3329,6 @@ dependencies = [
 name = "muxlane-core"
 version = "0.0.3"
 dependencies = [
- "anyhow",
  "base64",
  "hmac",
  "rand 0.9.5",

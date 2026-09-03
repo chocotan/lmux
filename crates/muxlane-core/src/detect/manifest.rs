@@ -1,6 +1,7 @@
 //! manifest：TOML 屏幕规则 → 编译后的匹配器（借鉴 herdr 的规则形态，精简）
 use super::ScreenInput;
 use crate::model::AgentStatus;
+use crate::{Error, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -48,14 +49,14 @@ enum Region {
 }
 
 impl CompiledManifest {
-    pub fn parse(agent_type: &str, src: &str) -> anyhow::Result<Self> {
+    pub fn parse(agent_type: &str, src: &str) -> Result<Self> {
         let file: ManifestFile = toml::from_str(src)?;
         let mut rules = Vec::new();
         for r in file.rules {
             let region = match r.region.as_str() {
                 "bottom" => Region::Bottom,
                 "osc_title" => Region::OscTitle,
-                other => anyhow::bail!("unknown region: {other}"),
+                other => return Err(Error::UnknownRegion(other.into())),
             };
             let mut regexes = Vec::new();
             for pat in &r.regex {
@@ -161,6 +162,21 @@ regex = ["✔ .*"]
             bell: false,
         });
         assert_eq!(none, None);
+    }
+
+    #[test]
+    fn unknown_region_is_typed() {
+        let error = CompiledManifest::parse(
+            "claude",
+            r#"
+[[rules]]
+status = "working"
+region = "middle"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::UnknownRegion(region) if region == "middle"));
     }
 
     #[test]

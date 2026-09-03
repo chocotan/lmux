@@ -245,7 +245,7 @@ impl MuxlaneServer {
             let mut reader = tokio::io::BufReader::new(read_half);
             loop {
                 let frame = read_frame(&mut reader).await;
-                let eof = matches!(frame, Err(muxlane_core::protocol::FrameError::Eof));
+                let eof = matches!(frame, Err(muxlane_core::Error::Eof));
                 if frame_tx.send(frame).await.is_err() || eof {
                     break;
                 }
@@ -553,7 +553,7 @@ impl MuxlaneServer {
                                 }
                             }
                         }
-                        Some(Err(muxlane_core::protocol::FrameError::Eof)) | None => break,
+                        Some(Err(muxlane_core::Error::Eof)) | None => break,
                         Some(Err(e)) => return Err(e.into()),
                     }
                 }

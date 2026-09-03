@@ -1,5 +1,6 @@
 //! muxlane wire 协议 v1：newline-JSON 帧
 use crate::model::{AgentId, AgentStatus, ProjectId};
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -201,20 +202,8 @@ pub struct TermExitEvent {
 
 // ── newline-JSON 帧编解码 ─────────────────────
 
-#[derive(Debug, thiserror::Error)]
-pub enum FrameError {
-    #[error("frame too large: {0} > {1}")]
-    TooLarge(usize, usize),
-    #[error("json: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("stream closed")]
-    Eof,
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-}
-
 /// 从 AsyncRead 读一行 JSON 帧（自带缓冲累积，兼容裸 stream）
-pub async fn read_frame<R>(reader: &mut R) -> Result<Value, FrameError>
+pub async fn read_frame<R>(reader: &mut R) -> Result<Value>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -224,34 +213,41 @@ where
     loop {
         let n = reader.read(&mut one).await?;
         if n == 0 {
-            return Err(FrameError::Eof);
+            return Err(Error::Eof);
         }
         if one[0] == b'\n' {
             break;
         }
         line.push(one[0]);
         if line.len() > MAX_FRAME {
-            return Err(FrameError::TooLarge(line.len(), MAX_FRAME));
+            return Err(Error::FrameTooLarge {
+                size: line.len(),
+                max: MAX_FRAME,
+            });
         }
     }
     if line.is_empty() {
         // 空行跳过由 caller 处理；这里视为协议错误
-        return Err(FrameError::Json(serde_json::Error::io(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "empty frame"),
-        )));
+        return Err(Error::Json(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "empty frame",
+        ))));
     }
     Ok(serde_json::from_slice(&line)?)
 }
 
 /// 写一行 JSON 帧（自动追加 \n）
-pub async fn write_frame<W>(writer: &mut W, value: &impl Serialize) -> anyhow::Result<()>
+pub async fn write_frame<W>(writer: &mut W, value: &impl Serialize) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
     let mut buf = serde_json::to_vec(value)?;
     if buf.len() > MAX_FRAME {
-        anyhow::bail!("frame too large: {}", buf.len());
+        return Err(Error::FrameTooLarge {
+            size: buf.len(),
+            max: MAX_FRAME,
+        });
     }
     buf.push(b'\n');
     writer.write_all(&buf).await?;
@@ -260,7 +256,7 @@ where
 }
 
 /// 同步版本（供 hook 脚本协议测试等）
-pub fn encode_line(value: &impl Serialize) -> anyhow::Result<Vec<u8>> {
+pub fn encode_line(value: &impl Serialize) -> Result<Vec<u8>> {
     let mut buf = serde_json::to_vec(value)?;
     buf.push(b'\n');
     Ok(buf)
@@ -279,7 +275,7 @@ mod tests {
         let v2 = read_frame(&mut cursor).await.unwrap();
         assert_eq!(v2["b"][1], 3);
         let eof = read_frame(&mut cursor).await;
-        assert!(matches!(eof, Err(FrameError::Eof)));
+        assert!(matches!(eof, Err(Error::Eof)));
     }
 
     #[tokio::test]
@@ -314,11 +310,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_write_rejected() {
+        let mut output = Vec::new();
+        let error = write_frame(&mut output, &"x".repeat(MAX_FRAME))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::FrameTooLarge { size, max } if size > max && max == MAX_FRAME
+        ));
+    }
+
+    #[tokio::test]
     async fn oversized_frame_rejected() {
         let big = "x".repeat(MAX_FRAME + 10);
         let data = format!("\"{}\"\n", big);
         let mut r = std::io::Cursor::new(data.into_bytes());
         let err = read_frame(&mut r).await.unwrap_err();
-        assert!(matches!(err, FrameError::TooLarge(_, _)));
+        assert!(matches!(err, Error::FrameTooLarge { .. }));
     }
 }
