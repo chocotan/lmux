@@ -140,25 +140,6 @@ impl Render for DragGhost {
 #[derive(Clone)]
 struct DividerDrag;
 
-/// 与兄弟 pane 交界的侧向集合：交界侧不画边框（多向可叠加，嵌套分屏时沿树累加）。
-#[derive(Clone, Copy, Default)]
-struct BorderSkip {
-    left: bool,
-    right: bool,
-    top: bool,
-    bottom: bool,
-}
-
-impl BorderSkip {
-    /// 在「沿 axis 排列、且不是首个」时插入朝向前一个兄弟的侧向。
-    fn insert(&mut self, axis: SplitAxis) {
-        match axis {
-            SplitAxis::Horizontal => self.left = true,
-            SplitAxis::Vertical => self.top = true,
-        }
-    }
-}
-
 struct DividerDragGhost;
 
 impl Render for DividerDragGhost {
@@ -4577,12 +4558,9 @@ impl MuxlaneApp {
         }
     }
 
-    /// border_skip：与兄弟 pane 交界的侧向集合（左右上下可叠加，嵌套分屏时累积），
-    /// 交界侧不画分隔线，避免两条 line 边框叠成双线。聚焦/告警只变色不加边。
     fn render_pane_node(
         &mut self,
         node: PaneNode,
-        border_skip: BorderSkip,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
@@ -4692,12 +4670,7 @@ impl MuxlaneApp {
                                 ),
                         );
                     }
-                    let mut child_skip = border_skip;
-                    if index > 0 {
-                        // 交界侧：后一个子 pane 跳过面向前一个的方向（跳 left/top）
-                        child_skip.insert(axis);
-                    }
-                    let rendered = self.render_pane_node(child, child_skip, cx);
+                    let rendered = self.render_pane_node(child, cx);
                     let share = sizes
                         .get(index)
                         .copied()
@@ -4997,12 +4970,8 @@ impl MuxlaneApp {
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
-                    // 交界侧永不画面向兄弟的边：宽度恒定，聚焦/告警只变色不加边，
-                    // 避免悬停聚焦时 3→4 条边导致 1px 抖动和双线。
-                    .when(!border_skip.left, |el| el.border_l_1())
-                    .when(!border_skip.right, |el| el.border_r_1())
-                    .when(!border_skip.top, |el| el.border_t_1())
-                    .when(!border_skip.bottom, |el| el.border_b_1())
+                    // 所有 pane 画全边框（交界处双线叠加，简单可靠）
+                    .border_1()
                     .border_color(rgba(
                         if let Some(alert_color) =
                             pane_att.border_color.filter(|_| pane_att.is_alerting)
@@ -5994,7 +5963,7 @@ impl Render for MuxlaneApp {
             .min_w_0()
             .min_h_0()
             .bg(rgba(theme.bg0))
-            .child(self.render_pane_node(render_tree, BorderSkip::default(), cx));
+            .child(self.render_pane_node(render_tree, cx));
 
         // ── 根布局：侧栏 + 网格
         let mut root = div()
