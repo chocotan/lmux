@@ -255,6 +255,24 @@ impl Focusable for TermView {
 }
 
 impl TermView {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn write_primary(cx: &mut Context<Self>, text: String) {
+        cx.write_to_primary(ClipboardItem::new_string(text));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn write_primary(_cx: &mut Context<Self>, _text: String) {}
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn read_primary(cx: &mut Context<Self>) -> Option<String> {
+        cx.read_from_primary().and_then(|item| item.text())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn read_primary(_cx: &mut Context<Self>) -> Option<String> {
+        None
+    }
+
     /// 本地 PTY：订阅 replay+增量，输出到达即 `cx.notify()`，无 1 秒轮询。
     pub fn new_local(
         agent: AgentId,
@@ -272,7 +290,7 @@ impl TermView {
                 let stop = view
                     .update(cx, move |_view, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                        cx.write_to_primary(ClipboardItem::new_string(text));
+                        Self::write_primary(cx, text);
                     })
                     .is_err();
                 if stop {
@@ -440,7 +458,7 @@ impl TermView {
                 .selection_to_string()
                 .filter(|text| !text.is_empty())
             {
-                cx.write_to_primary(ClipboardItem::new_string(text));
+                Self::write_primary(cx, text);
             }
             handled = true;
         }
@@ -538,7 +556,7 @@ impl TermView {
         let text = cx
             .read_from_clipboard()
             .and_then(|item| item.text())
-            .or_else(|| cx.read_from_primary().and_then(|item| item.text()))
+            .or_else(|| Self::read_primary(cx))
             .filter(|text| !text.is_empty());
         let Some(text) = text else {
             return;
@@ -774,7 +792,7 @@ impl Render for TermView {
                         .filter(|text| !text.is_empty())
                     {
                         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                        cx.write_to_primary(ClipboardItem::new_string(text));
+                        Self::write_primary(cx, text);
                         cx.stop_propagation();
                         return;
                     }

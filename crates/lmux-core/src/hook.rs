@@ -440,6 +440,7 @@ function lmuxEnv(name: string) {
 }
 
 function report(event: string, message: string) {
+  if (isSubagentProcess) return Promise.resolve()
   const socket = lmuxEnv("LMUX_SOCKET")
   const agent = lmuxEnv("LMUX_AGENT_ID")
   const token = lmuxEnv("LMUX_HOOK_TOKEN")
@@ -480,6 +481,12 @@ function shortText(value: any, max = 160) {
   return t.length <= max ? t : t.slice(0, max - 1) + "…"
 }
 
+// The subagent extension launches isolated JSON workers with these arguments.
+// They inherit LMUX_* from the parent PTY, but must never report as the parent agent.
+const isSubagentProcess = process.argv.includes("--mode")
+  && process.argv.includes("json")
+  && process.argv.includes("--no-session")
+
 export default function (pi: any) {
   let latestAssistant = ""
   const seenAskUserCalls = new Set<string>()
@@ -499,7 +506,7 @@ export default function (pi: any) {
     await report("working", "")
   })
 
-  // 待确认：捕获 ask_user, confirm, prompt_user 等工具
+  // Only the parent Pi run owns lmux state. Subagent lifecycle events stay local.
   pi.on("tool_execution_start", async (event: any) => {
     const toolName = event?.toolName || ""
     if (toolName === "ask_user" || toolName === "confirm" || toolName === "prompt_user" || toolName === "user_input") {
@@ -509,26 +516,6 @@ export default function (pi: any) {
       const args = event?.args || {}
       const question = shortText(args.question || args.message || args.prompt || "等待用户确认")
       await report("blocked", question)
-      return
-    }
-    // Subagent 派发
-    if (toolName.includes("subagent") || toolName.includes("delegate") || toolName.includes("agent_call")) {
-      const subName = event?.args?.agent || event?.args?.role || "Subagent"
-      await report("working", `正在运行: ${subName}`)
-    }
-  })
-
-  // Subagent 执行结束状态区分（成功 / 错误 / 异常）
-  pi.on("tool_execution_end", async (event: any) => {
-    const toolName = event?.toolName || ""
-    if (toolName.includes("subagent") || toolName.includes("delegate") || toolName.includes("agent_call")) {
-      const subName = event?.args?.agent || event?.args?.role || "Subagent"
-      if (event?.isError || event?.error || event?.exception) {
-        const err = shortText(event.error || event.exception || "执行异常")
-        await report("done", `${subName} 异常: ${err}`)
-      } else {
-        await report("working", `${subName} 完成`)
-      }
     }
   })
 
@@ -593,5 +580,7 @@ mod plugin_tests {
         assert!(oc.contains("client.session.messages"));
         assert!(pi.contains("agent_settled"));
         assert!(pi.contains("assistantText"));
+        assert!(pi.contains("isSubagentProcess"));
+        assert!(pi.contains("--no-session"));
     }
 }

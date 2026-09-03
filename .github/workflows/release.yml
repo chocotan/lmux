@@ -179,43 +179,5 @@ jobs:
         run: |
           gh release upload "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 dist/*.zip dist/*.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
 
-  build-windows:
-    name: Build Windows (x86_64)
-    needs: prepare-release
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build lmux-app (Release)
-        shell: bash
-        run: cargo build -p lmux-app --release --target x86_64-pc-windows-msvc
-
-      - name: Package Windows zip
-        shell: bash
-        env:
-          VERSION: ${{ needs.prepare-release.outputs.version }}
-        run: |
-          NAME="lmux-${VERSION}-windows-x86_64"
-          DIST="dist/$NAME"
-          mkdir -p "$DIST"
-          cp target/x86_64-pc-windows-msvc/release/lmux.exe "$DIST/lmux.exe"
-          cp README.md "$DIST/README.md"
-          (cd dist && 7z a "$NAME.zip" "$NAME")
-          sha256sum "dist/$NAME.zip" > "dist/$NAME.zip.sha256"
-
-      - name: Upload Windows Artifacts to Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.prepare-release.outputs.tag }}
-        run: |
-          gh release upload "$TAG" dist/*.zip dist/*.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+  # Windows is intentionally not published yet: lmux-server and lmux-client
+  # currently depend on Unix domain sockets and the runtime depends on tmux.

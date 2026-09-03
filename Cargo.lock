@@ -3037,7 +3037,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lmux-app"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "lmux-client"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "lmux-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -3096,7 +3096,7 @@ dependencies = [
 
 [[package]]
 name = "lmux-server"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "lmux-store"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "lmux-core",
@@ -3126,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "lmux-term"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
