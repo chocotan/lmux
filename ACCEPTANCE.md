@@ -1,15 +1,15 @@
-# lmux 验收报告
+# Muxlane 验收报告
 
-日期：2026-08-31
+日期：2026-09-03
 
 ## 自动化门槛
 
 ```text
-cargo fmt --all -- --check                         PASS
-cargo clippy --workspace --all-targets -D warnings PASS
-cargo test --workspace                             99 passed, 0 failed
-scripts/ui-smoke.sh                                 PASS（像素+状态断言）
-scripts/release-smoke.sh                            PASS
+cargo fmt --all -- --check                            PASS
+cargo clippy --workspace --all-targets -- -D warnings PASS
+cargo test --workspace                                132 passed, 0 failed
+scripts/ui-smoke.sh                                    PASS（像素+状态断言；启动焦点竞态重试一次）
+scripts/release-smoke.sh                               PASS
 ```
 
 ## UI 自动化覆盖
@@ -42,7 +42,7 @@ scripts/release-smoke.sh                            PASS
 - missing/stopped remote 探测与确认式自动安装/启动 headless
 - `system.hello` capability/version handshake；旧远端显示需要更新，不能把协议不兼容误报为离线
 - 远端可创建 Shell 项目/会话；`term.input`/`term.resize` 经过 SSH tunnel 路由到对应 host
-- 删除远程机器只清本地连接/tunnel；删除项目才销毁 scoped lmux tmux sessions
+- 删除远程机器只清本地连接/tunnel；删除项目才销毁 scoped muxlane tmux sessions
 
 证据：[`artifacts/ui-smoke/`](./artifacts/ui-smoke/)
 
@@ -61,9 +61,9 @@ scripts/release-smoke.sh                            PASS
 ## 发布产物
 
 ```text
-target/release/lmux                           ~22 MB
-dist/lmux-0.1.0-linux-x86_64.tar.gz          ~8.7 MB
-dist/lmux-0.1.0-linux-x86_64.tar.gz.sha256
+target/release/muxlane                           ~24 MB
+dist/muxlane-0.0.2-linux-x86_64.tar.gz          ~9.7 MB
+dist/muxlane-0.0.2-linux-x86_64.tar.gz.sha256
 ```
 
 安装脚本和 desktop entry 在临时 `PREFIX` 下通过验收。

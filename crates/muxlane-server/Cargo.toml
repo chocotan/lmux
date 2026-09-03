@@ -1,0 +1,21 @@
+[package]
+name = "muxlane-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+muxlane-core = { path = "../muxlane-core" }
+muxlane-term = { path = "../muxlane-term" }
+muxlane-store = { path = "../muxlane-store" }
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+ulid.workspace = true
+tracing.workspace = true
+base64.workspace = true
+bytes = "1"
+fs2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
