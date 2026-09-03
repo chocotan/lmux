@@ -3,6 +3,8 @@ mod app;
 mod bootstrap;
 mod i18n;
 mod icons;
+mod remotes;
+mod sessions;
 mod sound;
 mod term_view;
 mod terminal_keys;

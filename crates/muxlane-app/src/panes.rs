@@ -30,7 +30,7 @@ pub(super) struct SplitDrag {
 }
 
 impl MuxlaneApp {
-    pub(super) fn activate_tab(&mut self, pane: &PaneId, agent: &AgentId) {
+    pub(crate) fn activate_tab(&mut self, pane: &PaneId, agent: &AgentId) {
         self.pane_tree.open_tab(pane, agent.clone());
         // 跨 pane 的显式导航必须揭示目标 pane；同 pane 切 tab 保留 zoom。
         if self

@@ -16,7 +16,6 @@ use gpui::{
 use muxlane_core::model::{AgentId, Snapshot};
 use muxlane_core::{PaneId, PaneNode, SplitAxis};
 use muxlane_server::MuxlaneServer;
-use muxlane_term::VTerm;
 use panes::{DividerDrag, SplitDrag};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -183,7 +182,7 @@ fn effective_notification_body(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ConnectAuthMode {
+pub(crate) enum ConnectAuthMode {
     SshConfig,
     PublicKey,
     Password,
@@ -200,81 +199,81 @@ enum NewSessionTarget {
 
 pub struct MuxlaneApp {
     focus: FocusHandle,
-    server: Arc<MuxlaneServer>,
+    pub(crate) server: Arc<MuxlaneServer>,
     /// 递归 pane tree；每个 Leaf 内是 TabGroup（参考 muxel）
-    pane_tree: PaneNode,
-    active_pane: PaneId,
-    maximized_pane: Option<PaneId>,
-    terms: HashMap<AgentId, Entity<TermView>>,
-    mirror_cancel: HashMap<AgentId, Arc<std::sync::atomic::AtomicBool>>,
-    active: Option<AgentId>,
-    last_snapshot: Snapshot,
+    pub(crate) pane_tree: PaneNode,
+    pub(crate) active_pane: PaneId,
+    pub(crate) maximized_pane: Option<PaneId>,
+    pub(crate) terms: HashMap<AgentId, Entity<TermView>>,
+    pub(crate) mirror_cancel: HashMap<AgentId, Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) active: Option<AgentId>,
+    pub(crate) last_snapshot: Snapshot,
     /// 远程机器（本地快照缓存：host name → snapshot）
-    remotes: Vec<Arc<muxlane_client::RemoteHost>>,
-    remote_snaps: HashMap<String, Snapshot>,
-    remote_states: HashMap<String, muxlane_client::RemoteState>,
+    pub(crate) remotes: Vec<Arc<muxlane_client::RemoteHost>>,
+    pub(crate) remote_snaps: HashMap<String, Snapshot>,
+    pub(crate) remote_states: HashMap<String, muxlane_client::RemoteState>,
     /// 通知中心（新事件 unshift，上限 50）
-    notifications: Vec<Notification>,
-    toasts: Vec<ToastNotification>,
+    pub(crate) notifications: Vec<Notification>,
+    pub(crate) toasts: Vec<ToastNotification>,
     toast_seq: u64,
-    theme_mode: ThemeMode,
-    font_family: String,
+    pub(crate) theme_mode: ThemeMode,
+    pub(crate) font_family: String,
     notifications_open: bool,
     settings_open: bool,
     settings_theme_menu: bool,
     settings_font_menu: bool,
     settings_language_menu: bool,
     sound_enabled: bool,
-    osc52_clipboard_enabled: bool,
+    pub(crate) osc52_clipboard_enabled: bool,
     language: Language,
     palette_open: bool,
     palette_index: usize,
     palette_scroll: ScrollHandle,
     palette_input: Entity<TextField>,
     presets: Vec<muxlane_core::AgentPreset>,
-    connect_dialog: bool,
-    connect_input: Entity<TextField>,
-    connect_auth_mode: ConnectAuthMode,
+    pub(crate) connect_dialog: bool,
+    pub(crate) connect_input: Entity<TextField>,
+    pub(crate) connect_auth_mode: ConnectAuthMode,
     connect_focus_index: usize,
-    connect_username: Entity<TextField>,
-    connect_password: Entity<TextField>,
-    connect_key_path: Entity<TextField>,
+    pub(crate) connect_username: Entity<TextField>,
+    pub(crate) connect_password: Entity<TextField>,
+    pub(crate) connect_key_path: Entity<TextField>,
     project_dialog: bool,
-    remote_project_dialog: Option<String>,
+    pub(crate) remote_project_dialog: Option<String>,
     remote_project_input: Entity<TextField>,
     project_input: Entity<TextField>,
-    dialog_error: Option<String>,
-    remote_event_tx: tokio::sync::mpsc::Sender<muxlane_client::ClientEvent>,
+    pub(crate) dialog_error: Option<String>,
+    pub(crate) remote_event_tx: tokio::sync::mpsc::Sender<muxlane_client::ClientEvent>,
     new_session_target: Option<NewSessionTarget>,
-    session_menu: Option<SessionMenu>,
-    tree_menu: Option<TreeMenu>,
-    delete_confirm: Option<DeleteConfirm>,
-    delete_error: Option<String>,
-    delete_busy: bool,
-    bootstrap_confirm: Option<BootstrapConfirm>,
-    bootstrap_error: Option<String>,
+    pub(crate) session_menu: Option<SessionMenu>,
+    pub(crate) tree_menu: Option<TreeMenu>,
+    pub(crate) delete_confirm: Option<DeleteConfirm>,
+    pub(crate) delete_error: Option<String>,
+    pub(crate) delete_busy: bool,
+    pub(crate) bootstrap_confirm: Option<BootstrapConfirm>,
+    pub(crate) bootstrap_error: Option<String>,
     store_path: std::path::PathBuf,
     split_drag: Option<SplitDrag>,
     split_metrics: Arc<std::sync::Mutex<HashMap<String, f32>>>,
     spinner_frame: usize,
     pulse_phase: usize,
-    collapsed_machines: std::collections::HashSet<String>,
-    collapsed_projects: std::collections::HashSet<String>,
+    pub(crate) collapsed_machines: std::collections::HashSet<String>,
+    pub(crate) collapsed_projects: std::collections::HashSet<String>,
     /// 远端安装/升级进度（host → 进度）
-    bootstrap_progress: HashMap<String, muxlane_client::BootstrapProgress>,
+    pub(crate) bootstrap_progress: HashMap<String, muxlane_client::BootstrapProgress>,
     /// 远程操作失败的短暂提示
-    error_toast: Option<(String, std::time::Instant)>,
+    pub(crate) error_toast: Option<(String, std::time::Instant)>,
 }
 
 #[derive(Clone)]
-struct SessionMenu {
+pub(crate) struct SessionMenu {
     agent: AgentId,
     position: Point<Pixels>,
     remote: bool,
 }
 
 #[derive(Clone)]
-enum DeleteTarget {
+pub(crate) enum DeleteTarget {
     LocalProject {
         project: String,
         label: String,
@@ -290,7 +289,7 @@ enum DeleteTarget {
 }
 
 #[derive(Clone)]
-struct TreeMenu {
+pub(crate) struct TreeMenu {
     target: DeleteTarget,
     position: Point<Pixels>,
 }
@@ -306,17 +305,17 @@ fn dismiss_context_menus(
 }
 
 #[derive(Clone)]
-struct DeleteConfirm {
-    target: DeleteTarget,
-    affected_sessions: usize,
+pub(crate) struct DeleteConfirm {
+    pub(crate) target: DeleteTarget,
+    pub(crate) affected_sessions: usize,
 }
 
 #[derive(Clone)]
-struct BootstrapConfirm {
-    host: String,
-    install: bool,
-    upgrade: bool,
-    binary: Option<String>,
+pub(crate) struct BootstrapConfirm {
+    pub(crate) host: String,
+    pub(crate) install: bool,
+    pub(crate) upgrade: bool,
+    pub(crate) binary: Option<String>,
 }
 
 #[derive(Clone)]
@@ -754,7 +753,7 @@ impl MuxlaneApp {
         app
     }
 
-    fn persist(&self) {
+    pub(crate) fn persist(&self) {
         let remote_configs: Vec<muxlane_store::PersistedRemote> = self
             .remotes
             .iter()
@@ -961,297 +960,6 @@ impl MuxlaneApp {
         sound::send_desktop_notification(&toast_title, &body);
     }
 
-    fn mark_agent_working(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
-        let mut local = false;
-        if let Some(a) = self.last_snapshot.agent_mut(agent) {
-            local = true;
-            if a.status != muxlane_core::model::AgentStatus::Working {
-                a.status = muxlane_core::model::AgentStatus::Working;
-                a.status_since = muxlane_core::model::now_secs();
-                cx.notify();
-            }
-        } else {
-            // 远程没有 mark_working RPC，先更新本地镜像，避免输入后仍显示 Idle。
-            for snapshot in self.remote_snaps.values_mut() {
-                if let Some(a) = snapshot.agent_mut(agent) {
-                    a.status = muxlane_core::model::AgentStatus::Working;
-                    a.status_since = muxlane_core::model::now_secs();
-                    cx.notify();
-                    break;
-                }
-            }
-        }
-        // 与屏幕采样同走 DetectionEngine：既避免与引擎内部状态互斥（否则引擎
-        // 推导出的候选 idle 会因等于陈旧内部状态而永不提交，spinner 卡死），
-        // 又保证 Idle 状态下输入命令立即显示 working 反馈。
-        let agent_id = agent.clone();
-        if local {
-            let server = Arc::clone(&self.server);
-            server.rt_spawn({
-                let server = Arc::clone(&server);
-                async move { server.mark_working(&agent_id).await }
-            });
-        }
-    }
-
-    fn create_local_term(
-        agent: AgentId,
-        session: Arc<muxlane_term::PtySession>,
-        font_family: &str,
-        theme: Theme,
-        osc52_clipboard_enabled: bool,
-        cx: &mut Context<Self>,
-    ) -> Entity<TermView> {
-        let font_family = font_family.to_string();
-        let term = cx.new(|cx| {
-            TermView::new_local(
-                agent.clone(),
-                session,
-                font_family,
-                theme,
-                osc52_clipboard_enabled,
-                cx,
-            )
-        });
-        cx.subscribe(
-            &term,
-            |this, _term, ev: &crate::term_view::TermEnterEvent, cx| {
-                this.mark_agent_working(&ev.0, cx);
-            },
-        )
-        .detach();
-        term
-    }
-
-    fn create_remote_term(
-        agent: AgentId,
-        terminal: (VTerm, tokio::sync::mpsc::UnboundedReceiver<String>),
-        remote_input: tokio::sync::mpsc::UnboundedSender<crate::term_view::RemoteTermCommand>,
-        font_family: &str,
-        theme: Theme,
-        osc52_clipboard_enabled: bool,
-        cx: &mut Context<Self>,
-    ) -> Entity<TermView> {
-        let font_family = font_family.to_string();
-        let term = cx.new(|cx| {
-            TermView::new_remote(
-                agent.clone(),
-                terminal,
-                remote_input,
-                font_family,
-                theme,
-                osc52_clipboard_enabled,
-                cx,
-            )
-        });
-        cx.subscribe(
-            &term,
-            |this, _term, ev: &crate::term_view::TermEnterEvent, cx| {
-                this.mark_agent_working(&ev.0, cx);
-            },
-        )
-        .detach();
-        term
-    }
-
-    fn open_agent(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
-        if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
-            self.activate_tab(&pane, agent);
-            cx.notify();
-            return;
-        }
-        if !self.terms.contains_key(agent) {
-            let Some(sess) = self.server.try_session(agent) else {
-                return;
-            };
-            let term = Self::create_local_term(
-                agent.clone(),
-                sess,
-                &self.font_family,
-                Theme::for_mode(self.theme_mode),
-                self.osc52_clipboard_enabled,
-                cx,
-            );
-            self.terms.insert(agent.clone(), term);
-        }
-        let pane = self.active_pane.clone();
-        self.pane_tree.open_tab(&pane, agent.clone());
-        self.activate_tab(&pane, agent);
-        cx.notify();
-    }
-
-    fn open_remote_agent(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
-        if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
-            self.activate_tab(&pane, agent);
-            cx.notify();
-            return;
-        }
-        if !self.terms.contains_key(agent) {
-            let (vterm, clipboard_rx) = VTerm::new_with_clipboard(120, 32);
-            vterm.feed("\u{1b}[2m正在 attach 远程终端…\u{1b}[0m\r\n".as_bytes());
-            let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
-            let term = Self::create_remote_term(
-                agent.clone(),
-                (vterm.clone(), clipboard_rx),
-                command_tx,
-                &self.font_family,
-                Theme::for_mode(self.theme_mode),
-                self.osc52_clipboard_enabled,
-                cx,
-            );
-            let weak_term = term.downgrade();
-            self.terms.insert(agent.clone(), term);
-            // agent → 所属 RemoteHost，禁止全局 endpoint 串台。
-            let host_name = self
-                .remote_snaps
-                .iter()
-                .find(|(_, snap)| snap.agents.iter().any(|a| &a.id == agent))
-                .map(|(host, _)| host.clone());
-            let remote = host_name
-                .and_then(|name| self.remotes.iter().find(|h| h.cfg.name == name).cloned());
-            if let Some(remote) = remote {
-                let (mirror_notify, mut mirror_notify_rx) = tokio::sync::mpsc::channel(1);
-                cx.spawn(async move |_this, cx| {
-                    while mirror_notify_rx.recv().await.is_some() {
-                        if weak_term.update(cx, |_term, cx| cx.notify()).is_err() {
-                            break;
-                        }
-                    }
-                })
-                .detach();
-
-                let command_remote = Arc::clone(&remote);
-                let command_agent = agent.clone();
-                let command_vterm = vterm.clone();
-                self.server.rt_spawn(async move {
-                    while let Some(first) = command_rx.recv().await {
-                        let mut input = Vec::new();
-                        let mut resize = None;
-                        let mut collect =
-                            |command: crate::term_view::RemoteTermCommand| match command {
-                                crate::term_view::RemoteTermCommand::Input(bytes) => {
-                                    input.extend(bytes)
-                                }
-                                crate::term_view::RemoteTermCommand::Resize(cols, rows) => {
-                                    resize = Some((cols, rows));
-                                }
-                            };
-                        collect(first);
-                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                        while let Ok(command) = command_rx.try_recv() {
-                            collect(command);
-                        }
-                        if !input.is_empty() {
-                            if let Err(error) =
-                                command_remote.send_term_input(&command_agent, &input).await
-                            {
-                                command_vterm.feed(
-                                    format!("\r\n\x1b[31mremote input failed: {error}\x1b[0m\r\n")
-                                        .as_bytes(),
-                                );
-                            }
-                        }
-                        if let Some((cols, rows)) = resize {
-                            let _ = command_remote.resize_term(&command_agent, cols, rows).await;
-                        }
-                    }
-                });
-
-                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                self.mirror_cancel
-                    .insert(agent.clone(), Arc::clone(&cancelled));
-                let agent2 = agent.clone();
-                let vterm2 = vterm.clone();
-                self.server.rt_spawn(async move {
-                    let mut backoff = 250u64;
-                    loop {
-                        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                            break;
-                        }
-                        let Some(sock) = remote.endpoint_now() else {
-                            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                            backoff = (backoff * 2).min(5_000);
-                            continue;
-                        };
-                        let vterm3 = vterm2.clone();
-                        let notify = mirror_notify.clone();
-                        let result = muxlane_client::stream_term(&sock, &agent2, move |update| {
-                            match update {
-                                muxlane_client::TermUpdate::Resync(bytes) => {
-                                    vterm3.feed(b"\x1bc");
-                                    vterm3.feed(&bytes);
-                                }
-                                muxlane_client::TermUpdate::Data(bytes) => vterm3.feed(&bytes),
-                            }
-                            let _ = notify.try_send(());
-                        })
-                        .await;
-                        if result.is_ok() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                            break;
-                        }
-                        vterm2.feed("\u{1b}[31m镜像流断开，正在重连…\u{1b}[0m\r\n".as_bytes());
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                        backoff = (backoff * 2).min(5_000);
-                    }
-                });
-            }
-        }
-        let pane = self.active_pane.clone();
-        self.pane_tree.open_tab(&pane, agent.clone());
-        self.activate_tab(&pane, agent);
-        cx.notify();
-    }
-
-    fn focus_agent(&mut self, agent: &AgentId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(term) = self.terms.get(agent) {
-            term.focus_handle(cx).focus(window, cx);
-        }
-        // 清理当前 agent 的 Toast 与标记通知已读
-        self.toasts.retain(|t| &t.agent != agent);
-        for n in self.notifications.iter_mut().filter(|n| &n.agent == agent) {
-            n.unread = false;
-        }
-        if let Some(a) = self.last_snapshot.agent_mut(agent) {
-            a.seen = true;
-            if a.status == muxlane_core::model::AgentStatus::Done {
-                a.status = muxlane_core::model::AgentStatus::Idle;
-            }
-        } else {
-            // 远端没有 mark_seen RPC，先同步本地镜像，避免点击后仍持续闪烁。
-            for snapshot in self.remote_snaps.values_mut() {
-                if let Some(a) = snapshot.agent_mut(agent) {
-                    a.seen = true;
-                    if a.status == muxlane_core::model::AgentStatus::Done {
-                        a.status = muxlane_core::model::AgentStatus::Idle;
-                    }
-                    break;
-                }
-            }
-        }
-        if self.last_snapshot.agent(agent).is_some() {
-            let server = Arc::clone(&self.server);
-            let agent = agent.clone();
-            server.rt_spawn({
-                let server = Arc::clone(&server);
-                async move { server.mark_seen(&agent).await }
-            });
-        }
-        cx.notify();
-    }
-
-    fn jump_to_agent(&mut self, agent: &AgentId, window: &mut Window, cx: &mut Context<Self>) {
-        let is_remote = self
-            .remote_snaps
-            .values()
-            .any(|snap| snap.agent(agent).is_some());
-        if is_remote {
-            self.open_remote_agent(agent, cx);
-        } else {
-            self.open_agent(agent, cx);
-        }
-        self.focus_agent(agent, window, cx);
-    }
-
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
         self.theme_mode = if self.theme_mode.is_dark() {
             ThemeMode::Light
@@ -1370,77 +1078,6 @@ impl MuxlaneApp {
             });
         })
         .detach();
-    }
-
-    fn add_remote_target(&mut self, target: String, cx: &mut Context<Self>) {
-        let target = target.trim().to_string();
-        if target.is_empty() {
-            self.dialog_error = Some("请输入 SSH host 或别名".into());
-            cx.notify();
-            return;
-        }
-        let parsed = muxlane_client::parse_target(&target);
-        let name = match &parsed {
-            muxlane_client::Target::Socket(path) => {
-                path.rsplit('/').next().unwrap_or(path).to_string()
-            }
-            muxlane_client::Target::Ssh { host, .. } => host.clone(),
-        };
-        if let Some(index) = self.remotes.iter().position(|host| host.cfg.name == name) {
-            self.remotes[index].stop();
-            let release_name = name.clone();
-            self.server.rt_spawn(async move {
-                muxlane_client::release_remote_tunnel(&release_name).await;
-            });
-            self.remotes.remove(index);
-            self.remote_snaps.remove(&name);
-            self.remote_states.remove(&name);
-        }
-        let username = self.connect_username.read(cx).text();
-        let auth = match self.connect_auth_mode {
-            ConnectAuthMode::SshConfig => muxlane_client::SshAuth::SshConfig,
-            ConnectAuthMode::PublicKey => muxlane_client::SshAuth::PublicKey {
-                username: (!username.trim().is_empty()).then(|| username.trim().to_string()),
-                identity_file: {
-                    let path = self.connect_key_path.read(cx).text();
-                    (!path.trim().is_empty()).then(|| path.trim().to_string())
-                },
-            },
-            ConnectAuthMode::Password => {
-                let password = self.connect_password.read(cx).text();
-                if username.trim().is_empty() || password.is_empty() {
-                    self.dialog_error = Some("密码连接需要用户名和密码".into());
-                    cx.notify();
-                    return;
-                }
-                muxlane_client::SshAuth::Password {
-                    username: username.trim().to_string(),
-                    password,
-                }
-            }
-        };
-        let host = muxlane_client::RemoteHost::new(
-            muxlane_client::HostCfg {
-                name,
-                target: parsed,
-                auth,
-                retry_base_ms: 500,
-            },
-            self.remote_event_tx.clone(),
-        );
-        self.server.rt_spawn(Arc::clone(&host).run_loop());
-        self.remotes.push(host);
-        self.persist();
-        self.connect_dialog = false;
-        self.dialog_error = None;
-        self.connect_input.update(cx, |input, cx| input.reset(cx));
-        self.connect_username
-            .update(cx, |input, cx| input.reset(cx));
-        self.connect_password
-            .update(cx, |input, cx| input.reset(cx));
-        self.connect_key_path
-            .update(cx, |input, cx| input.reset(cx));
-        cx.notify();
     }
 
     fn cycle_connect_focus(
@@ -1567,330 +1204,6 @@ impl MuxlaneApp {
             _ => return,
         }
         cx.notify();
-    }
-
-    fn delete_session(
-        &mut self,
-        agent: &AgentId,
-        remote: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if remote {
-            let host_name = self
-                .remote_snaps
-                .iter()
-                .find(|(_, snap)| snap.agents.iter().any(|a| &a.id == agent))
-                .map(|(host, _)| host.clone());
-            if let Some(host_name) = host_name {
-                if let Some(host) = self
-                    .remotes
-                    .iter()
-                    .find(|host| host.cfg.name == host_name)
-                    .cloned()
-                {
-                    let id = agent.clone();
-                    self.server.rt_spawn(async move {
-                        let _ = host.delete_agent(&id).await;
-                    });
-                }
-                if let Some(snapshot) = self.remote_snaps.get_mut(&host_name) {
-                    snapshot.agents.retain(|candidate| &candidate.id != agent);
-                    for project in &mut snapshot.projects {
-                        project.agents.retain(|candidate| candidate != agent);
-                    }
-                }
-            }
-            self.finish_delete_session(agent, window, cx);
-            return;
-        }
-
-        let server = Arc::clone(&self.server);
-        let agent = agent.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let agent_for_delete = agent.clone();
-            let (result, snapshot) = cx
-                .background_spawn(async move {
-                    let result = server.delete_agent(&agent_for_delete).await;
-                    let snapshot = server.snapshot().await;
-                    (result, snapshot)
-                })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.last_snapshot = snapshot;
-                match result {
-                    Ok(result) if result.failed_agents.is_empty() => {
-                        this.finish_delete_session(&agent, window, cx);
-                    }
-                    Ok(result) => {
-                        this.error_toast = Some((
-                            format!(
-                                "{} 个 tmux 会话未能销毁，会话仍保留",
-                                result.failed_agents.len()
-                            ),
-                            std::time::Instant::now(),
-                        ));
-                        cx.notify();
-                    }
-                    Err(error) => {
-                        if this.last_snapshot.agent(&agent).is_none() {
-                            this.finish_delete_session(&agent, window, cx);
-                        }
-                        this.error_toast =
-                            Some((format!("删除会话失败：{error}"), std::time::Instant::now()));
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn finish_delete_session(
-        &mut self,
-        agent: &AgentId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
-            self.pane_tree.close_tab(&pane, agent);
-        }
-        self.terms.remove(agent);
-        if let Some(cancelled) = self.mirror_cancel.remove(agent) {
-            cancelled.store(true, std::sync::atomic::Ordering::Release);
-        }
-        self.notifications.retain(|item| &item.agent != agent);
-        if self.active.as_ref() == Some(agent) {
-            self.active = self
-                .pane_tree
-                .group(&self.active_pane)
-                .and_then(|group| group.active.clone());
-        }
-        self.session_menu = None;
-        if let Some(active) = self.active.clone() {
-            self.focus_agent(&active, window, cx);
-        }
-        self.persist();
-        cx.notify();
-    }
-
-    fn cleanup_removed_agents(&mut self, removed: &[AgentId]) {
-        let removed: std::collections::HashSet<_> = removed.iter().cloned().collect();
-        self.terms.retain(|agent, _| !removed.contains(agent));
-        for agent in &removed {
-            if let Some(cancelled) = self.mirror_cancel.remove(agent) {
-                cancelled.store(true, std::sync::atomic::Ordering::Release);
-            }
-        }
-        self.notifications
-            .retain(|notification| !removed.contains(&notification.agent));
-        let valid: std::collections::HashSet<_> = self
-            .last_snapshot
-            .agents
-            .iter()
-            .map(|agent| agent.id.clone())
-            .chain(
-                self.remote_snaps
-                    .values()
-                    .flat_map(|snapshot| snapshot.agents.iter().map(|agent| agent.id.clone())),
-            )
-            .filter(|agent| !removed.contains(agent))
-            .collect();
-        self.pane_tree.retain_agents(&valid);
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|agent| removed.contains(agent))
-        {
-            self.active = self
-                .pane_tree
-                .group(&self.active_pane)
-                .and_then(|group| group.active.clone());
-        }
-        let clear_maximized = self
-            .maximized_pane
-            .as_ref()
-            .and_then(|pane| self.pane_tree.group(pane))
-            .map(|group| group.active.is_none())
-            .unwrap_or(true);
-        if clear_maximized {
-            self.maximized_pane = None;
-        }
-    }
-
-    fn begin_delete(&mut self, target: DeleteTarget, cx: &mut Context<Self>) {
-        let affected_sessions = match &target {
-            DeleteTarget::LocalProject { project, .. } => self
-                .last_snapshot
-                .agents
-                .iter()
-                .filter(|agent| &agent.project == project)
-                .count(),
-            DeleteTarget::RemoteProject { host, project, .. } => self
-                .remote_snaps
-                .get(host)
-                .map(|snapshot| {
-                    snapshot
-                        .agents
-                        .iter()
-                        .filter(|agent| &agent.project == project)
-                        .count()
-                })
-                .unwrap_or(0),
-            DeleteTarget::RemoteMachine { .. } => 0,
-        };
-        self.tree_menu = None;
-        self.delete_error = None;
-        self.delete_confirm = Some(DeleteConfirm {
-            target,
-            affected_sessions,
-        });
-        cx.notify();
-    }
-
-    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
-        if self.delete_busy {
-            return;
-        }
-        let Some(confirm) = self.delete_confirm.clone() else {
-            return;
-        };
-        self.delete_busy = true;
-        match confirm.target {
-            DeleteTarget::LocalProject { project, .. } => {
-                let server = Arc::clone(&self.server);
-                let project_for_delete = project.clone();
-                let affected_agents: Vec<_> = self
-                    .last_snapshot
-                    .agents
-                    .iter()
-                    .filter(|agent| agent.project == project)
-                    .map(|agent| agent.id.clone())
-                    .collect();
-                cx.spawn(async move |this, cx| {
-                    let (result, snapshot) = cx
-                        .background_spawn(async move {
-                            let result = server.delete_project(&project_for_delete).await;
-                            let snapshot = server.snapshot().await;
-                            (result, snapshot)
-                        })
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.last_snapshot = snapshot;
-                        match result {
-                            Ok(result) => {
-                                this.cleanup_removed_agents(&result.destroyed_agents);
-                                if result.failed_agents.is_empty() {
-                                    this.delete_confirm = None;
-                                } else {
-                                    this.delete_error = Some(format!(
-                                        "{} 个 tmux 会话未能销毁，项目仍保留",
-                                        result.failed_agents.len()
-                                    ));
-                                }
-                            }
-                            Err(error) => {
-                                let removed: Vec<_> = affected_agents
-                                    .iter()
-                                    .filter(|agent| this.last_snapshot.agent(agent).is_none())
-                                    .cloned()
-                                    .collect();
-                                this.cleanup_removed_agents(&removed);
-                                this.delete_error = Some(error.to_string());
-                            }
-                        }
-                        this.delete_busy = false;
-                        this.persist();
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            DeleteTarget::RemoteProject { host, project, .. } => {
-                let remote = self
-                    .remotes
-                    .iter()
-                    .find(|remote| remote.cfg.name == host)
-                    .cloned();
-                let Some(remote) = remote else {
-                    self.delete_error = Some("远端当前不可连接，未执行删除".into());
-                    self.delete_busy = false;
-                    cx.notify();
-                    return;
-                };
-                let project_for_rpc = project.clone();
-                cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_spawn(
-                            async move { remote.delete_project(&project_for_rpc).await },
-                        )
-                        .await;
-                    let _ = this.update(cx, |this, cx| match result {
-                        Ok(result) => {
-                            if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
-                                if result.failed_agents.is_empty() {
-                                    snapshot.projects.retain(|item| item.id != project);
-                                }
-                                snapshot
-                                    .agents
-                                    .retain(|agent| !result.destroyed_agents.contains(&agent.id));
-                            }
-                            this.cleanup_removed_agents(&result.destroyed_agents);
-                            if result.failed_agents.is_empty() {
-                                this.delete_confirm = None;
-                            } else {
-                                this.delete_error = Some(format!(
-                                    "{} 个远端 tmux 会话未能销毁，项目仍保留",
-                                    result.failed_agents.len()
-                                ));
-                            }
-                            this.delete_busy = false;
-                            this.persist();
-                            cx.notify();
-                        }
-                        Err(error) => {
-                            this.delete_error = Some(error.to_string());
-                            this.delete_busy = false;
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
-            DeleteTarget::RemoteMachine { host } => {
-                let removed_agents: Vec<_> = self
-                    .remote_snaps
-                    .get(&host)
-                    .map(|snapshot| {
-                        snapshot
-                            .agents
-                            .iter()
-                            .map(|agent| agent.id.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if let Some(remote) = self
-                    .remotes
-                    .iter()
-                    .find(|remote| remote.cfg.name == host)
-                    .cloned()
-                {
-                    remote.stop();
-                }
-                let release_host = host.clone();
-                self.server.rt_spawn(async move {
-                    muxlane_client::release_remote_tunnel(&release_host).await;
-                });
-                self.remotes.retain(|remote| remote.cfg.name != host);
-                self.remote_snaps.remove(&host);
-                self.remote_states.remove(&host);
-                self.cleanup_removed_agents(&removed_agents);
-                self.delete_confirm = None;
-                self.delete_busy = false;
-                self.persist();
-                cx.notify();
-            }
-        }
     }
 
     fn render_session_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -2226,71 +1539,6 @@ impl MuxlaneApp {
                     ),
             )
             .into_any_element()
-    }
-
-    fn cancel_bootstrap_for_host(&mut self, host: &str, cx: &mut Context<Self>) {
-        if let Some(remote) = self.remotes.iter().find(|r| r.cfg.name == host) {
-            remote.cancel_bootstrap();
-        }
-        self.bootstrap_progress.remove(host);
-        if self.bootstrap_confirm.as_ref().map(|c| c.host.as_str()) == Some(host) {
-            self.bootstrap_confirm = None;
-            self.bootstrap_error = None;
-        }
-        cx.notify();
-    }
-
-    fn confirm_bootstrap(&mut self, cx: &mut Context<Self>) {
-        let Some(confirm) = self.bootstrap_confirm.clone() else {
-            return;
-        };
-        let Some(remote) = self
-            .remotes
-            .iter()
-            .find(|remote| remote.cfg.name == confirm.host)
-            .cloned()
-        else {
-            self.bootstrap_error = Some("远程机器已不存在".into());
-            cx.notify();
-            return;
-        };
-        let host_name = confirm.host.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    if confirm.upgrade {
-                        remote.upgrade_and_retry().await
-                    } else if confirm.install {
-                        remote.install_and_start().await
-                    } else {
-                        remote
-                            .start_and_retry(confirm.binary.as_deref().unwrap_or("muxlane"))
-                            .await
-                    }
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.bootstrap_progress.remove(&host_name);
-                match result {
-                    Ok(()) => {
-                        this.bootstrap_confirm = None;
-                        this.bootstrap_error = None;
-                        cx.notify();
-                    }
-                    Err(error) => {
-                        let error = error.to_string();
-                        if error.contains("已取消") {
-                            this.bootstrap_confirm = None;
-                            this.bootstrap_error = None;
-                        } else {
-                            this.bootstrap_error = Some(error);
-                        }
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
     }
 
     fn render_bootstrap_confirm(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -3454,141 +2702,6 @@ impl MuxlaneApp {
                     ),
             )
             .into_any_element()
-    }
-
-    fn spawn_remote_agent(
-        &mut self,
-        host: String,
-        project: String,
-        preset: Option<muxlane_core::AgentPreset>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let remote = self
-            .remotes
-            .iter()
-            .find(|remote| remote.cfg.name == host)
-            .cloned();
-        let Some(remote) = remote else {
-            return;
-        };
-        let target_project = project.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_spawn(
-                    async move { remote.spawn_agent(&project, preset.as_ref()).await },
-                )
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(agent) => {
-                    let agent_id = agent.id.clone();
-                    if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
-                        if let Some(project) = snapshot
-                            .projects
-                            .iter_mut()
-                            .find(|project| project.id == agent.project)
-                        {
-                            project.agents.push(agent_id.clone());
-                        }
-                        snapshot.agents.push(agent);
-                    }
-                    let remote_project_key = format!("remote:{}:{}", host, target_project);
-                    this.collapsed_projects.remove(&remote_project_key);
-                    let remote_machine_key = format!("machine:remote:{}", host);
-                    this.collapsed_machines.remove(&remote_machine_key);
-                    this.open_remote_agent(&agent_id, cx);
-                    this.focus_agent(&agent_id, window, cx);
-                    this.persist();
-                    cx.notify();
-                }
-                Err(error) => {
-                    let text = error.to_string();
-                    this.error_toast = Some((
-                        format!("远程创建会话失败：{text}"),
-                        std::time::Instant::now(),
-                    ));
-                    // 类型不匹配通常意味着远端仍在运行旧版 Muxlane，
-                    // 直接切换到已有的更新引导状态。
-                    if text.contains("远端 Muxlane 版本过旧") {
-                        if let Some(remote) = this
-                            .remotes
-                            .iter()
-                            .find(|remote| remote.cfg.name == host)
-                            .cloned()
-                        {
-                            cx.spawn(async move |_, _| {
-                                remote.mark_needs_upgrade().await;
-                            })
-                            .detach();
-                        }
-                    }
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn submit_remote_project(&mut self, host: String, path: String, cx: &mut Context<Self>) {
-        let remote = self
-            .remotes
-            .iter()
-            .find(|remote| remote.cfg.name == host)
-            .cloned();
-        let Some(remote) = remote else {
-            self.dialog_error = Some("远端尚未连接".into());
-            cx.notify();
-            return;
-        };
-        if path.trim().is_empty() {
-            self.dialog_error = Some("请输入远端已有目录".into());
-            cx.notify();
-            return;
-        }
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { remote.add_project(path.trim()).await })
-                .await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(project) => {
-                    if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
-                        if !snapshot.projects.iter().any(|item| item.id == project.id) {
-                            snapshot.projects.push(project);
-                        }
-                    }
-                    this.remote_project_dialog = None;
-                    this.dialog_error = None;
-                    this.persist();
-                    cx.notify();
-                }
-                Err(error) => {
-                    let text = error.to_string();
-                    if text.contains("unknown_method")
-                        && text.contains(muxlane_core::protocol::features::PROJECT_ADD)
-                    {
-                        // 旧版远端没有 project.add：转入升级引导，而不是弹原始错误
-                        this.remote_project_dialog = None;
-                        this.dialog_error = None;
-                        if let Some(remote) = this
-                            .remotes
-                            .iter()
-                            .find(|remote| remote.cfg.name == host)
-                            .cloned()
-                        {
-                            cx.spawn(async move |this, cx| {
-                                remote.mark_needs_upgrade().await;
-                                let _ = this.update(cx, |_, _| {});
-                            })
-                            .detach();
-                        }
-                    } else {
-                        this.dialog_error = Some(text);
-                    }
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     fn render_remote_project_dialog(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
