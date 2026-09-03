@@ -6,6 +6,7 @@ use muxlane_core::protocol::{
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::BufReader;
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 
@@ -82,7 +83,7 @@ async fn launch_agent(
 async fn remote_term_input_reaches_pty_and_project_add_validates_path() {
     let (server, sock, state, _dirty, dir) = spawn_server().await;
     let agent = launch_agent(&server, &state, "read line; echo REMOTE:$line; sleep 5").await;
-    let mut conn = UnixStream::connect(&sock).await.unwrap();
+    let mut conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     write_frame(
         &mut conn,
         &Request {
@@ -136,7 +137,7 @@ async fn remote_term_input_reaches_pty_and_project_add_validates_path() {
 async fn project_delete_destroys_scoped_sessions_and_state() {
     let (server, sock, state, _dirty, _dir) = spawn_server().await;
     let agent = launch_agent(&server, &state, "sleep 30").await;
-    let mut conn = UnixStream::connect(&sock).await.unwrap();
+    let mut conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     write_frame(
         &mut conn,
         &Request {
@@ -161,7 +162,7 @@ async fn state_list_returns_snapshot() {
     let (srv, sock, state, _dirty, _dir) = spawn_server().await;
     let _agent = launch_agent(&srv, &state, "sleep 5").await;
 
-    let conn = UnixStream::connect(&sock).await.unwrap();
+    let conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     let mut conn = conn;
     write_frame(
         &mut conn,
@@ -194,7 +195,7 @@ async fn term_subscribe_replay_and_incremental() {
     // 等 first-out 出现（回放缓冲里）
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let conn = UnixStream::connect(&sock).await.unwrap();
+    let conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     let mut conn = conn;
     write_frame(
         &mut conn,
@@ -255,7 +256,7 @@ async fn events_subscribe_receives_status_change() {
     let (srv, sock, state, _dirty, _dir) = spawn_server().await;
     let agent = launch_agent(&srv, &state, "sleep 10").await;
 
-    let conn = UnixStream::connect(&sock).await.unwrap();
+    let conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     let mut conn = conn;
     write_frame(
         &mut conn,
@@ -272,7 +273,7 @@ async fn events_subscribe_receives_status_change() {
 
     // 从另一连接上报 hook → 本连接应收到状态事件
     let token = srv.hook_token(&agent);
-    let conn2 = UnixStream::connect(&sock).await.unwrap();
+    let conn2 = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     let mut conn2 = conn2;
     write_frame(&mut conn2, &Request {
         id: 9,
@@ -312,7 +313,7 @@ async fn events_subscribe_receives_status_change() {
 #[tokio::test]
 async fn unknown_agent_subscribe_errors() {
     let (_srv, sock, _state, _dirty, _dir) = spawn_server().await;
-    let conn = UnixStream::connect(&sock).await.unwrap();
+    let conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     let mut conn = conn;
     write_frame(
         &mut conn,
@@ -332,7 +333,7 @@ async fn unknown_agent_subscribe_errors() {
 async fn hook_rejects_invalid_token() {
     let (srv, sock, state, _dirty, _dir) = spawn_server().await;
     let agent = launch_agent(&srv, &state, "sleep 10").await;
-    let mut conn = UnixStream::connect(&sock).await.unwrap();
+    let mut conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     write_frame(
         &mut conn,
         &Request {
@@ -401,7 +402,7 @@ async fn node_hook_script_reports_with_env_identity() {
 async fn partial_request_survives_interleaved_event() {
     use tokio::io::AsyncWriteExt;
     let (srv, sock, _state, dirty, _dir) = spawn_server().await;
-    let mut conn = UnixStream::connect(&sock).await.unwrap();
+    let mut conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     // 开事件订阅。
     write_frame(
         &mut conn,
@@ -479,7 +480,7 @@ async fn second_server_cannot_unlink_active_socket() {
 async fn connection_drop_cleans_terminal_subscriptions() {
     let (srv, sock, state, _dirty, _dir) = spawn_server().await;
     let agent = launch_agent(&srv, &state, "sleep 10").await;
-    let mut conn = UnixStream::connect(&sock).await.unwrap();
+    let mut conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     write_frame(
         &mut conn,
         &Request {
@@ -506,7 +507,7 @@ async fn connection_drop_cleans_terminal_subscriptions() {
 async fn agent_delete_kills_and_cleans_state() {
     let (srv, sock, state, _dirty, _dir) = spawn_server().await;
     let agent = launch_agent(&srv, &state, "sleep 60").await;
-    let mut events = UnixStream::connect(&sock).await.unwrap();
+    let mut events = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     write_frame(
         &mut events,
         &Request {
@@ -520,7 +521,7 @@ async fn agent_delete_kills_and_cleans_state() {
     let _ = read_frame(&mut events).await.unwrap(); // response
     let _ = read_frame(&mut events).await.unwrap(); // initial dirty
 
-    let mut rpc = UnixStream::connect(&sock).await.unwrap();
+    let mut rpc = BufReader::new(UnixStream::connect(&sock).await.unwrap());
     write_frame(
         &mut rpc,
         &Request {

@@ -303,29 +303,32 @@ pub struct TermExitEvent {
 
 // ── newline-JSON 帧编解码 ─────────────────────
 
-/// 从 AsyncRead 读一行 JSON 帧（自带缓冲累积，兼容裸 stream）
+/// 从 AsyncBufRead 读一行 JSON 帧。
 pub async fn read_frame<R>(reader: &mut R) -> Result<Value>
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
     let mut line = Vec::with_capacity(256);
-    let mut one = [0u8; 1];
-    loop {
-        let n = reader.read(&mut one).await?;
-        if n == 0 {
-            return Err(Error::Eof);
-        }
-        if one[0] == b'\n' {
-            break;
-        }
-        line.push(one[0]);
-        if line.len() > MAX_FRAME {
-            return Err(Error::FrameTooLarge {
-                size: line.len(),
-                max: MAX_FRAME,
-            });
-        }
+    let read = reader
+        .take((MAX_FRAME + 2) as u64)
+        .read_until(b'\n', &mut line)
+        .await?;
+    if read == 0 {
+        return Err(Error::Eof);
+    }
+    let terminated = line.last() == Some(&b'\n');
+    if terminated {
+        line.pop();
+    }
+    if line.len() > MAX_FRAME {
+        return Err(Error::FrameTooLarge {
+            size: line.len(),
+            max: MAX_FRAME,
+        });
+    }
+    if !terminated {
+        return Err(Error::Eof);
     }
     if line.is_empty() {
         // 空行跳过由 caller 处理；这里视为协议错误
@@ -389,7 +392,8 @@ mod tests {
     }
     #[tokio::test]
     async fn frame_roundtrip() {
-        let mut cursor = std::io::Cursor::new(b"{\"a\":1}\n{\"b\":[2,3]}\n".to_vec());
+        let mut cursor =
+            tokio::io::BufReader::new(std::io::Cursor::new(b"{\"a\":1}\n{\"b\":[2,3]}\n".to_vec()));
         let v1 = read_frame(&mut cursor).await.unwrap();
         assert_eq!(v1["a"], 1);
         let v2 = read_frame(&mut cursor).await.unwrap();
@@ -410,7 +414,7 @@ mod tests {
             let mut w = tokio::io::BufWriter::new(&mut buf);
             write_frame(&mut w, &req).await.unwrap();
         }
-        let mut r = std::io::Cursor::new(buf);
+        let mut r = tokio::io::BufReader::new(std::io::Cursor::new(buf));
         let v = read_frame(&mut r).await.unwrap();
         let back: Request = serde_json::from_value(v).unwrap();
         assert_eq!(back.id, 7);
@@ -422,7 +426,7 @@ mod tests {
         let snap = Snapshot::default();
         let resp = Response::ok(1, serde_json::to_value(&snap).unwrap());
         let line = encode_line(&resp).unwrap();
-        let mut r = std::io::Cursor::new(line);
+        let mut r = tokio::io::BufReader::new(std::io::Cursor::new(line));
         let v = read_frame(&mut r).await.unwrap();
         let back: Response = serde_json::from_value(v).unwrap();
         let snap2: Snapshot = serde_json::from_value(back.result.unwrap()).unwrap();
@@ -445,7 +449,7 @@ mod tests {
     async fn oversized_frame_rejected() {
         let big = "x".repeat(MAX_FRAME + 10);
         let data = format!("\"{}\"\n", big);
-        let mut r = std::io::Cursor::new(data.into_bytes());
+        let mut r = tokio::io::BufReader::new(std::io::Cursor::new(data.into_bytes()));
         let err = read_frame(&mut r).await.unwrap_err();
         assert!(matches!(err, Error::FrameTooLarge { .. }));
     }

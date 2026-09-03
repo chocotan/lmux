@@ -1,10 +1,92 @@
-use muxlane_client::{stream_term, TermUpdate};
+use muxlane_client::{stream_term, Connection, HostCfg, RemoteHost, SshAuth, Target, TermUpdate};
 use muxlane_core::protocol::b64_encode;
 use muxlane_core::protocol::{
     read_frame, write_frame, EventMsg, Request, Response, TermSubscribeResult,
 };
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixListener;
+
+#[tokio::test]
+async fn connection_routes_events_and_keeps_waiting_for_matching_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("routing.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut r = tokio::io::BufReader::new(r);
+        let req: Request = serde_json::from_value(read_frame(&mut r).await.unwrap()).unwrap();
+        write_frame(
+            &mut w,
+            &EventMsg::new("test.event", serde_json::json!({"n": 1})),
+        )
+        .await
+        .unwrap();
+        write_frame(
+            &mut w,
+            &Response::ok(req.id + 99, serde_json::json!("stale")),
+        )
+        .await
+        .unwrap();
+        write_frame(&mut w, &Response::ok(req.id, serde_json::json!("ok")))
+            .await
+            .unwrap();
+    });
+
+    let mut conn = Connection::new(tokio::net::UnixStream::connect(&sock).await.unwrap());
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    conn.set_event_handler(events_tx);
+    assert_eq!(
+        conn.call("test.call", serde_json::Value::Null)
+            .await
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(events_rx.recv().await.unwrap().event, "test.event");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_host_reuses_rpc_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("reuse.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut r = tokio::io::BufReader::new(r);
+        for _ in 0..2 {
+            let req: Request = serde_json::from_value(read_frame(&mut r).await.unwrap()).unwrap();
+            write_frame(
+                &mut w,
+                &Response::ok(
+                    req.id,
+                    serde_json::to_value(muxlane_core::model::Snapshot::default()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let (events_tx, _events_rx) = tokio::sync::mpsc::channel(1);
+    let host = RemoteHost::new(
+        HostCfg {
+            name: "test".into(),
+            target: Target::Socket(sock.to_string_lossy().into_owned()),
+            auth: SshAuth::default(),
+            retry_base_ms: 200,
+        },
+        events_tx,
+    );
+    host.fetch_snapshot().await.unwrap();
+    host.fetch_snapshot().await.unwrap();
+    server.await.unwrap();
+}
 
 #[tokio::test]
 async fn stream_term_handles_replay_resync_and_exit() {

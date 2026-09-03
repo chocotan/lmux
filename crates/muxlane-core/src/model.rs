@@ -41,6 +41,8 @@ pub enum AgentType {
     Qwen,
     Kimi,
     Shell,
+    #[serde(other)]
+    Unknown,
 }
 
 impl AgentType {
@@ -55,6 +57,7 @@ impl AgentType {
             AgentType::Qwen => "qwen",
             AgentType::Kimi => "kimi",
             AgentType::Shell => "shell",
+            AgentType::Unknown => "unknown",
         }
     }
     pub fn program(&self) -> &'static str {
@@ -68,6 +71,7 @@ impl AgentType {
             AgentType::Qwen => "qwen",
             AgentType::Kimi => "kimi",
             AgentType::Shell => "bash",
+            AgentType::Unknown => "unknown",
         }
     }
 }
@@ -79,6 +83,8 @@ pub enum AgentStatus {
     Blocked,
     Idle,
     Done,
+    #[serde(other)]
+    Unknown,
 }
 
 impl AgentStatus {
@@ -88,6 +94,7 @@ impl AgentStatus {
             AgentStatus::Blocked => "blocked",
             AgentStatus::Idle => "idle",
             AgentStatus::Done => "done",
+            AgentStatus::Unknown => "unknown",
         }
     }
 }
@@ -183,6 +190,18 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, snap);
+    }
+
+    #[test]
+    fn unknown_protocol_enums_are_tolerated() {
+        assert_eq!(
+            serde_json::from_str::<AgentType>(r#""future_agent""#).unwrap(),
+            AgentType::Unknown
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentStatus>(r#""future_status""#).unwrap(),
+            AgentStatus::Unknown
+        );
     }
 
     #[test]

@@ -94,7 +94,10 @@ impl MuxlaneServer {
         cfg.env
             .push(("MUXLANE_HOOK_TOKEN".into(), self.hook_token(&agent_id)));
 
-        let session = muxlane_term::PtySession::spawn(cfg).context("spawn agent")?;
+        let session = tokio::task::spawn_blocking(move || muxlane_term::PtySession::spawn(cfg))
+            .await
+            .context("spawn agent task")?
+            .context("spawn agent")?;
         let instance = AgentInstance {
             id: agent_id.clone(),
             project: project.id.clone(),
@@ -243,7 +246,11 @@ impl MuxlaneServer {
         let mut failed = Vec::new();
         for agent in agents {
             if let Some(session) = sessions.get(agent) {
-                if session.kill_persistent() {
+                let session = Arc::clone(session);
+                let killed = tokio::task::spawn_blocking(move || session.kill_persistent())
+                    .await
+                    .unwrap_or(false);
+                if killed {
                     destroyed.push(agent.clone());
                 } else {
                     failed.push(agent.clone());

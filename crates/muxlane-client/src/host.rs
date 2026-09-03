@@ -1,9 +1,8 @@
 //! RemoteHost：一台远端 muxlane 实例的连接管理（含 SSH 隧道与重连）
-use crate::fetch_snapshot;
 use muxlane_core::model::Snapshot;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, Mutex, Notify};
 
 /// 从 HostCfg 提取 SSH 目标（bootstrap 仅支持 SSH 远端）
@@ -284,8 +283,10 @@ pub struct RemoteHost {
     stopped: AtomicBool,
     retry: Notify,
     latency_ms: AtomicU64,
-    /// 打包的进度状态：(overall_percent << 8) | phase，0 表示空闲
-    progress: AtomicU64,
+    /// UI 操作共用的串行 RPC 长连接；事件订阅使用另一条专职读连接。
+    rpc: Mutex<Option<crate::Connection>>,
+    /// 完整进度快照；访问极短，不跨 await。
+    progress: StdMutex<Option<BootstrapProgress>>,
     bootstrap_cancel: Arc<AtomicBool>,
 }
 
@@ -299,14 +300,14 @@ impl RemoteHost {
             stopped: AtomicBool::new(false),
             retry: Notify::new(),
             latency_ms: AtomicU64::new(0),
-            progress: AtomicU64::new(0),
+            rpc: Mutex::new(None),
+            progress: StdMutex::new(None),
             bootstrap_cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 
     pub fn cancel_bootstrap(&self) {
         self.bootstrap_cancel.store(true, Ordering::Relaxed);
-        self.progress.store(0, Ordering::Relaxed);
         self.clear_progress();
     }
 
@@ -331,10 +332,9 @@ impl RemoteHost {
             done_bytes,
             total_bytes,
         };
-        self.progress.store(
-            ((progress.phase.overall(percent) as u64) << 8) | phase as u64,
-            Ordering::Relaxed,
-        );
+        if let Ok(mut current) = self.progress.lock() {
+            *current = Some(progress);
+        }
         let _ = self.events_tx.try_send(ClientEvent::BootstrapProgress {
             host: self.cfg.name.clone(),
             progress,
@@ -342,25 +342,20 @@ impl RemoteHost {
     }
 
     pub fn progress_now(&self) -> Option<BootstrapProgress> {
-        let raw = self.progress.load(Ordering::Relaxed);
-        (raw != 0).then(|| {
-            let phase = match (raw & 0xff) as u8 {
-                1 => BootstrapPhase::Install,
-                2 => BootstrapPhase::Restart,
-                _ => BootstrapPhase::Upload,
-            };
-            BootstrapProgress {
-                phase,
-                percent: Some((raw >> 8) as u8),
-                done_bytes: None,
-                total_bytes: None,
-            }
-        })
+        self.progress.lock().ok().and_then(|progress| *progress)
     }
 
     fn clear_progress(&self) {
-        self.progress.store(0, Ordering::Relaxed);
+        if let Ok(mut progress) = self.progress.lock() {
+            *progress = None;
+        }
         self.retry.notify_one();
+    }
+
+    fn drop_progress(&self) {
+        if let Ok(mut progress) = self.progress.lock() {
+            *progress = None;
+        }
     }
 
     /// 主动上报 NeedsUpgrade（例如远端对已知方法返回 unknown_method）
@@ -394,6 +389,102 @@ impl RemoteHost {
         self.endpoint.read().ok().and_then(|v| v.clone())
     }
 
+    async fn rpc(&self) -> anyhow::Result<tokio::sync::MutexGuard<'_, Option<crate::Connection>>> {
+        let mut rpc = self.rpc.lock().await;
+        if rpc.is_none() {
+            let socket = self.local_socket().await?;
+            *rpc = Some(crate::open(&socket).await?);
+        }
+        Ok(rpc)
+    }
+
+    fn rpc_failed(&self, rpc: &mut Option<crate::Connection>) {
+        *rpc = None;
+        self.retry.notify_one();
+    }
+
+    pub async fn fetch_snapshot(&self) -> anyhow::Result<Snapshot> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::fetch_snapshot(rpc.as_mut().expect("RPC initialized")).await;
+        if result.is_err() {
+            self.rpc_failed(&mut rpc);
+        }
+        result
+    }
+
+    pub async fn send_term_input(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        let mut rpc = self.rpc().await?;
+        let result =
+            crate::send_term_input(rpc.as_mut().expect("RPC initialized"), agent, data).await;
+        if result.is_err() {
+            self.rpc_failed(&mut rpc);
+        }
+        result
+    }
+
+    pub async fn resize_term(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<()> {
+        let mut rpc = self.rpc().await?;
+        let result =
+            crate::resize_term(rpc.as_mut().expect("RPC initialized"), agent, cols, rows).await;
+        if result.is_err() {
+            self.rpc_failed(&mut rpc);
+        }
+        result
+    }
+
+    pub async fn spawn_agent(
+        &self,
+        project: &muxlane_core::model::ProjectId,
+        preset: Option<&muxlane_core::AgentPreset>,
+    ) -> anyhow::Result<muxlane_core::model::AgentInstance> {
+        let mut rpc = self.rpc().await?;
+        let result =
+            crate::spawn_agent(rpc.as_mut().expect("RPC initialized"), project, preset).await;
+        if result.is_err() {
+            self.rpc_failed(&mut rpc);
+        }
+        result
+    }
+
+    pub async fn delete_agent(&self, agent: &muxlane_core::model::AgentId) -> anyhow::Result<()> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::delete_agent(rpc.as_mut().expect("RPC initialized"), agent).await;
+        if result.is_err() {
+            self.rpc_failed(&mut rpc);
+        }
+        result
+    }
+
+    pub async fn add_project(&self, path: &str) -> anyhow::Result<muxlane_core::model::Project> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::add_project(rpc.as_mut().expect("RPC initialized"), path).await;
+        if result.is_err() {
+            self.rpc_failed(&mut rpc);
+        }
+        result
+    }
+
+    pub async fn delete_project(
+        &self,
+        project: &muxlane_core::model::ProjectId,
+    ) -> anyhow::Result<muxlane_core::protocol::DeleteScopeResult> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::delete_project(rpc.as_mut().expect("RPC initialized"), project).await;
+        if result.is_err() {
+            self.rpc_failed(&mut rpc);
+        }
+        result
+    }
+
     /// 上传字节进度 → 带字节数的 BootstrapProgress 事件
     fn upload_reporter(me: Arc<Self>) -> impl Fn(crate::UploadProgress) + Send + Sync + 'static {
         move |upload: crate::UploadProgress| {
@@ -421,7 +512,6 @@ impl RemoteHost {
         let cancel = Arc::clone(&self.bootstrap_cancel);
         let result = crate::tunnel::install_and_start(&host, &auth, reporter, cancel).await;
         if let Err(error) = result {
-            self.progress.store(0, Ordering::Relaxed);
             self.clear_progress();
             return Err(error);
         }
@@ -433,7 +523,6 @@ impl RemoteHost {
         let result =
             crate::tunnel::start_remote(ssh_target(&self.cfg)?, &self.cfg.auth, None).await;
         if let Err(error) = result {
-            self.progress.store(0, Ordering::Relaxed);
             self.clear_progress();
             return Err(error);
         }
@@ -449,7 +538,7 @@ impl RemoteHost {
         let result =
             crate::tunnel::start_remote(ssh_target(&self.cfg)?, &self.cfg.auth, Some(binary)).await;
         if result.is_err() {
-            self.progress.store(0, Ordering::Relaxed);
+            self.drop_progress();
         } else {
             self.clear_progress();
         }
@@ -465,7 +554,6 @@ impl RemoteHost {
         let cancel = Arc::clone(&self.bootstrap_cancel);
         let result = crate::tunnel::install_and_restart(&host, &auth, reporter, cancel).await;
         if let Err(error) = result {
-            self.progress.store(0, Ordering::Relaxed);
             self.clear_progress();
             return Err(error);
         }
@@ -477,7 +565,7 @@ impl RemoteHost {
         let result =
             crate::tunnel::start_remote(ssh_target(&self.cfg)?, &self.cfg.auth, None).await;
         if result.is_err() {
-            self.progress.store(0, Ordering::Relaxed);
+            self.drop_progress();
         } else {
             self.clear_progress();
         }
@@ -486,10 +574,16 @@ impl RemoteHost {
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
+        if let Ok(mut rpc) = self.rpc.try_lock() {
+            *rpc = None;
+        }
         self.retry.notify_waiters();
     }
 
     pub fn reconnect(&self) {
+        if let Ok(mut rpc) = self.rpc.try_lock() {
+            *rpc = None;
+        }
         self.retry.notify_one();
     }
 
@@ -626,8 +720,8 @@ impl RemoteHost {
                         backoff = (backoff * 2).min(30_000);
                         continue;
                     }
-                    // 拉全量快照
-                    match fetch_snapshot(&mut conn).await {
+                    // 拉全量快照（复用 RemoteHost RPC 长连接）
+                    match this.fetch_snapshot().await {
                         Ok(snap) => {
                             this.latency_ms.store(
                                 started.elapsed().as_millis().clamp(1, u64::MAX as u128) as u64,
@@ -646,14 +740,21 @@ impl RemoteHost {
                             continue;
                         }
                     }
-                    // 读循环：事件推送
-                    let (mut writer, mut reader) = conn.into_split();
+                    // 读循环：事件推送。state.changed 使用 200ms 滑动窗口合并。
+                    let (_writer, mut reader) = conn.into_split();
+                    let mut refresh_deadline = None;
                     loop {
                         if this.stopped.load(Ordering::Acquire) {
                             return;
                         }
                         let next = tokio::select! {
-                            frame = reader.next() => frame,
+                            frame = reader.next() => Some(frame),
+                            _ = async {
+                                match refresh_deadline {
+                                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                    None => std::future::pending().await,
+                                }
+                            } => None,
                             _ = this.retry.notified() => {
                                 if this.stopped.load(Ordering::Acquire) {
                                     return;
@@ -661,45 +762,41 @@ impl RemoteHost {
                                 break;
                             }
                         };
-                        match next {
-                            Ok(crate::Frame::Event(ev)) => {
-                                let _ = &mut writer;
-                                match ev.event.as_str() {
-                                    muxlane_core::protocol::events::STATE_CHANGED => {
-                                        // 200ms 防抖后短连接重拉全量快照（项目/新增/删除/标题/分支）。
-                                        tokio::time::sleep(std::time::Duration::from_millis(200))
-                                            .await;
-                                        if let Ok(mut refresh) = crate::open(&socket).await {
-                                            if let Ok(snap) = fetch_snapshot(&mut refresh).await {
-                                                this.set_state(
-                                                    RemoteState::Online(snap),
-                                                    &this.events_tx,
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                    }
-                                    muxlane_core::protocol::events::AGENT_STATUS => {
-                                        if let Ok(s) =
-                                            serde_json::from_value::<
-                                                muxlane_core::protocol::AgentStatusEvent,
-                                            >(ev.params)
-                                        {
-                                            let _ = this
-                                                .events_tx
-                                                .send(ClientEvent::StatusChanged {
-                                                    host: this.cfg.name.clone(),
-                                                    agent: s.agent,
-                                                    from: s.from,
-                                                    to: s.to,
-                                                    message: s.message,
-                                                })
-                                                .await;
-                                        }
-                                    }
-                                    _ => {}
-                                }
+                        let Some(next) = next else {
+                            refresh_deadline = None;
+                            if let Ok(snap) = this.fetch_snapshot().await {
+                                this.set_state(RemoteState::Online(snap), &this.events_tx)
+                                    .await;
                             }
+                            continue;
+                        };
+                        match next {
+                            Ok(crate::Frame::Event(ev)) => match ev.event.as_str() {
+                                muxlane_core::protocol::events::STATE_CHANGED => {
+                                    refresh_deadline = Some(
+                                        tokio::time::Instant::now()
+                                            + std::time::Duration::from_millis(200),
+                                    );
+                                }
+                                muxlane_core::protocol::events::AGENT_STATUS => {
+                                    if let Ok(s) = serde_json::from_value::<
+                                        muxlane_core::protocol::AgentStatusEvent,
+                                    >(ev.params)
+                                    {
+                                        let _ = this
+                                            .events_tx
+                                            .send(ClientEvent::StatusChanged {
+                                                host: this.cfg.name.clone(),
+                                                agent: s.agent,
+                                                from: s.from,
+                                                to: s.to,
+                                                message: s.message,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                _ => {}
+                            },
                             Ok(crate::Frame::Response(_)) => {}
                             Err(e) => {
                                 this.set_state(
@@ -740,6 +837,30 @@ impl RemoteHost {
 #[cfg(test)]
 mod progress_tests {
     use super::*;
+
+    #[test]
+    fn progress_snapshot_preserves_byte_counts() {
+        let (events_tx, _events_rx) = mpsc::channel(1);
+        let host = RemoteHost::new(
+            HostCfg {
+                name: "test".into(),
+                target: Target::Socket("/tmp/unused.sock".into()),
+                auth: SshAuth::default(),
+                retry_base_ms: 200,
+            },
+            events_tx,
+        );
+        host.emit_progress_bytes(BootstrapPhase::Upload, Some(25), Some(10), Some(40));
+        assert_eq!(
+            host.progress_now(),
+            Some(BootstrapProgress {
+                phase: BootstrapPhase::Upload,
+                percent: Some(25),
+                done_bytes: Some(10),
+                total_bytes: Some(40),
+            })
+        );
+    }
 
     #[test]
     fn bootstrap_phase_overall_spans_upload_install_restart() {

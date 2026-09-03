@@ -17,27 +17,44 @@ use muxlane_core::protocol::{
     b64_decode, b64_encode, read_frame, write_frame, EventMsg, Request, Response,
     TermSubscribeParams, TermSubscribeResult,
 };
+use tokio::io::{BufReader, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
+
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 到单个对端的连接抽象（newline-JSON RPC）
 pub struct Connection {
-    stream: UnixStream,
+    reader: BufReader<ReadHalf<UnixStream>>,
+    writer: WriteHalf<UnixStream>,
     next_id: u64,
+    events: Option<mpsc::UnboundedSender<EventMsg>>,
 }
 
 impl Connection {
     pub fn new(stream: UnixStream) -> Self {
-        Connection { stream, next_id: 1 }
+        let (reader, writer) = tokio::io::split(stream);
+        Connection {
+            reader: BufReader::new(reader),
+            writer,
+            next_id: 1,
+            events: None,
+        }
+    }
+
+    pub fn set_event_handler(&mut self, events: mpsc::UnboundedSender<EventMsg>) {
+        self.events = Some(events);
     }
 
     pub fn into_split(self) -> (RequestWriter, ResponseReader) {
-        let (r, w) = tokio::io::split(self.stream);
         (
             RequestWriter {
-                writer: w,
+                writer: self.writer,
                 next_id: self.next_id,
             },
-            ResponseReader { reader: r },
+            ResponseReader {
+                reader: self.reader,
+            },
         )
     }
 
@@ -48,22 +65,34 @@ impl Connection {
     ) -> Result<serde_json::Value> {
         let id = self.next_id;
         self.next_id += 1;
-        write_frame(
-            &mut self.stream,
-            &Request {
-                id,
-                method: method.into(),
-                params,
-            },
-        )
-        .await?;
-        loop {
-            let v = read_frame(&mut self.stream).await?;
-            if v.get("event").is_some() {
-                continue; // 事件帧混入：跳过，不匹配任何 call
-            }
-            let resp: Response = serde_json::from_value(v)?;
-            if resp.id == id {
+        let request = async {
+            write_frame(
+                &mut self.writer,
+                &Request {
+                    id,
+                    method: method.into(),
+                    params,
+                },
+            )
+            .await?;
+            loop {
+                let v = read_frame(&mut self.reader).await?;
+                if v.get("event").is_some() {
+                    let event: EventMsg = serde_json::from_value(v)?;
+                    if let Some(events) = &self.events {
+                        let _ = events.send(event);
+                    }
+                    continue;
+                }
+                let resp: Response = serde_json::from_value(v)?;
+                if resp.id != id {
+                    tracing::warn!(
+                        expected_id = id,
+                        response_id = resp.id,
+                        "discarding unmatched RPC response"
+                    );
+                    continue;
+                }
                 return match resp.result {
                     Some(v) => Ok(v),
                     None => {
@@ -75,12 +104,17 @@ impl Connection {
                     }
                 };
             }
-        }
+        };
+        tokio::time::timeout(CALL_TIMEOUT, request)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("{} timed out after {}s", method, CALL_TIMEOUT.as_secs())
+            })?
     }
 }
 
 pub struct RequestWriter {
-    writer: tokio::io::WriteHalf<UnixStream>,
+    writer: WriteHalf<UnixStream>,
     next_id: u64,
 }
 
@@ -102,7 +136,7 @@ impl RequestWriter {
 }
 
 pub struct ResponseReader {
-    reader: tokio::io::ReadHalf<UnixStream>,
+    reader: BufReader<ReadHalf<UnixStream>>,
 }
 
 impl ResponseReader {
@@ -194,11 +228,10 @@ pub async fn fetch_snapshot(conn: &mut Connection) -> Result<Snapshot> {
 }
 
 pub async fn spawn_agent(
-    socket: &str,
+    conn: &mut Connection,
     project: &muxlane_core::model::ProjectId,
     preset: Option<&muxlane_core::AgentPreset>,
 ) -> anyhow::Result<muxlane_core::model::AgentInstance> {
-    let mut conn = open(socket).await?;
     let value = conn
         .call(
             muxlane_core::protocol::methods::AGENT_SPAWN,
@@ -223,7 +256,7 @@ pub async fn spawn_agent(
         if agent.agent_type != expected {
             // 旧版远端会忽略 agent_type，表面返回成功但实际创建 Shell；
             // 清理误创建的会话，并把版本不兼容明确反馈给 UI。
-            let _ = delete_agent(socket, &agent.id).await;
+            let _ = delete_agent(conn, &agent.id).await;
             anyhow::bail!(
                 "远端 Muxlane 版本过旧：请求创建 {}，远端实际创建了 {}，请先更新远端 Muxlane",
                 expected.as_str(),
@@ -235,18 +268,17 @@ pub async fn spawn_agent(
 }
 
 pub async fn spawn_shell_agent(
-    socket: &str,
+    conn: &mut Connection,
     project: &muxlane_core::model::ProjectId,
 ) -> anyhow::Result<muxlane_core::model::AgentInstance> {
-    spawn_agent(socket, project, None).await
+    spawn_agent(conn, project, None).await
 }
 
 pub async fn send_term_input(
-    socket: &str,
+    conn: &mut Connection,
     agent: &muxlane_core::model::AgentId,
     data: &[u8],
 ) -> anyhow::Result<()> {
-    let mut conn = open(socket).await?;
     conn.call(
         muxlane_core::protocol::methods::TERM_INPUT,
         serde_json::to_value(muxlane_core::protocol::TermInputParams {
@@ -259,12 +291,11 @@ pub async fn send_term_input(
 }
 
 pub async fn resize_term(
-    socket: &str,
+    conn: &mut Connection,
     agent: &muxlane_core::model::AgentId,
     cols: u16,
     rows: u16,
 ) -> anyhow::Result<()> {
-    let mut conn = open(socket).await?;
     conn.call(
         muxlane_core::protocol::methods::TERM_RESIZE,
         serde_json::to_value(muxlane_core::protocol::TermResizeParams {
@@ -277,8 +308,10 @@ pub async fn resize_term(
     Ok(())
 }
 
-pub async fn add_project(socket: &str, path: &str) -> anyhow::Result<muxlane_core::model::Project> {
-    let mut conn = open(socket).await?;
+pub async fn add_project(
+    conn: &mut Connection,
+    path: &str,
+) -> anyhow::Result<muxlane_core::model::Project> {
     let value = conn
         .call(
             muxlane_core::protocol::methods::PROJECT_ADD,
@@ -292,10 +325,9 @@ pub async fn add_project(socket: &str, path: &str) -> anyhow::Result<muxlane_cor
 }
 
 pub async fn delete_project(
-    socket: &str,
+    conn: &mut Connection,
     project: &muxlane_core::model::ProjectId,
 ) -> anyhow::Result<muxlane_core::protocol::DeleteScopeResult> {
-    let mut conn = open(socket).await?;
     let value = conn
         .call(
             muxlane_core::protocol::methods::PROJECT_DELETE,
@@ -309,10 +341,9 @@ pub async fn delete_project(
 
 /// 删除远端 agent 会话（server 同时 kill PTY + 更新 state.list）
 pub async fn delete_agent(
-    socket: &str,
+    conn: &mut Connection,
     agent: &muxlane_core::model::AgentId,
 ) -> anyhow::Result<()> {
-    let mut conn = open(socket).await?;
     conn.call(
         muxlane_core::protocol::methods::AGENT_DELETE,
         serde_json::to_value(muxlane_core::protocol::AgentDeleteParams {

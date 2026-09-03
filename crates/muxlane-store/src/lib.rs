@@ -71,6 +71,8 @@ pub struct PersistedApp {
     #[serde(default)]
     pub sound_enabled: Option<bool>,
     #[serde(default)]
+    pub osc52_clipboard_enabled: Option<bool>,
+    #[serde(default)]
     pub language: Option<String>,
 }
 
@@ -110,6 +112,7 @@ impl PersistedApp {
         self.theme = previous.theme.clone();
         self.font_family = previous.font_family.clone();
         self.sound_enabled = previous.sound_enabled;
+        self.osc52_clipboard_enabled = previous.osc52_clipboard_enabled;
         self.language = previous.language.clone();
         self
     }
@@ -132,6 +135,7 @@ impl Default for PersistedApp {
             theme: None,
             font_family: None,
             sound_enabled: None,
+            osc52_clipboard_enabled: None,
             language: None,
         }
     }
@@ -288,6 +292,7 @@ mod tests {
         let pane = previous.pane_tree.first_pane_id();
         previous.pane_tree.open_tab(&pane, "tmux-agent".into());
         previous.theme = Some("nord".into());
+        previous.osc52_clipboard_enabled = Some(true);
         previous.maximized_pane = Some(pane);
         let app = PersistedApp::from_snapshot(&snapshot).with_ui_prefs_from(&previous);
 
@@ -305,6 +310,7 @@ mod tests {
             }]
         );
         assert_eq!(app.theme.as_deref(), Some("nord"));
+        assert_eq!(app.osc52_clipboard_enabled, Some(true));
         assert_eq!(app.pane_tree, previous.pane_tree);
         assert!(app.maximized_pane.is_none());
     }

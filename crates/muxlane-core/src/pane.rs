@@ -12,6 +12,8 @@ fn new_split_id() -> String {
 pub enum SplitAxis {
     Horizontal, // 左右
     Vertical,   // 上下
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -366,6 +368,14 @@ impl PaneNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_split_axis_is_tolerated() {
+        assert_eq!(
+            serde_json::from_str::<SplitAxis>(r#""diagonal""#).unwrap(),
+            SplitAxis::Unknown
+        );
+    }
     #[test]
     fn tabs_open_close_reorder() {
         let mut g = TabGroup::with_tab("a".into());

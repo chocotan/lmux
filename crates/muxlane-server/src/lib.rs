@@ -107,7 +107,7 @@ impl MuxlaneServer {
     }
 
     pub fn hook_token(&self, agent: &muxlane_core::model::AgentId) -> String {
-        self.auth.token(agent, 24 * 60 * 60)
+        self.auth.token(agent, 30 * 24 * 60 * 60)
     }
 
     /// 从同步上下文往 runtime 投递任务
@@ -389,6 +389,11 @@ impl MuxlaneServer {
             Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
         };
         if !self.auth.verify(&params.agent, &params.token) {
+            tracing::warn!(
+                agent = %params.agent,
+                reason = "invalid or expired token",
+                "hook authentication rejected"
+            );
             return Ok(Response::err(
                 req.id,
                 "unauthorized",

@@ -1,4 +1,5 @@
 use crate::MuxlaneServer;
+use anyhow::Context as _;
 use muxlane_core::detect::ScreenInput;
 use muxlane_core::model::{AgentId, AgentInstance, AgentStatus, Project};
 use muxlane_store::PersistedApp;
@@ -19,7 +20,7 @@ impl MuxlaneServer {
 
     pub async fn restore_sessions(&self, persisted: &PersistedApp) {
         for saved in &persisted.sessions {
-            if !tmux_session_alive(&saved.tmux_session) {
+            if !tmux_session_alive(&saved.tmux_session).await {
                 continue;
             }
             let Some(project) = persisted
@@ -30,13 +31,16 @@ impl MuxlaneServer {
             else {
                 continue;
             };
-            if let Ok((instance, session)) = self.attach_tmux(
-                &saved.agent_id,
-                saved.agent_type,
-                &saved.title,
-                &saved.tmux_session,
-                &project,
-            ) {
+            if let Ok((instance, session)) = self
+                .attach_tmux(
+                    &saved.agent_id,
+                    saved.agent_type,
+                    &saved.title,
+                    &saved.tmux_session,
+                    &project,
+                )
+                .await
+            {
                 self.restore_agent(project, instance, session).await;
             }
         }
@@ -69,7 +73,7 @@ impl MuxlaneServer {
         for (id, session) in sessions {
             if session.try_take_exit().is_some() {
                 if let Some(name) = session.tmux_session_name() {
-                    if tmux_session_alive(name) {
+                    if tmux_session_alive(name).await {
                         recovered.push((id, name.to_string()));
                         continue;
                     }
@@ -120,18 +124,20 @@ impl MuxlaneServer {
                 .ok_or_else(|| anyhow::anyhow!("project state missing"))?;
             (agent, project)
         };
-        let (_, session) = self.attach_tmux(
-            &agent.id,
-            agent.agent_type,
-            &agent.title,
-            &tmux_session,
-            &project,
-        )?;
+        let (_, session) = self
+            .attach_tmux(
+                &agent.id,
+                agent.agent_type,
+                &agent.title,
+                &tmux_session,
+                &project,
+            )
+            .await?;
         self.sessions.lock().await.insert(id.clone(), session);
         Ok(())
     }
 
-    fn attach_tmux(
+    async fn attach_tmux(
         &self,
         agent_id: &AgentId,
         agent_type: muxlane_core::model::AgentType,
@@ -157,7 +163,9 @@ impl MuxlaneServer {
             rows: 32,
             tmux_session: Some(tmux_session.to_string()),
         };
-        let session = muxlane_term::PtySession::spawn(cfg)?;
+        let session = tokio::task::spawn_blocking(move || muxlane_term::PtySession::spawn(cfg))
+            .await
+            .context("attach tmux task")??;
         let instance = AgentInstance {
             id: agent_id.clone(),
             project: project.id.clone(),
@@ -213,10 +221,15 @@ impl MuxlaneServer {
     }
 }
 
-fn tmux_session_alive(name: &str) -> bool {
-    let target = format!("={name}");
-    std::process::Command::new("tmux")
-        .args(["-L", "muxlane", "has-session", "-t", &target])
-        .status()
-        .is_ok_and(|status| status.success())
+async fn tmux_session_alive(name: &str) -> bool {
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || {
+        let target = format!("={name}");
+        std::process::Command::new("tmux")
+            .args(["-L", "muxlane", "has-session", "-t", &target])
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+    .await
+    .unwrap_or(false)
 }

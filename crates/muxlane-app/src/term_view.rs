@@ -10,6 +10,7 @@ use gpui::{
 };
 use muxlane_core::model::AgentId;
 use muxlane_term::{PtySession, VTerm};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const FONT_SIZE: f32 = 13.0;
@@ -20,6 +21,19 @@ const FALLBACK_CELL_H: f32 = 17.0;
 const SCROLLBAR_WIDTH: f32 = 10.0;
 const SCROLLBAR_RIGHT: f32 = 2.0;
 const MIN_SCROLLBAR_THUMB: f32 = 24.0;
+const MAX_OSC52_CLIPBOARD_BYTES: usize = 64 * 1024;
+
+fn osc52_clipboard_allowed(enabled: bool, text: &str) -> bool {
+    if text.len() > MAX_OSC52_CLIPBOARD_BYTES {
+        tracing::warn!(
+            size = text.len(),
+            max = MAX_OSC52_CLIPBOARD_BYTES,
+            "discarding oversized OSC52 clipboard payload"
+        );
+        return false;
+    }
+    enabled
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ScrollbarGeometry {
@@ -242,6 +256,7 @@ pub struct TermView {
     selecting: bool,
     forwarding_mouse: bool,
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
+    osc52_clipboard_enabled: Arc<AtomicBool>,
     _drain: Task<()>,
     _clipboard: Task<()>,
 }
@@ -273,20 +288,16 @@ impl TermView {
         None
     }
 
-    /// 本地 PTY：订阅 replay+增量，输出到达即 `cx.notify()`，无 1 秒轮询。
-    pub fn new_local(
-        agent: AgentId,
-        session: Arc<PtySession>,
-        font_family: String,
-        theme: Theme,
+    fn clipboard_task(
+        mut clipboard_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+        enabled: Arc<AtomicBool>,
         cx: &mut Context<Self>,
-    ) -> Self {
-        let (vterm, mut clipboard_rx) = VTerm::new_with_clipboard(120, 32);
-        let (replay, mut rx) = session.subscribe();
-        vterm.feed(&replay);
-        let vterm_for_task = vterm.clone();
-        let clipboard = cx.spawn(async move |view, cx| {
+    ) -> Task<()> {
+        cx.spawn(async move |view, cx| {
             while let Some(text) = clipboard_rx.recv().await {
+                if !osc52_clipboard_allowed(enabled.load(Ordering::Relaxed), &text) {
+                    continue;
+                }
                 let stop = view
                     .update(cx, move |_view, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
@@ -297,7 +308,25 @@ impl TermView {
                     break;
                 }
             }
-        });
+        })
+    }
+
+    /// 本地 PTY：订阅 replay+增量，输出到达即 `cx.notify()`，无 1 秒轮询。
+    pub fn new_local(
+        agent: AgentId,
+        session: Arc<PtySession>,
+        font_family: String,
+        theme: Theme,
+        osc52_clipboard_enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (vterm, clipboard_rx) = VTerm::new_with_clipboard(120, 32);
+        let osc52_clipboard_enabled = Arc::new(AtomicBool::new(osc52_clipboard_enabled));
+        let clipboard =
+            Self::clipboard_task(clipboard_rx, Arc::clone(&osc52_clipboard_enabled), cx);
+        let (replay, mut rx) = session.subscribe();
+        vterm.feed(&replay);
+        let vterm_for_task = vterm.clone();
         let session_for_task = Arc::clone(&session);
         let drain = cx.spawn(async move |view, cx| {
             loop {
@@ -386,6 +415,7 @@ impl TermView {
             selecting: false,
             forwarding_mouse: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
+            osc52_clipboard_enabled,
             _drain: drain,
             _clipboard: clipboard,
         }
@@ -394,16 +424,18 @@ impl TermView {
     /// 远程镜像：P2 客户端把 TermData 喂入同一个 VTerm；输入保持 None（v1 只读）。
     pub fn new_remote(
         agent: AgentId,
-        vterm: VTerm,
+        terminal: (VTerm, tokio::sync::mpsc::UnboundedReceiver<String>),
         remote_input: tokio::sync::mpsc::UnboundedSender<RemoteTermCommand>,
         font_family: String,
         theme: Theme,
+        osc52_clipboard_enabled: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (vterm, clipboard_rx) = terminal;
+        let osc52_clipboard_enabled = Arc::new(AtomicBool::new(osc52_clipboard_enabled));
+        let clipboard =
+            Self::clipboard_task(clipboard_rx, Arc::clone(&osc52_clipboard_enabled), cx);
         let idle = cx.spawn(async move |_view, _cx| {
-            std::future::pending::<()>().await;
-        });
-        let idle_clip = cx.spawn(async move |_view, _cx| {
             std::future::pending::<()>().await;
         });
         Self {
@@ -422,9 +454,15 @@ impl TermView {
             selecting: false,
             forwarding_mouse: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
+            osc52_clipboard_enabled,
             _drain: idle,
-            _clipboard: idle_clip,
+            _clipboard: clipboard,
         }
+    }
+
+    pub fn set_osc52_clipboard_enabled(&mut self, enabled: bool) {
+        self.osc52_clipboard_enabled
+            .store(enabled, Ordering::Relaxed);
     }
 
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
@@ -1198,6 +1236,17 @@ fn dim_u32(c: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn osc52_clipboard_is_opt_in_and_size_limited() {
+        assert!(!osc52_clipboard_allowed(false, "copy me"));
+        assert!(osc52_clipboard_allowed(true, "copy me"));
+        assert!(!osc52_clipboard_allowed(
+            true,
+            &"x".repeat(MAX_OSC52_CLIPBOARD_BYTES + 1)
+        ));
+    }
+
     #[test]
     fn terminal_preedit_is_not_committed_until_final_text() {
         let marked = std::sync::Mutex::new(None);

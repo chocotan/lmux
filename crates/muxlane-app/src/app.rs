@@ -306,6 +306,7 @@ pub struct MuxlaneApp {
     settings_font_menu: bool,
     settings_language_menu: bool,
     sound_enabled: bool,
+    osc52_clipboard_enabled: bool,
     language: Language,
     palette_open: bool,
     palette_index: usize,
@@ -752,6 +753,7 @@ impl MuxlaneApp {
             settings_font_menu: false,
             settings_language_menu: false,
             sound_enabled: persisted.sound_enabled.unwrap_or(true),
+            osc52_clipboard_enabled: persisted.osc52_clipboard_enabled.unwrap_or(false),
             language,
             palette_open: false,
             palette_index: 0,
@@ -814,6 +816,7 @@ impl MuxlaneApp {
                             session,
                             &this.font_family,
                             Theme::for_mode(this.theme_mode),
+                            this.osc52_clipboard_enabled,
                             cx,
                         );
                         this.terms.insert(agent, term);
@@ -881,6 +884,7 @@ impl MuxlaneApp {
         app.theme = Some(self.theme_mode.id().into());
         app.font_family = Some(self.font_family.clone());
         app.sound_enabled = Some(self.sound_enabled);
+        app.osc52_clipboard_enabled = Some(self.osc52_clipboard_enabled);
         app.language = Some(self.language.id().into());
         if let Err(e) = muxlane_store::save(&self.store_path, &app) {
             tracing::warn!(error = %e, "persist state failed");
@@ -1111,10 +1115,20 @@ impl MuxlaneApp {
         session: Arc<muxlane_term::PtySession>,
         font_family: &str,
         theme: Theme,
+        osc52_clipboard_enabled: bool,
         cx: &mut Context<Self>,
     ) -> Entity<TermView> {
         let font_family = font_family.to_string();
-        let term = cx.new(|cx| TermView::new_local(agent.clone(), session, font_family, theme, cx));
+        let term = cx.new(|cx| {
+            TermView::new_local(
+                agent.clone(),
+                session,
+                font_family,
+                theme,
+                osc52_clipboard_enabled,
+                cx,
+            )
+        });
         cx.subscribe(
             &term,
             |this, _term, ev: &crate::term_view::TermEnterEvent, cx| {
@@ -1127,15 +1141,24 @@ impl MuxlaneApp {
 
     fn create_remote_term(
         agent: AgentId,
-        vterm: VTerm,
+        terminal: (VTerm, tokio::sync::mpsc::UnboundedReceiver<String>),
         remote_input: tokio::sync::mpsc::UnboundedSender<crate::term_view::RemoteTermCommand>,
         font_family: &str,
         theme: Theme,
+        osc52_clipboard_enabled: bool,
         cx: &mut Context<Self>,
     ) -> Entity<TermView> {
         let font_family = font_family.to_string();
         let term = cx.new(|cx| {
-            TermView::new_remote(agent.clone(), vterm, remote_input, font_family, theme, cx)
+            TermView::new_remote(
+                agent.clone(),
+                terminal,
+                remote_input,
+                font_family,
+                theme,
+                osc52_clipboard_enabled,
+                cx,
+            )
         });
         cx.subscribe(
             &term,
@@ -1162,6 +1185,7 @@ impl MuxlaneApp {
                 sess,
                 &self.font_family,
                 Theme::for_mode(self.theme_mode),
+                self.osc52_clipboard_enabled,
                 cx,
             );
             self.terms.insert(agent.clone(), term);
@@ -1179,17 +1203,19 @@ impl MuxlaneApp {
             return;
         }
         if !self.terms.contains_key(agent) {
-            let vterm = VTerm::new(120, 32);
+            let (vterm, clipboard_rx) = VTerm::new_with_clipboard(120, 32);
             vterm.feed("\u{1b}[2m正在 attach 远程终端…\u{1b}[0m\r\n".as_bytes());
             let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
             let term = Self::create_remote_term(
                 agent.clone(),
-                vterm.clone(),
+                (vterm.clone(), clipboard_rx),
                 command_tx,
                 &self.font_family,
                 Theme::for_mode(self.theme_mode),
+                self.osc52_clipboard_enabled,
                 cx,
             );
+            let weak_term = term.downgrade();
             self.terms.insert(agent.clone(), term);
             // agent → 所属 RemoteHost，禁止全局 endpoint 串台。
             let host_name = self
@@ -1200,6 +1226,16 @@ impl MuxlaneApp {
             let remote = host_name
                 .and_then(|name| self.remotes.iter().find(|h| h.cfg.name == name).cloned());
             if let Some(remote) = remote {
+                let (mirror_notify, mut mirror_notify_rx) = tokio::sync::mpsc::channel(1);
+                cx.spawn(async move |_this, cx| {
+                    while mirror_notify_rx.recv().await.is_some() {
+                        if weak_term.update(cx, |_term, cx| cx.notify()).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+
                 let command_remote = Arc::clone(&remote);
                 let command_agent = agent.clone();
                 let command_vterm = vterm.clone();
@@ -1221,16 +1257,9 @@ impl MuxlaneApp {
                         while let Ok(command) = command_rx.try_recv() {
                             collect(command);
                         }
-                        let Some(endpoint) = command_remote.endpoint_now() else {
-                            command_vterm.feed(
-                                b"\r\n\x1b[31mremote input unavailable: disconnected\x1b[0m\r\n",
-                            );
-                            continue;
-                        };
                         if !input.is_empty() {
                             if let Err(error) =
-                                muxlane_client::send_term_input(&endpoint, &command_agent, &input)
-                                    .await
+                                command_remote.send_term_input(&command_agent, &input).await
                             {
                                 command_vterm.feed(
                                     format!("\r\n\x1b[31mremote input failed: {error}\x1b[0m\r\n")
@@ -1239,9 +1268,7 @@ impl MuxlaneApp {
                             }
                         }
                         if let Some((cols, rows)) = resize {
-                            let _ =
-                                muxlane_client::resize_term(&endpoint, &command_agent, cols, rows)
-                                    .await;
+                            let _ = command_remote.resize_term(&command_agent, cols, rows).await;
                         }
                     }
                 });
@@ -1263,19 +1290,18 @@ impl MuxlaneApp {
                             continue;
                         };
                         let vterm3 = vterm2.clone();
-                        let result =
-                            muxlane_client::stream_term(
-                                &sock,
-                                &agent2,
-                                move |update| match update {
-                                    muxlane_client::TermUpdate::Resync(bytes) => {
-                                        vterm3.feed(b"\x1bc");
-                                        vterm3.feed(&bytes);
-                                    }
-                                    muxlane_client::TermUpdate::Data(bytes) => vterm3.feed(&bytes),
-                                },
-                            )
-                            .await;
+                        let notify = mirror_notify.clone();
+                        let result = muxlane_client::stream_term(&sock, &agent2, move |update| {
+                            match update {
+                                muxlane_client::TermUpdate::Resync(bytes) => {
+                                    vterm3.feed(b"\x1bc");
+                                    vterm3.feed(&bytes);
+                                }
+                                muxlane_client::TermUpdate::Data(bytes) => vterm3.feed(&bytes),
+                            }
+                            let _ = notify.try_send(());
+                        })
+                        .await;
                         if result.is_ok() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
                             break;
                         }
@@ -1538,6 +1564,7 @@ impl MuxlaneApp {
                         session,
                         &this.font_family,
                         Theme::for_mode(this.theme_mode),
+                        this.osc52_clipboard_enabled,
                         cx,
                     );
                     this.collapsed_projects.remove(&project_key);
@@ -1606,6 +1633,7 @@ impl MuxlaneApp {
                         session,
                         &this.font_family,
                         Theme::for_mode(this.theme_mode),
+                        this.osc52_clipboard_enabled,
                         cx,
                     );
                     this.collapsed_projects.remove(&project_key);
@@ -1879,12 +1907,10 @@ impl MuxlaneApp {
                     .find(|host| host.cfg.name == host_name)
                     .cloned()
                 {
-                    if let Some(socket) = host.endpoint_now() {
-                        let id = agent.clone();
-                        self.server.rt_spawn(async move {
-                            let _ = muxlane_client::delete_agent(&socket, &id).await;
-                        });
-                    }
+                    let id = agent.clone();
+                    self.server.rt_spawn(async move {
+                        let _ = host.delete_agent(&id).await;
+                    });
                 }
                 if let Some(snapshot) = self.remote_snaps.get_mut(&host_name) {
                     snapshot.agents.retain(|candidate| &candidate.id != agent);
@@ -2099,12 +2125,12 @@ impl MuxlaneApp {
                 .detach();
             }
             DeleteTarget::RemoteProject { host, project, .. } => {
-                let endpoint = self
+                let remote = self
                     .remotes
                     .iter()
                     .find(|remote| remote.cfg.name == host)
-                    .and_then(|remote| remote.endpoint_now());
-                let Some(endpoint) = endpoint else {
+                    .cloned();
+                let Some(remote) = remote else {
                     self.delete_error = Some("远端当前不可连接，未执行删除".into());
                     self.delete_busy = false;
                     cx.notify();
@@ -2113,9 +2139,9 @@ impl MuxlaneApp {
                 let project_for_rpc = project.clone();
                 cx.spawn(async move |this, cx| {
                     let result = cx
-                        .background_spawn(async move {
-                            muxlane_client::delete_project(&endpoint, &project_for_rpc).await
-                        })
+                        .background_spawn(
+                            async move { remote.delete_project(&project_for_rpc).await },
+                        )
                         .await;
                     let _ = this.update(cx, |this, cx| match result {
                         Ok(result) => {
@@ -2763,6 +2789,17 @@ impl MuxlaneApp {
     fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
         self.language = language;
         self.dismiss_settings_menus();
+        self.persist();
+        cx.notify();
+    }
+
+    fn toggle_osc52_clipboard(&mut self, cx: &mut Context<Self>) {
+        self.osc52_clipboard_enabled = !self.osc52_clipboard_enabled;
+        for term in self.terms.values() {
+            term.update(cx, |term, _cx| {
+                term.set_osc52_clipboard_enabled(self.osc52_clipboard_enabled)
+            });
+        }
         self.persist();
         cx.notify();
     }
@@ -3498,6 +3535,50 @@ impl MuxlaneApp {
                                         i18n::text(self.language, "已关闭", "Disabled")
                                     }),
                             ),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pb_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(div().text_size(px(12.)).text_color(rgba(theme.fg0)).child(
+                                i18n::text(
+                                    self.language,
+                                    "允许终端写入剪贴板 (OSC52)",
+                                    "Allow terminal clipboard writes (OSC52)",
+                                ),
+                            ))
+                            .child(
+                                div()
+                                    .id("settings-osc52-toggle")
+                                    .h(px(30.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .border_1()
+                                    .border_color(rgba(if self.osc52_clipboard_enabled {
+                                        theme.accent
+                                    } else {
+                                        theme.line
+                                    }))
+                                    .text_size(px(11.))
+                                    .text_color(rgba(if self.osc52_clipboard_enabled {
+                                        theme.accent
+                                    } else {
+                                        theme.fg2
+                                    }))
+                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.toggle_osc52_clipboard(cx);
+                                    }))
+                                    .child(if self.osc52_clipboard_enabled {
+                                        i18n::text(self.language, "已开启", "Enabled")
+                                    } else {
+                                        i18n::text(self.language, "已关闭", "Disabled")
+                                    }),
+                            ),
                     ),
             )
             .into_any_element()
@@ -3701,20 +3782,20 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let endpoint = self
+        let remote = self
             .remotes
             .iter()
             .find(|remote| remote.cfg.name == host)
-            .and_then(|remote| remote.endpoint_now());
-        let Some(endpoint) = endpoint else {
+            .cloned();
+        let Some(remote) = remote else {
             return;
         };
         let target_project = project.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    muxlane_client::spawn_agent(&endpoint, &project, preset.as_ref()).await
-                })
+                .background_spawn(
+                    async move { remote.spawn_agent(&project, preset.as_ref()).await },
+                )
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(agent) => {
@@ -3767,12 +3848,12 @@ impl MuxlaneApp {
     }
 
     fn submit_remote_project(&mut self, host: String, path: String, cx: &mut Context<Self>) {
-        let endpoint = self
+        let remote = self
             .remotes
             .iter()
             .find(|remote| remote.cfg.name == host)
-            .and_then(|remote| remote.endpoint_now());
-        let Some(endpoint) = endpoint else {
+            .cloned();
+        let Some(remote) = remote else {
             self.dialog_error = Some("远端尚未连接".into());
             cx.notify();
             return;
@@ -3784,9 +3865,7 @@ impl MuxlaneApp {
         }
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    muxlane_client::add_project(&endpoint, path.trim()).await
-                })
+                .background_spawn(async move { remote.add_project(path.trim()).await })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(project) => {
@@ -5056,6 +5135,215 @@ impl MuxlaneApp {
         }
     }
 }
+
+impl MuxlaneApp {
+    fn render_project_row(
+        &self,
+        project: &muxlane_core::model::Project,
+        remote_host: Option<&str>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (row_id, add_id, project_key, project_group, branch, delete_target, new_session_target) =
+            if let Some(host) = remote_host {
+                (
+                    format!("remote-project-row-{host}-{}", project.id),
+                    format!("remote-session-add-{host}-{}", project.id),
+                    format!("remote:{host}:{}", project.id),
+                    format!("remote-project-hover-{host}-{}", project.id),
+                    project.branch.clone(),
+                    DeleteTarget::RemoteProject {
+                        host: host.to_string(),
+                        project: project.id.clone(),
+                        label: project.name.clone(),
+                    },
+                    NewSessionTarget::Remote {
+                        host: host.to_string(),
+                        project: project.id.clone(),
+                    },
+                )
+            } else {
+                (
+                    format!("project-row-{}", project.id),
+                    format!("project-add-{}", project.id),
+                    format!("local:{}", project.id),
+                    format!("project-hover-{}", project.id),
+                    project
+                        .branch
+                        .clone()
+                        .filter(|branch| !branch.trim().is_empty()),
+                    DeleteTarget::LocalProject {
+                        project: project.id.clone(),
+                        label: project.name.clone(),
+                    },
+                    NewSessionTarget::Local(project.id.clone()),
+                )
+            };
+        div()
+            .id(gpui::ElementId::Name(row_id.into()))
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(28.))
+            .pl_4()
+            .pr_2()
+            .text_size(px(12.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(rgba(theme.fg0))
+            .group(project_group.clone())
+            .hover(|style| style.bg(rgba(theme.bg2)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if !this.collapsed_projects.remove(&project_key) {
+                    this.collapsed_projects.insert(project_key.clone());
+                }
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.focus.focus(window, cx);
+                    this.palette_open = false;
+                    this.session_menu = None;
+                    this.tree_menu = Some(TreeMenu {
+                        target: delete_target.clone(),
+                        position: event.position,
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(project.name.clone())
+            .child(
+                div()
+                    .ml_auto()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when_some(branch, |controls, branch| {
+                        controls.child(
+                            div()
+                                .px_1()
+                                .bg(rgba(theme.bg2))
+                                .text_size(px(9.))
+                                .font_weight(gpui::FontWeight::NORMAL)
+                                .text_color(rgba(theme.fg1))
+                                .child(branch),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(add_id.into()))
+                            .w(px(20.))
+                            .h(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(13.))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(rgba(theme.fg1))
+                            .invisible()
+                            .group_hover(project_group, |style| style.visible())
+                            .hover(|style| style.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                cx.stop_propagation();
+                                this.new_session_target = Some(new_session_target.clone());
+                                this.palette_open = true;
+                                this.palette_index = 0;
+                                this.palette_scroll.scroll_to_item(0);
+                                this.palette_input.update(cx, |input, cx| input.reset(cx));
+                                this.palette_input.focus_handle(cx).focus(window, cx);
+                                dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu);
+                                cx.notify();
+                            }))
+                            .child(panel_icon(PLUS_ICON, theme.fg1)),
+                    ),
+            )
+    }
+
+    fn render_agent_row(
+        &self,
+        agent: &muxlane_core::model::AgentInstance,
+        remote: bool,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id = agent.id.clone();
+        let active = self.active.as_deref() == Some(&id);
+        let status = agent.status;
+        let is_error = agent.title.contains("异常") || agent.title.contains("错误");
+        let attention = compute_attention_style(
+            status,
+            agent.seen || active,
+            is_error,
+            self.pulse_phase,
+            theme,
+        );
+        div()
+            .id(gpui::ElementId::Name(id.clone().into()))
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(26.))
+            .pl(px(24.))
+            .pr_2()
+            .text_size(px(11.5))
+            .when(
+                attention.is_alerting && attention.text_color.is_some(),
+                |el| el.text_color(rgba(attention.text_color.unwrap())),
+            )
+            .when(!attention.is_alerting, |el| {
+                el.text_color(rgba(if active { theme.fg0 } else { theme.fg1 }))
+            })
+            .hover(|style| style.bg(rgba(theme.bg2)))
+            .when(
+                attention.is_alerting && attention.bg_color.is_some(),
+                |el| el.bg(rgba(attention.bg_color.unwrap())),
+            )
+            .when(!attention.is_alerting && active, |el| {
+                el.bg(rgba(theme.bg2))
+            })
+            .on_click(cx.listener({
+                let id = id.clone();
+                move |this, _event, window, cx| {
+                    if remote {
+                        this.open_remote_agent(&id, cx);
+                    } else {
+                        this.open_agent(&id, cx);
+                    }
+                    this.focus_agent(&id, window, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.focus.focus(window, cx);
+                    this.tree_menu = None;
+                    this.session_menu = Some(SessionMenu {
+                        agent: id.clone(),
+                        position: event.position,
+                        remote,
+                    });
+                    this.palette_open = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(render_status_indicator(
+                status,
+                is_error,
+                self.spinner_frame,
+                theme,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(truncate(&agent.title, 20)),
+            )
+    }
+}
+
 fn format_relative_time(then: u64, lang: Language) -> String {
     let now = muxlane_core::model::now_secs();
     let diff = now.saturating_sub(then);
@@ -5204,188 +5492,11 @@ impl Render for MuxlaneApp {
             for project in &snap.projects {
                 let project_key = format!("local:{}", project.id);
                 let project_collapsed = self.collapsed_projects.contains(&project_key);
-                let project_branch = project
-                    .branch
-                    .clone()
-                    .filter(|branch| !branch.trim().is_empty());
-                let project_group = format!("project-hover-{}", project.id);
                 let mut pnode = div().flex().flex_col().ml(px(18.));
-                let project_id_for_add = project.id.clone();
-                let local_project_target = DeleteTarget::LocalProject {
-                    project: project.id.clone(),
-                    label: project.name.clone(),
-                };
-                pnode = pnode.child(
-                    div()
-                        .id(gpui::ElementId::Name(
-                            format!("project-row-{}", project.id).into(),
-                        ))
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .h(px(28.))
-                        .pl_4()
-                        .pr_2()
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgba(theme.fg0))
-                        .group(project_group.clone())
-                        .hover(|style| style.bg(rgba(theme.bg2)))
-                        .on_click(cx.listener({
-                            let key = project_key.clone();
-                            move |this, _event, _window, cx| {
-                                if !this.collapsed_projects.remove(&key) {
-                                    this.collapsed_projects.insert(key.clone());
-                                }
-                                cx.notify();
-                            }
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener({
-                                let target = local_project_target.clone();
-                                move |this, event: &gpui::MouseDownEvent, window, cx| {
-                                    this.focus.focus(window, cx);
-                                    this.palette_open = false;
-                                    this.session_menu = None;
-                                    this.tree_menu = Some(TreeMenu {
-                                        target: target.clone(),
-                                        position: event.position,
-                                    });
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                            }),
-                        )
-                        .child(project.name.clone())
-                        .child(
-                            div()
-                                .ml_auto()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .when_some(project_branch, |controls, branch| {
-                                    controls.child(
-                                        div()
-                                            .px_1()
-                                            .bg(rgba(theme.bg2))
-                                            .text_size(px(9.))
-                                            .font_weight(gpui::FontWeight::NORMAL)
-                                            .text_color(rgba(theme.fg1))
-                                            .child(branch),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .id(gpui::ElementId::Name(
-                                            format!("project-add-{}", project.id).into(),
-                                        ))
-                                        .w(px(20.))
-                                        .h(px(20.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_size(px(13.))
-                                        .font_weight(gpui::FontWeight::NORMAL)
-                                        .text_color(rgba(theme.fg1))
-                                        .invisible()
-                                        .group_hover(project_group.clone(), |style| style.visible())
-                                        .hover(|s| {
-                                            s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent))
-                                        })
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.new_session_target = Some(
-                                                NewSessionTarget::Local(project_id_for_add.clone()),
-                                            );
-                                            this.palette_open = true;
-                                            this.palette_index = 0;
-                                            this.palette_scroll.scroll_to_item(0);
-                                            this.palette_input
-                                                .update(cx, |input, cx| input.reset(cx));
-                                            this.palette_input.focus_handle(cx).focus(_window, cx);
-                                            dismiss_context_menus(
-                                                &mut this.session_menu,
-                                                &mut this.tree_menu,
-                                            );
-                                            cx.notify();
-                                        }))
-                                        .child(panel_icon(PLUS_ICON, theme.fg1)),
-                                ),
-                        ),
-                );
+                pnode = pnode.child(self.render_project_row(project, None, theme, cx));
                 if !project_collapsed {
                     for agent in snap.agents_of(&project.id) {
-                        let id = agent.id.clone();
-                        let active = self.active.as_deref() == Some(&id);
-                        let status = agent.status;
-                        let is_error = agent.title.contains("异常") || agent.title.contains("错误");
-                        let att = compute_attention_style(
-                            status,
-                            agent.seen || active,
-                            is_error,
-                            self.pulse_phase,
-                            theme,
-                        );
-                        let row = div()
-                            .id(gpui::ElementId::Name(id.clone().into()))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .h(px(26.))
-                            .pl(px(24.))
-                            .pr_2()
-                            .text_size(px(11.5))
-                            .when(att.is_alerting && att.text_color.is_some(), |el| {
-                                el.text_color(rgba(att.text_color.unwrap()))
-                            })
-                            .when(!att.is_alerting, |el| {
-                                el.text_color(rgba(if active { theme.fg0 } else { theme.fg1 }))
-                            })
-                            .hover(|s| s.bg(rgba(theme.bg2)))
-                            .when(att.is_alerting && att.bg_color.is_some(), |el| {
-                                el.bg(rgba(att.bg_color.unwrap()))
-                            })
-                            .when(!att.is_alerting && active, |el| el.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener({
-                                let id = id.clone();
-                                move |this, _ev, window, cx| {
-                                    this.open_agent(&id, cx);
-                                    this.focus_agent(&id, window, cx);
-                                }
-                            }))
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener({
-                                    let id = id.clone();
-                                    move |this, ev: &gpui::MouseDownEvent, window, cx| {
-                                        this.focus.focus(window, cx);
-                                        this.tree_menu = None;
-                                        this.session_menu = Some(SessionMenu {
-                                            agent: id.clone(),
-                                            position: ev.position,
-                                            remote: false,
-                                        });
-                                        this.palette_open = false;
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }
-                                }),
-                            )
-                            .child(render_status_indicator(
-                                status,
-                                is_error,
-                                self.spinner_frame,
-                                theme,
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .child(truncate(&agent.title, 20)),
-                            );
-                        pnode = pnode.child(row);
+                        pnode = pnode.child(self.render_agent_row(agent, false, theme, cx));
                     }
                 }
                 tree = tree.child(pnode);
@@ -5722,210 +5833,12 @@ impl Render for MuxlaneApp {
                     for project in &rsnap.projects {
                         let project_key = format!("remote:{name}:{}", project.id);
                         let project_collapsed = self.collapsed_projects.contains(&project_key);
-                        let remote_project_target = DeleteTarget::RemoteProject {
-                            host: name.clone(),
-                            project: project.id.clone(),
-                            label: project.name.clone(),
-                        };
-                        let project_branch = project.branch.clone();
-                        let spawn_host = name.clone();
-                        let spawn_project = project.id.clone();
-                        let project_group = format!("remote-project-hover-{name}-{}", project.id);
                         let mut pnode = div().flex().flex_col().ml(px(18.));
-                        pnode = pnode.child(
-                            div()
-                                .id(gpui::ElementId::Name(
-                                    format!("remote-project-row-{name}-{}", project.id).into(),
-                                ))
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .h(px(28.))
-                                .pl_4()
-                                .pr_2()
-                                .text_size(px(12.))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(rgba(theme.fg0))
-                                .group(project_group.clone())
-                                .hover(|style| style.bg(rgba(theme.bg2)))
-                                .on_click(cx.listener({
-                                    let key = project_key.clone();
-                                    move |this, _event, _window, cx| {
-                                        if !this.collapsed_projects.remove(&key) {
-                                            this.collapsed_projects.insert(key.clone());
-                                        }
-                                        cx.notify();
-                                    }
-                                }))
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener({
-                                        let target = remote_project_target.clone();
-                                        move |this, event: &gpui::MouseDownEvent, window, cx| {
-                                            this.focus.focus(window, cx);
-                                            this.palette_open = false;
-                                            this.session_menu = None;
-                                            this.tree_menu = Some(TreeMenu {
-                                                target: target.clone(),
-                                                position: event.position,
-                                            });
-                                            cx.stop_propagation();
-                                            cx.notify();
-                                        }
-                                    }),
-                                )
-                                .child(project.name.clone())
-                                .child(
-                                    div()
-                                        .ml_auto()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .when_some(project_branch, |controls, branch| {
-                                            controls.child(
-                                                div()
-                                                    .px_1()
-                                                    .bg(rgba(theme.bg2))
-                                                    .text_size(px(9.))
-                                                    .font_weight(gpui::FontWeight::NORMAL)
-                                                    .text_color(rgba(theme.fg1))
-                                                    .child(branch),
-                                            )
-                                        })
-                                        .child(
-                                            div()
-                                                .id(gpui::ElementId::Name(
-                                                    format!(
-                                                        "remote-session-add-{name}-{}",
-                                                        project.id
-                                                    )
-                                                    .into(),
-                                                ))
-                                                .w(px(20.))
-                                                .h(px(20.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .text_size(px(13.))
-                                                .font_weight(gpui::FontWeight::NORMAL)
-                                                .text_color(rgba(theme.fg1))
-                                                .invisible()
-                                                .group_hover(project_group.clone(), |style| {
-                                                    style.visible()
-                                                })
-                                                .hover(|style| {
-                                                    style
-                                                        .bg(rgba(theme.bg2))
-                                                        .text_color(rgba(theme.accent))
-                                                })
-                                                .on_click(cx.listener({
-                                                    let host_name = spawn_host.clone();
-                                                    let proj_id = spawn_project.clone();
-                                                    move |this, _event, window, cx| {
-                                                        cx.stop_propagation();
-                                                        this.new_session_target =
-                                                            Some(NewSessionTarget::Remote {
-                                                                host: host_name.clone(),
-                                                                project: proj_id.clone(),
-                                                            });
-                                                        this.palette_open = true;
-                                                        this.palette_index = 0;
-                                                        this.palette_scroll.scroll_to_item(0);
-                                                        this.palette_input
-                                                            .update(cx, |input, cx| {
-                                                                input.reset(cx)
-                                                            });
-                                                        this.palette_input
-                                                            .focus_handle(cx)
-                                                            .focus(window, cx);
-                                                        dismiss_context_menus(
-                                                            &mut this.session_menu,
-                                                            &mut this.tree_menu,
-                                                        );
-                                                        cx.notify();
-                                                    }
-                                                }))
-                                                .child(panel_icon(PLUS_ICON, theme.fg1)),
-                                        ),
-                                ),
-                        );
+                        pnode =
+                            pnode.child(self.render_project_row(project, Some(&name), theme, cx));
                         if !project_collapsed {
                             for agent in rsnap.agents_of(&project.id) {
-                                let id = agent.id.clone();
-                                let active = self.active.as_deref() == Some(&id);
-                                let status = agent.status;
-                                let is_error =
-                                    agent.title.contains("异常") || agent.title.contains("错误");
-                                let att = compute_attention_style(
-                                    status,
-                                    agent.seen || active,
-                                    is_error,
-                                    self.pulse_phase,
-                                    theme,
-                                );
-                                let row = div()
-                                    .id(gpui::ElementId::Name(id.clone().into()))
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .h(px(26.))
-                                    .pl(px(24.))
-                                    .pr_2()
-                                    .text_size(px(11.5))
-                                    .when(att.is_alerting && att.text_color.is_some(), |el| {
-                                        el.text_color(rgba(att.text_color.unwrap()))
-                                    })
-                                    .when(!att.is_alerting, |el| {
-                                        el.text_color(rgba(if active {
-                                            theme.fg0
-                                        } else {
-                                            theme.fg1
-                                        }))
-                                    })
-                                    .hover(|s| s.bg(rgba(theme.bg2)))
-                                    .when(att.is_alerting && att.bg_color.is_some(), |el| {
-                                        el.bg(rgba(att.bg_color.unwrap()))
-                                    })
-                                    .when(!att.is_alerting && active, |el| el.bg(rgba(theme.bg2)))
-                                    .on_click(cx.listener({
-                                        let id = id.clone();
-                                        move |this, _ev, window, cx| {
-                                            this.open_remote_agent(&id, cx);
-                                            this.focus_agent(&id, window, cx);
-                                        }
-                                    }))
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        cx.listener({
-                                            let id = id.clone();
-                                            move |this, ev: &gpui::MouseDownEvent, window, cx| {
-                                                this.focus.focus(window, cx);
-                                                this.tree_menu = None;
-                                                this.session_menu = Some(SessionMenu {
-                                                    agent: id.clone(),
-                                                    position: ev.position,
-                                                    remote: true,
-                                                });
-                                                this.palette_open = false;
-                                                cx.stop_propagation();
-                                                cx.notify();
-                                            }
-                                        }),
-                                    )
-                                    .child(render_status_indicator(
-                                        status,
-                                        is_error,
-                                        self.spinner_frame,
-                                        theme,
-                                    ))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .child(truncate(&agent.title, 20)),
-                                    );
-                                pnode = pnode.child(row);
+                                pnode = pnode.child(self.render_agent_row(agent, true, theme, cx));
                             }
                         }
                         rnode = rnode.child(pnode);
@@ -6234,7 +6147,8 @@ impl Render for MuxlaneApp {
                         muxlane_core::model::AgentStatus::Blocked => theme.yellow,
                         muxlane_core::model::AgentStatus::Done => theme.green,
                         muxlane_core::model::AgentStatus::Working => theme.accent,
-                        muxlane_core::model::AgentStatus::Idle => theme.fg2,
+                        muxlane_core::model::AgentStatus::Idle
+                        | muxlane_core::model::AgentStatus::Unknown => theme.fg2,
                     };
                     let agent_id = t.agent.clone();
                     let toast_id = t.id;
@@ -6542,7 +6456,7 @@ fn render_status_indicator(
                 .rounded_full()
                 .bg(rgba(theme.green)),
         ),
-        muxlane_core::model::AgentStatus::Idle => {
+        muxlane_core::model::AgentStatus::Idle | muxlane_core::model::AgentStatus::Unknown => {
             container.child(div().w(px(5.)).h(px(5.)).rounded_full().bg(rgba(theme.fg2)))
         }
     }

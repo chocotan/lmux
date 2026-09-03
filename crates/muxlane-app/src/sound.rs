@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, OnceLock};
 
 static SOUND_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
@@ -15,27 +16,56 @@ pub enum SoundKind {
     Request,
 }
 
+#[derive(Debug)]
+enum NotificationRequest {
+    Play(SoundKind),
+    Desktop { title: String, body: String },
+}
+
+fn notification_sender() -> &'static mpsc::Sender<NotificationRequest> {
+    static SENDER: OnceLock<mpsc::Sender<NotificationRequest>> = OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(request) = rx.recv() {
+                match request {
+                    NotificationRequest::Play(sound) => play_sound_now(sound),
+                    NotificationRequest::Desktop { title, body } => {
+                        let _ = notify_rust::Notification::new()
+                            .appname("Muxlane")
+                            .summary(&title)
+                            .body(&body)
+                            .show();
+                    }
+                }
+            }
+        });
+        tx
+    })
+}
+
 pub fn play_sound(sound: SoundKind) {
     if std::env::var_os("MUXLANE_DISABLE_SOUND").is_some() || std::env::var_os("NEXTEST").is_some()
     {
         return;
     }
+    let _ = notification_sender().send(NotificationRequest::Play(sound));
+}
 
-    std::thread::spawn(move || {
-        let data = match sound {
-            SoundKind::Done => SOUND_DONE,
-            SoundKind::Request => SOUND_REQUEST,
-        };
+fn play_sound_now(sound: SoundKind) {
+    let data = match sound {
+        SoundKind::Done => SOUND_DONE,
+        SoundKind::Request => SOUND_REQUEST,
+    };
 
-        let tmp = temp_sound_path();
-        if let Ok(mut file) = std::fs::File::create(&tmp) {
-            if file.write_all(data).is_ok() {
-                drop(file);
-                let _ = run_player(&tmp);
-            }
-            let _ = std::fs::remove_file(&tmp);
+    let tmp = temp_sound_path();
+    if let Ok(mut file) = std::fs::File::create(&tmp) {
+        if file.write_all(data).is_ok() {
+            drop(file);
+            let _ = run_player(&tmp);
         }
-    });
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 fn temp_sound_path() -> PathBuf {
@@ -86,13 +116,8 @@ pub fn send_desktop_notification(title: &str, body: &str) {
         return;
     }
 
-    let title = title.to_string();
-    let body = body.to_string();
-    std::thread::spawn(move || {
-        let _ = notify_rust::Notification::new()
-            .appname("Muxlane")
-            .summary(&title)
-            .body(&body)
-            .show();
+    let _ = notification_sender().send(NotificationRequest::Desktop {
+        title: title.to_string(),
+        body: body.to_string(),
     });
 }
