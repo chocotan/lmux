@@ -1,4 +1,7 @@
-# lmux 极致架构审查报告
+# Muxlane 极致架构审查报告
+
+> [!NOTE]
+> 本文保留原审查基线与结论，但其中产品、crate、类型、命令和路径标识已按当前品牌统一；在所列历史提交中，部分字面标识可能不同。
 
 > **基线**：branch `fix/remote-shell-and-alerts`，HEAD `0238527` + 工作区未提交改动，6 crates / ~17,883 行（不含 target）。
 > **审查方式**：3 个独立审查 agent 并行（工作区架构、app.rs 方法级拆解、全仓可维护性），关键结论经人工交叉抽查验证（8 项抽查，7 项属实，1 项误报已剔除）。
@@ -11,10 +14,10 @@
 
 **底层三分之二（core/term/store）是健康的。** 问题集中在一个根因上：
 
-**`LmuxServer` 零封装（字段全 `pub`）+ `lmux-app` 越权直写** →
+**`MuxlaneServer` 零封装（字段全 `pub`）+ `muxlane-app` 越权直写** →
 - server 的 RPC handler 业务逻辑在 UI 层被逐行复制了一份（spawn_preset ≈ AGENT_SPAWN handler；confirm_delete 152 行复写 destroy_sessions），两份实现已经漂移；
 - UI 线程 ~20 处 `blocking_lock/blocking_write` tokio 锁 + 自认 hack `futures_lite_block`；
-- `app.rs` 膨胀为 6632 行上帝对象（`LmuxApp` 59 字段、`render()` 1332 行），其中 ~900 行业务逻辑完全不可测（全文件仅 5 个单测，全是纯函数）。
+- `app.rs` 膨胀为 6632 行上帝对象（`MuxlaneApp` 59 字段、`render()` 1332 行），其中 ~900 行业务逻辑完全不可测（全文件仅 5 个单测，全是纯函数）。
 
 先做阶段 1/2（依赖边矫正 + ServerApi 抽取），一半严重问题连带消失，app.rs 自然瘦掉 ~1500 行；之后机械拆文件，风险可控。
 
@@ -23,9 +26,9 @@
 | 结论 | 独立提出方 |
 |---|---|
 | app.rs 用"同 struct 多 `impl` 块分文件"拆（Zed workspace 模式），不引状态管理框架 | 架构审查 + 拆解方案 |
-| `LmuxServer` 字段私有化 + 抽 `server/src/api.rs` | 架构审查 + 可维护性 |
+| `MuxlaneServer` 字段私有化 + 抽 `server/src/api.rs` | 架构审查 + 可维护性 |
 | 持久化 4 份拷贝收敛到 `store::PersistedApp::from_snapshot` | 架构审查 + 可维护性 |
-| 删 `ui.rs`（未编译的 1 行尸体）、`lmux-client→lmux-server` 移 dev-dependencies | 三方全中 |
+| 删 `ui.rs`（未编译的 1 行尸体）、`muxlane-client→muxlane-server` 移 dev-dependencies | 三方全中 |
 | 不拆 core、不并 store、不动 term、不换 RPC 协议、不动 GPUI rev | 三方全中 |
 
 ### 唯一分歧及裁决
@@ -34,7 +37,7 @@
 - 架构审查：放 `notifications.rs` 文件模块即可；
 - 拆解方案：应拆成**子 Entity**——toast 100ms 动画每帧 `cx.notify()` 触发的是**整窗口重绘**，拆出后只重绘浮层区域，性能收益真实；且输入输出边界干净（输入 `(agent, from, to, message)`，输出仅"点击跳转"一个事件），不落盘不参与 persist。
 
-→ **裁决：先按文件拆（纯移动），在 PR4 单独升级为子 Entity**（定义 `NotificationCenterEvent::JumpToAgent(AgentId)`，LmuxApp 在 `new()` 里 `cx.subscribe` 转发给 `jump_to_agent`）。这是整个拆解序列中唯一含行为语义变更的 PR，可独立回滚。
+→ **裁决：先按文件拆（纯移动），在 PR4 单独升级为子 Entity**（定义 `NotificationCenterEvent::JumpToAgent(AgentId)`，MuxlaneApp 在 `new()` 里 `cx.subscribe` 转发给 `jump_to_agent`）。这是整个拆解序列中唯一含行为语义变更的 PR，可独立回滚。
 
 ---
 
@@ -44,24 +47,24 @@
 
 ```
                     ┌──────────────────────────────────────────────────┐
-                    │                    lmux-app                      │
-                    │  (唯一二进制; bin "lmux"; UI + 业务逻辑大杂烩)      │
+                    │                    muxlane-app                      │
+                    │  (唯一二进制; bin "muxlane"; UI + 业务逻辑大杂烩)      │
                     └──┬───────┬─────────┬─────────┬─────────┬─────────┘
                        │       │         │         │         │
         ┌──────────────▼─┐  ┌──▼──────┐  │    ┌────▼─────┐  ┌▼─────────┐
-        │   lmux-client   │  │lmux-term│  │    │lmux-server│ │lmux-store│
+        │   muxlane-client   │  │muxlane-term│  │    │muxlane-server│ │muxlane-store│
         │  RPC + RemoteHost│ │PTY+vterm│  │    │ socket RPC │ │ state.json│
         └──┬────┬────┬────┘  └──┬──────┘  │    └──┬──┬──┬──┘ └──┬───────┘
            │    │    │          │         │       │  │  │        │
            │    │    └──────────│─────────┼───────┘  │  └────────┘
-           │    └──► lmux-server│(!!)     │     lmux-term, lmux-store
+           │    └──► muxlane-server│(!!)     │     muxlane-term, muxlane-store
            │        (仅为 tests/remote.rs) │
            │                             │
            ▼                             ▼
         ┌────────────────────────────────────┐
-        │             lmux-core              │
+        │             muxlane-core              │
         │ model/protocol/pane/preset/        │
-        │ detect/hook/auth (无 lmux 依赖) ✓   │
+        │ detect/hook/auth (无 muxlane 依赖) ✓   │
         └────────────────────────────────────┘
 ```
 
@@ -69,13 +72,13 @@
 
 ---
 
-### P0-1 【致命】领域逻辑大规模泄漏进 lmux-app，且与 server RPC handler 逐行重复
+### P0-1 【致命】领域逻辑大规模泄漏进 muxlane-app，且与 server RPC handler 逐行重复
 
-app.rs 直接以 `blocking_lock` 操纵 `LmuxServer` 的全部 pub 字段（state/sessions/subs/lifecycle/dirty），把 server 的 RPC handler 逻辑在 UI 层复制了一遍：
+app.rs 直接以 `blocking_lock` 操纵 `MuxlaneServer` 的全部 pub 字段（state/sessions/subs/lifecycle/dirty），把 server 的 RPC handler 逻辑在 UI 层复制了一遍：
 
 | app.rs 位置 | 复制了 server 哪段逻辑 | server 中被复制处 |
 |---|---|---|
-| `spawn_preset` (1474–1579) | 生成 agent_id → tmux 名 → `LaunchCfg` 注入 `LMUX_AGENT_ID/LMUX_SOCKET/LMUX_HOOK_TOKEN` → `PtySession::spawn` → 写 sessions/state → `dirty.bump()` | `AGENT_SPAWN` handler，lib.rs:379–440，几乎逐行同构 |
+| `spawn_preset` (1474–1579) | 生成 agent_id → tmux 名 → `LaunchCfg` 注入 `MUXLANE_AGENT_ID/MUXLANE_SOCKET/MUXLANE_HOOK_TOKEN` → `PtySession::spawn` → 写 sessions/state → `dirty.bump()` | `AGENT_SPAWN` handler，lib.rs:379–440，几乎逐行同构 |
 | `spawn_shell_for_pane` (1580–1637) | 同上（shell 变体） | 同上 |
 | `delete_session` 本地分支 (1869–1902) | sessions.remove → `kill_persistent` → `subs.mark_agent_exit` → `state.remove_agent` → `dirty.bump` | `AGENT_DELETE` handler，lib.rs:462–476 |
 | `confirm_delete::LocalProject` (1998–2150, 152 行) | **完整重写** `destroy_sessions`（收集 agent→杀 tmux→区分 destroyed/failed→删 state→条件删 project） | `PROJECT_DELETE` handler + `destroy_sessions()`，lib.rs:216–232, 472–516 |
@@ -87,11 +90,11 @@ app.rs 直接以 `blocking_lock` 操纵 `LmuxServer` 的全部 pub 字段（stat
 2. **UI 线程 ~20 处 `blocking_lock/blocking_write/blocking_read`**（app.rs:747, 1024, 1117, 1284, 1487, 1543, 1558, 1582, 1604, 1611, 1699, 1842–1843, 1898–1902, 2005–2051…）。tokio Mutex 的 `blocking_lock` 在 UI 线程与 async handler 抢锁时卡帧；代码里有自认的 hack：`futures_lite_block`（app.rs:4915–4927，注释「P0 临时：短超时阻塞拿会话表」= try_lock → sleep 2ms → blocking_lock）。若 tokio worker 全忙，UI 线程死锁等待。
 3. **`lifecycle` 锁协议被跨层共享**：app 在 UI 线程 `blocking_lock()`（1487, 1582, 2005），server handler 在 async 里 `lock().await`（lib.rs:379, 497）——同一个互斥量两种锁法。
 
-**根因**：`LmuxServer` 所有字段 pub（lib.rs:42–49 实测确认：`pub state / pub runtime / pub sessions / pub subs / pub dirty`）、没有内部 API 层。
+**根因**：`MuxlaneServer` 所有字段 pub（lib.rs:42–49 实测确认：`pub state / pub runtime / pub sessions / pub subs / pub dirty`）、没有内部 API 层。
 
-### P0-2 【依赖方向错误】lmux-client → lmux-server 是伪依赖
+### P0-2 【依赖方向错误】muxlane-client → muxlane-server 是伪依赖
 
-`crates/lmux-client/Cargo.toml:16` 把 `lmux-server` 声明为正式依赖（实测确认），但 `grep -rn lmux_server crates/lmux-client/src/` 结果为空——唯一使用处是集成测试 `tests/remote.rs:4`。后果：client 传递依赖 lmux-store、fs2、bytes，依赖闭包几乎等于整个 workspace；client 是"连远端"的 crate 却编译进了本机 server。应移入 `[dev-dependencies]`（不构成环）。
+`crates/muxlane-client/Cargo.toml:16` 把 `muxlane-server` 声明为正式依赖（实测确认），但 `grep -rn muxlane_server crates/muxlane-client/src/` 结果为空——唯一使用处是集成测试 `tests/remote.rs:4`。后果：client 传递依赖 muxlane-store、fs2、bytes，依赖闭包几乎等于整个 workspace；client 是"连远端"的 crate 却编译进了本机 server。应移入 `[dev-dependencies]`（不构成环）。
 
 ### P0-3 【职责错位】server 端领域逻辑写在 UI 二进制的 main.rs 里
 
@@ -101,15 +104,15 @@ app.rs 直接以 `blocking_lock` 操纵 `LmuxServer` 的全部 pub 字段（stat
 - **Hook 注入**（main.rs:226–256）：写 `~/.claude/settings.json`、`~/.codex/config.toml`、装插件；
 - **headless 持久化循环**（main.rs:339–370）。
 
-lmux-server crate 有 state.rs/subs.rs，却没有任何 supervisor 模块——「会话生命周期管理」这个 server 的本职散落在 UI 进程入口。
+muxlane-server crate 有 state.rs/subs.rs，却没有任何 supervisor 模块——「会话生命周期管理」这个 server 的本职散落在 UI 进程入口。
 
-### P1-4 【上帝对象】app.rs 6632 行 / `LmuxApp` 59 字段 / `render()` 1332 行
+### P1-4 【上帝对象】app.rs 6632 行 / `MuxlaneApp` 59 字段 / `render()` 1332 行
 
 实测结构：
 
 | 块 | 行数 |
 |---|---|
-| `pub struct LmuxApp`（字段） | 220–286（59 字段，人工复核确认） |
+| `pub struct MuxlaneApp`（字段） | 220–286（59 字段，人工复核确认） |
 | `pub fn new`（含 4 个后台 task 装配） | ~384 |
 | `render()` 单个方法 | **1332** |
 | `render_pane_node` | ~450 |
@@ -123,7 +126,7 @@ lmux-server crate 有 state.rs/subs.rs，却没有任何 supervisor 模块——
 
 ### P1-5 【协议助手放错 crate】client 依赖 term 只为 base64
 
-`lmux-client/src/lib.rs` 对 `lmux_term` 的全部使用是 `b64_encode/b64_decode`（156, 166, 172, 256 行，实测确认）。而 `b64_*`、`strip_ansi`、`extract_osc_title` 定义在 `lmux-term/src/lib.rs:17–124`，注释自称「wire 协议用」。**wire 编解码助手住在终端模拟 crate**，导致 client 为 base64 拖进 portable-pty + alacritty_terminal。这三个函数应迁往 `lmux-core::protocol`（`strip_ansi`/`extract_osc_title` 本来就是 detect 的输入预处理，main.rs:172–180 正是把 term 的输出喂给 core 的 detect）。
+`muxlane-client/src/lib.rs` 对 `muxlane_term` 的全部使用是 `b64_encode/b64_decode`（156, 166, 172, 256 行，实测确认）。而 `b64_*`、`strip_ansi`、`extract_osc_title` 定义在 `muxlane-term/src/lib.rs:17–124`，注释自称「wire 协议用」。**wire 编解码助手住在终端模拟 crate**，导致 client 为 base64 拖进 portable-pty + alacritty_terminal。这三个函数应迁往 `muxlane-core::protocol`（`strip_ansi`/`extract_osc_title` 本来就是 detect 的输入预处理，main.rs:172–180 正是把 term 的输出喂给 core 的 detect）。
 
 ### P1-6 【持久化四份拷贝】Snapshot→PersistedApp 转换重复 4 处
 
@@ -137,7 +140,7 @@ lmux-server crate 有 state.rs/subs.rs，却没有任何 supervisor 模块——
 
 ### P1-7 【错误字符串当协议】远程版本兼容靠 `contains` 中文字符串分派
 
-- app.rs:3677：`text.contains("远端 lmux 版本过旧")` → 触发升级引导
+- app.rs:3677：`text.contains("远端 muxlane 版本过旧")` → 触发升级引导
 - app.rs:3739：`text.contains("unknown_method") && text.contains("project.add")` → 转升级流程
 
 （行号以当前工作树实测为准。）错误在 client（anyhow string）→ UI 再解析人类可读文案做控制流。改文案即破坏逻辑，且英文 locale 下直接失效。client 应定义类型化错误 `RemoteCompatError::VersionSkew { expected, actual }` / `MethodUnsupported(method)`。
@@ -145,19 +148,19 @@ lmux-server crate 有 state.rs/subs.rs，却没有任何 supervisor 模块——
 ### P2-8 其他结构性问题
 
 1. **ui.rs 是 1 行死文件**（实测确认）：内容为「语法错误太多，此文件作为 P0 的 UI 模块占位（将在下一步重写）」，未被任何 `mod` 声明引用，**根本未被编译**。
-2. **`data_dir()` 双实现**：main.rs:32（私有）与 tunnel.rs:163（`pub fn`，public API！）各自实现 XDG 逻辑，逐字相同。应在 core 提供 `lmux_core::paths::data_dir()`。
+2. **`data_dir()` 双实现**：main.rs:32（私有）与 tunnel.rs:163（`pub fn`，public API！）各自实现 XDG 逻辑，逐字相同。应在 core 提供 `muxlane_core::paths::data_dir()`。
 3. **i18n 半途而废**：`i18n::text()` 仅 19 处调用，app.rs 内 **128 处硬编码中文**（含 `"取消"`×5、`"设置"`×2、`format_relative_time` 内部按语言硬编码两套格式串）。要么贯彻、要么删掉 i18n，混合状态最差。
 4. **`Connection::call` 丢弃事件帧**（client/lib.rs:63–70：`if v.get("event").is_some() { continue; }`）：call 期间到达的事件被静默吞掉；且无请求超时，对端不回包则永久挂起。
-5. **bootstrap 二进制定位靠猜**（tunnel.rs:269–277）：`current_exe()` → 猜 `../release/lmux` → fallback 自身，叠加 `LMUX_BOOTSTRAP_BINARY` env，三层启发式。
+5. **bootstrap 二进制定位靠猜**（tunnel.rs:269–277）：`current_exe()` → 猜 `../release/muxlane` → fallback 自身，叠加 `MUXLANE_BOOTSTRAP_BINARY` env，三层启发式。
 6. **明文密码入库**：`PersistedRemoteAuth::Password { password: Option<String> }`（store/lib.rs:74–80）直接 JSON 落盘 state.json，缺 secret provider 抽象（keyring / 至少 chmod 600 单独文件）。
 7. **通知/声音策略在 UI 内**：`push_notification`（app.rs:872–995, 123 行）做去重/静音/落通知中心，其中「blocked/done 才进通知中心」这类策略是纯逻辑，可下沉测起来。
 8. **CI 只有 release.yml 且 untracked**：没有任何 `cargo test/clippy/fmt` 门禁——这就是 app.rs 能烂到 6632 行的直接原因。
-9. **`LmuxServer` 三级构造函数链**：`new → new_with_runtime → new_with_runtime_and_auth`，中间级除被 `new` 调用外全仓库 0 引用。
+9. **`MuxlaneServer` 三级构造函数链**：`new → new_with_runtime → new_with_runtime_and_auth`，中间级除被 `new` 调用外全仓库 0 引用。
 10. **`#[allow(dead_code)]` 滥用**：tunnel.rs:2 文件级、app.rs:340 `Notification`、app.rs:6341 `AttentionStyle.border_color`（被 compute 但从未被渲染消费——"计算了白算"）、theme.rs:80 `Theme.mode` 无人读。
 
 ---
 
-## 第二部分 · LmuxApp 拆解方案（方法级）
+## 第二部分 · MuxlaneApp 拆解方案（方法级）
 
 ### §1 字段分组（app.rs 220–286，59 字段）
 
@@ -199,31 +202,31 @@ lmux-server crate 有 state.rs/subs.rs，却没有任何 supervisor 模块——
 ### §3 拆分策略与 GPUI 取舍
 
 **第一级（主体，占 80% 工作量）：「字段留主体 + impl 分文件」。**
-Rust 允许同一 struct 的多个 `impl` 块分布在不同文件（`impl LmuxApp { ... }` 在 panes.rs 里，字段仍定义于 app/mod.rs）。零行为变更的纯移动：`cx.listener(|this, ...|)` 闭包仍拿到 `&mut LmuxApp`，`cx.subscribe`/`cx.spawn` 的 `this.update` 目标类型不变，`persist()` 仍能读到所有字段。**GPUI 取舍**：cx.listener 的强类型绑定天然反对把 UI 回调搬出主体——palette 的 `execute_palette_item` 直接调 `split_pane/close_split_pane/toggle_maximize/toggle_theme`，若拆成子 Entity 要么定义 20+ 个事件要么造命令 enum 再回流，纯粹搬运复杂度。Zed 自身（workspace.rs 数千行 + 分域 impl）就是这个模式。
+Rust 允许同一 struct 的多个 `impl` 块分布在不同文件（`impl MuxlaneApp { ... }` 在 panes.rs 里，字段仍定义于 app/mod.rs）。零行为变更的纯移动：`cx.listener(|this, ...|)` 闭包仍拿到 `&mut MuxlaneApp`，`cx.subscribe`/`cx.spawn` 的 `this.update` 目标类型不变，`persist()` 仍能读到所有字段。**GPUI 取舍**：cx.listener 的强类型绑定天然反对把 UI 回调搬出主体——palette 的 `execute_palette_item` 直接调 `split_pane/close_split_pane/toggle_maximize/toggle_theme`，若拆成子 Entity 要么定义 20+ 个事件要么造命令 enum 再回流，纯粹搬运复杂度。Zed 自身（workspace.rs 数千行 + 分域 impl）就是这个模式。
 
 **第二级（唯一推荐拆出的子 Entity）：通知中心。**
 理由：(a) 输入输出边界干净；(b) 独立 `cx.notify()` 有真实性能收益（toast 动画不再触发整窗口重绘）；(c) 不落盘、不参与 persist。跳转事件定义 `NotificationCenterEvent::JumpToAgent(AgentId)`。
 
 **第三级（渲染辅助模块）：widgets.rs / sidebar.rs。**
-`render_pane_node`、机器树渲染保持为 `impl LmuxApp` 方法（listener 需要 `cx` + `this`），只是物理搬家；`render_status_indicator` 等纯函数接收 `&Theme` 值参数，放 widgets.rs 无约束。
+`render_pane_node`、机器树渲染保持为 `impl MuxlaneApp` 方法（listener 需要 `cx` + `this`），只是物理搬家；`render_status_indicator` 等纯函数接收 `&Theme` 值参数，放 widgets.rs 无约束。
 
 **明确不拆成 Entity 的**：palette（回调面太宽）、三个对话框（`dialog_error` 共享错误槽，提交逻辑深度耦合 `remotes`/`last_snapshot`/`server`）、设置页（纯外观）。
 
 ### §4 具体风险点
 
 1. **persist() 序列化面**：读 `last_snapshot`、`remotes`→`PersistedRemote`（auth 枚举双向映射，768-842）、`pane_tree`、`active_pane`、外观四字段。字段声明留在 app/mod.rs 则 persist 不用改。PR4 后确认 persist 不引用通知字段（当前确实不引用，安全）。
-2. **cx.subscribe 归属**：`create_local_term`(1077)/`create_remote_term`(1099) 内 `cx.subscribe(&term, … mark_agent_working)` 的订阅者是 LmuxApp，两方法与 `mark_agent_working` 必须同在 sessions.rs（或保持 pub(crate) 可见）。
-3. **deferred/后台任务的 self 引用**：`new()` 里 4 个 `cx.spawn` 循环（本地事件泵、秒级轮询、动画 tick、远程事件泵）持有 `WeakEntity<LmuxApp>`——**new() 不搬**。动画 tick 里的 `toasts.retain`/`error_toast` 清理在 PR4 后改为 `this.notifications.update(cx, …)`，`should_animate` 拆成"app 侧 attention 查询 + 通知侧 has_activity"。
+2. **cx.subscribe 归属**：`create_local_term`(1077)/`create_remote_term`(1099) 内 `cx.subscribe(&term, … mark_agent_working)` 的订阅者是 MuxlaneApp，两方法与 `mark_agent_working` 必须同在 sessions.rs（或保持 pub(crate) 可见）。
+3. **deferred/后台任务的 self 引用**：`new()` 里 4 个 `cx.spawn` 循环（本地事件泵、秒级轮询、动画 tick、远程事件泵）持有 `WeakEntity<MuxlaneApp>`——**new() 不搬**。动画 tick 里的 `toasts.retain`/`error_toast` 清理在 PR4 后改为 `this.notifications.update(cx, …)`，`should_animate` 拆成"app 侧 attention 查询 + 通知侧 has_activity"。
 4. **push_notification 签名改造**（PR4 唯一非纯移动）：拆出后在**调用点**先用留在 app 侧的 helper 解析 `(machine_name, project_name, agent_type, focused)`，组装 `NotificationDraft` 传给子 Entity；`sound_enabled` 作参数传入或在子 Entity 存快照 + setter。
 5. **tests 模块迁移映射**（全部 `use super::*` 即可无缝跟随）：notification_body_* → notifications.rs；upload_progress_text_* → widgets.rs；local_project_path_* → dialogs.rs；dismissing_context_menus_* → menus.rs；explicit_split_launch_config_* → panes.rs。
 6. **render() 切分顺序**：先叶后干——(1) 浮层已独立直接搬；(2) 机器树 ~760 行内联块抽 `render_machine_tree`（保持 `&mut self` 方法形态，不要改成传参自由函数）；(3) 底部按钮条；(4) `render_pane_node` 随 PR2 走。根部 action 绑定与 on_key_down **永远留在 mod.rs**。
-7. **UI 冒烟依赖**：`LMUX_TEST_AUTO_OPEN`（app.rs:760）与 `scripts/ui-smoke.sh` 的像素断言是主要回归网；smoke 明确**不覆盖**分隔线鼠标拖拽，PR2 后需一次人工拖拽验证。
+7. **UI 冒烟依赖**：`MUXLANE_TEST_AUTO_OPEN`（app.rs:760）与 `scripts/ui-smoke.sh` 的像素断言是主要回归网；smoke 明确**不覆盖**分隔线鼠标拖拽，PR2 后需一次人工拖拽验证。
 
 ### §5 PR 迁移序列（7 个）
 
 | PR | 内容 | 预计 diff | 验证 |
 |---|---|---|---|
-| **PR1 资产与纯函数下沉** | icons.rs + widgets.rs 全部条目，main.rs 改 import；删除 ui.rs | ~800 行（纯移动） | cargo check/test/clippy -p lmux-app；smoke 全量 |
+| **PR1 资产与纯函数下沉** | icons.rs + widgets.rs 全部条目，main.rs 改 import；删除 ui.rs | ~800 行（纯移动） | cargo check/test/clippy -p muxlane-app；smoke 全量 |
 | **PR2 panes.rs** | panes 全部方法 + 类型 + 测试 | ~1100 行 | cargo test；smoke（split/maximize/close-tab）；**人工：拖分隔线、双击等分** |
 | **PR3 sessions.rs + remotes.rs** | 两模块全部条目 | ~1400 行 | cargo test + smoke；人工：连接对话框打开/取消、bootstrap 引导 |
 | **PR4 NotificationCenter 子 Entity** | E 组字段迁出 + push_notification 签名改造 + JumpToAgent 事件 + 动画 tick 改造 | ~650 行（含 ~80 行真实重构） | cargo test；smoke 的 02-working-spinner/done-notification 段；人工：toast 6s 消失、点击跳转、聚焦 agent 不弹 toast |
@@ -273,7 +276,7 @@ Rust 允许同一 struct 的多个 `impl` 块分布在不同文件（`impl LmuxA
 
 **H9. 本地/远程侧栏树渲染 ~140 行近似复制粘贴**（app.rs:5100-5200 vs 5600-5760）：agent row 的 div 构造除 `open_agent` vs `open_remote_agent`、`session_menu.remote` 布尔值和 id 前缀外逐字相同；project 行 `＋` 按钮两个版本 ~50 行重复。→ 提取 `render_agent_row`/`render_project_row`，本地/远程只传回调差异。
 
-**H10. `LmuxServer` 三级构造函数链**：见 P2-8.9。
+**H10. `MuxlaneServer` 三级构造函数链**：见 P2-8.9。
 
 ### 中严重度
 
@@ -297,11 +300,11 @@ Rust 允许同一 struct 的多个 `impl` 块分布在不同文件（`impl LmuxA
 
 **M10. 后台任务生命周期无管理**：mirror task 与 remote 命令泵永生，仅靠 `mirror_cancel` AtomicBool 手工取消；`sound.rs:25/85` 每次播放/桌面通知 `std::thread::spawn` 新线程（突发 50 条通知 = 50 线程）；server 每 4ms 的 subs 泵与每连接 reader task 的 JoinHandle 全部丢弃。→ TaskGroup/cancellation token 统一管理；sound 用单专用线程 + channel。
 
-**M11. 依赖声明与实际使用脱节**：server 的 `thiserror/ulid/base64` 在 src/ 中 0 处使用；term 的 `ulid/thiserror` 0 处使用；client 的 `lmux-server` 是正式依赖但 src/ 0 引用。
+**M11. 依赖声明与实际使用脱节**：server 的 `thiserror/ulid/base64` 在 src/ 中 0 处使用；term 的 `ulid/thiserror` 0 处使用；client 的 `muxlane-server` 是正式依赖但 src/ 0 引用。
 
 **M12. 事件/方法名常量体系只覆盖一半**：常量存在于 protocol.rs:66-94，但 integration.rs:226 裸写 `"term.data"`、:290 裸写 `"agent.status_changed"`；features 比较两边裸字符串。→ 补 `features::*` 常量；测试改用常量。
 
-**M13. hook.rs 单文件 597 行混四种关注点**：`#[cfg(test)] mod tests` 插在文件中间（261-349）；三个 JS 字符串（REPORT_SCRIPT/OPENCODE_PLUGIN/PI_EXTENSION）各自复制了相同的 `lmuxEnv()` 和 `report()` 实现 ~40 行 ×3。→ JS 脚本移到 `hooks/` 目录 `include_str!`；Rust 侧拆 `hook/claude.rs`、`hook/codex.rs`、`hook/plugins.rs`。
+**M13. hook.rs 单文件 597 行混四种关注点**：`#[cfg(test)] mod tests` 插在文件中间（261-349）；三个 JS 字符串（REPORT_SCRIPT/OPENCODE_PLUGIN/PI_EXTENSION）各自复制了相同的 `muxlaneEnv()` 和 `report()` 实现 ~40 行 ×3。→ JS 脚本移到 `hooks/` 目录 `include_str!`；Rust 侧拆 `hook/claude.rs`、`hook/codex.rs`、`hook/plugins.rs`。
 
 **M14. `BootstrapProgress` 位打包进单个 AtomicU64**（client/host.rs:196-228）：`(overall << 8) | phase` 编码 + 解码还丢失 `done_bytes/total_bytes`。为省一把锁引入手工位布局。→ 换 `Mutex<Option<BootstrapProgress>>`。
 
@@ -340,19 +343,19 @@ Rust 允许同一 struct 的多个 `impl` 块分布在不同文件（`impl LmuxA
 
 ```
                               ┌────────────────────────────┐
-                              │         lmux-app           │
-                              │  bin "lmux"：纯 UI + 组装    │
+                              │         muxlane-app           │
+                              │  bin "muxlane"：纯 UI + 组装    │
                               │  不再直写 server 内部字段     │
                               └──┬──────┬──────────┬───────┘
                                  │      │          │
                  ┌───────────────▼──┐ ┌─▼────────┐ │
-                 │    lmux-server    │ │lmux-store│ │
+                 │    muxlane-server    │ │muxlane-store│ │
                  │  api.rs (ServerApi)│ │(不变)    │ │
                  │  supervisor.rs ◄──┼─┤          │ │
                  │  rpc.rs(薄 handler)│ └──────────┘ │
                  └──┬──────┬─────────┘              │
                     │      │        ┌───────────────▼──┐
-                    │      │        │   lmux-client     │
+                    │      │        │   muxlane-client     │
                     │      │        │ rpc.rs(Connection)│
                     │      │        │ remote.rs         │
                     │      │        │ term_stream.rs ◄──┼─ (镜像流+重连，从 app 下沉)
@@ -361,20 +364,20 @@ Rust 允许同一 struct 的多个 `impl` 块分布在不同文件（`impl LmuxA
                     │      │             │   ✂ 删除 client→server、client→term 两条边
                     │      │             │
               ┌─────▼──────▼─────────────▼────┐
-              │           lmux-core           │
+              │           muxlane-core           │
               │ model/protocol(+b64)/detect    │
               │ pane/preset/hook/auth/paths    │
               └──────────────┬────────────────┘
                              │
                       ┌──────▼──────┐
-                      │  lmux-term  │   (PTY/vterm/tmux，内聚，基本不动)
+                      │  muxlane-term  │   (PTY/vterm/tmux，内聚，基本不动)
                       └─────────────┘
 ```
 
 变化清单：
 1. ✂ `client → server` 移入 `[dev-dependencies]`；
 2. ✂ `client → term` 删除（b64/strip_ansi/extract_osc_title 迁 `core::protocol`）；
-3. ➕ `server::api`：LmuxServer 字段私有化，暴露 async 命令方法；
+3. ➕ `server::api`：MuxlaneServer 字段私有化，暴露 async 命令方法；
 4. ➕ `server::supervisor`：承接 main.rs 的屏幕轮询/tmux 恢复/exit 清理；
 5. ➕ `client::term_stream`：承接 `open_remote_agent` 的镜像 attach 循环（含重连退避与 5ms 输入合批）；
 6. ➕ `core::paths`：唯一 `data_dir()`；
@@ -400,21 +403,21 @@ spawn 管线（preset→LaunchCfg→env 注入→AgentInstance）、删除级联
 - 删除死代码：`start_tunnel_socat`、`sanitize`（tunnel.rs:547/624）、`reader_handle` 字段（session.rs:129/277）、`apply_screen_update`（state.rs:196）、`RequestWriter::raw`（client lib.rs:100）、`PtySession::write`（session.rs:268）、`RemoteProbe` 单变体枚举降级、core lib.rs 未用 re-export
 - 清理未用依赖：server 的 `thiserror/ulid/base64`、term 的 `ulid/thiserror`
 - 4 个 `#[allow(dead_code)]` 逐个换成"使用或删除"（`AttentionStyle.border_color`、`Theme.mode` 删字段；uninstall hooks 接 `--uninstall-hooks` CLI）
-- 验证：基线命令 + `cargo build -p lmux-app`
+- 验证：基线命令 + `cargo build -p muxlane-app`
 
 ### 阶段 1：依赖边矫正（1 天，风险低）
 - core：protocol.rs 增加 `b64_encode/b64_decode`；`strip_ansi/extract_osc_title` 迁入 core（term 保留 `pub use` 转发一个版本周期，或直接一次改完——调用点只有 main.rs:172–180 和 client/lib.rs 4 处）
-- client：`lmux-server` 移 dev-deps；删除对 `lmux-term` 的依赖
+- client：`muxlane-server` 移 dev-deps；删除对 `muxlane-term` 的依赖
 - core：加 `paths::data_dir()`；main.rs:32 与 tunnel.rs:163 改委托
-- 验证：基线命令；`cargo tree -p lmux-client --depth 1` 确认无 server/term
+- 验证：基线命令；`cargo tree -p muxlane-client --depth 1` 确认无 server/term
 
 ### 阶段 2：ServerApi 抽取（2–3 天，**本重构的核心**，风险中）
 - 新建 `server/src/api.rs`：lib.rs:379–516 的 AGENT_SPAWN/AGENT_DELETE/PROJECT_ADD/PROJECT_DELETE handler 主体提为 async 方法（内部统一持 lifecycle 锁、统一 persist_runtime_state）；RPC handler 改一行委托（顺带拆 handle_conn 的 13 个 match 臂为独立 handle_* 方法，解决 H2）
-- `LmuxServer` 字段改 `pub(crate)`/私有，对外只留 API + 订阅句柄 + socket_path
+- `MuxlaneServer` 字段改 `pub(crate)`/私有，对外只留 API + 订阅句柄 + socket_path
 - app.rs 六处直写点改调 API：spawn_preset/spawn_shell_for_pane → `cx.background_spawn(server.spawn_agent(...))`；delete_session/confirm_delete → `delete_agent/delete_project`（删 152 行级联复写）；add_local_project → `add_project`；mark_agent_working/focus_agent 的 blocking_write → `mark_working/mark_seen`
 - 删除 `futures_lite_block` 与全部 UI 线程 blocking 锁（~20 处清零）
 - **风险**：spawn 从同步变异步，~5 处调用点改 `cx.spawn` 回调式；focus 时机需在 await 后执行——逐点过，别用 block_on 倒退
-- 验证：基线命令 + ui-smoke.sh（spawn shell、删 tab、删 project、palette spawn 四路径手测）；`grep -rn "blocking_lock\|blocking_write\|futures_lite_block" crates/lmux-app/src` 为零
+- 验证：基线命令 + ui-smoke.sh（spawn shell、删 tab、删 project、palette spawn 四路径手测）；`grep -rn "blocking_lock\|blocking_write\|futures_lite_block" crates/muxlane-app/src` 为零
 
 ### 阶段 3：持久化收敛 + supervisor 下沉（1–2 天，风险低-中）
 - store：`PersistedApp::from_snapshot(&Snapshot)` + `set_ui_prefs(...)`；4 份拷贝收敛为 1
@@ -437,7 +440,7 @@ spawn 管线（preset→LaunchCfg→env 注入→AgentInstance）、删除级联
 ### 阶段 5：app.rs 机械拆解（3–5 天）
 按第二部分 §5 的 PR1–PR7 序列执行。每个 PR 纯移动或单一重构，绝不混合。
 同步把 `open_remote_agent` 的镜像循环与 5ms 输入合批下沉 `client::term_stream.rs`（阶段 4 若已做则此处只是接线）。
-验证：每拆一个模块跑一次 `cargo check -p lmux-app`；全部完成后基线命令 + ui-smoke.sh 全量 + 人工拖拽分隔线。
+验证：每拆一个模块跑一次 `cargo check -p muxlane-app`；全部完成后基线命令 + ui-smoke.sh 全量 + 人工拖拽分隔线。
 
 ### 阶段 6：收尾（按需排期）
 - client 类型化错误（`VersionSkew/MethodUnsupported`），替换 app.rs:3677/3739 字符串分派（P1-7）
@@ -455,22 +458,22 @@ spawn 管线（preset→LaunchCfg→env 注入→AgentInstance）、删除级联
 
 ## 第六部分 · 不建议动的部分（防过度重构）
 
-1. **lmux-core 不拆 crate**。model/protocol/detect/hook/auth 共 ~2600 行、7 个模块、边界清晰、测试覆盖好（detect 10 个、pane 9 个、protocol 4 个）。lib.rs 18 行的 re-export 完全正常。
-2. **lmux-store 不合并**。236 行看着薄，但它是唯一带版本迁移语义（migrate/STORE_VERSION）和原子写（tmp+rename）的地方，被 server 与 app 双方使用；合并会造成反向依赖。要修的是转换逻辑 4 份拷贝，不是 crate 本身。
-3. **lmux-term 不动**。session/vterm/replay 是全 workspace 内聚性最好的 crate，与 GPUI 解耦干净，测试充分。tmux 依赖、`kill_persistent` 语义是产品架构决策（GUI 关闭=detach），保持。
+1. **muxlane-core 不拆 crate**。model/protocol/detect/hook/auth 共 ~2600 行、7 个模块、边界清晰、测试覆盖好（detect 10 个、pane 9 个、protocol 4 个）。lib.rs 18 行的 re-export 完全正常。
+2. **muxlane-store 不合并**。236 行看着薄，但它是唯一带版本迁移语义（migrate/STORE_VERSION）和原子写（tmp+rename）的地方，被 server 与 app 双方使用；合并会造成反向依赖。要修的是转换逻辑 4 份拷贝，不是 crate 本身。
+3. **muxlane-term 不动**。session/vterm/replay 是全 workspace 内聚性最好的 crate，与 GPUI 解耦干净，测试充分。tmux 依赖、`kill_persistent` 语义是产品架构决策（GUI 关闭=detach），保持。
 4. **不换 RPC 协议、不引事件总线框架**。newline-JSON + 1MiB 帧 + 订阅设计有 `HelloResult.features` 版本协商位，够用。
 5. **不动 GPUI rev、不抽象 UI 框架、不搞 MVU/Elm**。GPUI 的 Entity/Context 模型已经就是状态管理。
 6. **不把 pane 树模型挪出 core、不把 TermView 拆 Entity 化**——term_view.rs 1327 行虽大，但它是单一渲染域。
-7. **`LmuxApp` 保持单一根 Entity**；palette 是否升子 Entity 留到阶段 5 之后按实际疼痛决定。
+7. **`MuxlaneApp` 保持单一根 Entity**；palette 是否升子 Entity 留到阶段 5 之后按实际疼痛决定。
 8. **`lifecycle` 锁语义保留**（spawn 与 project-delete 互斥防半建状态），只是收进 ServerApi 内部，别改成 Channel/Actor——规模不需要。
 
 ---
 
 ## 快速修复 Top 10（每项 ≤ 半天，合计约 2 天清完）
 
-1. 删除 `crates/lmux-app/src/ui.rs`
+1. 删除 `crates/muxlane-app/src/ui.rs`
 2. 删除死代码清单（H7 全部条目）
-3. 清理未用依赖（server 的 thiserror/ulid/base64、term 的 ulid/thiserror、client 的 lmux-server 移 dev-deps）
+3. 清理未用依赖（server 的 thiserror/ulid/base64、term 的 ulid/thiserror、client 的 muxlane-server 移 dev-deps）
 4. 4 个 `#[allow(dead_code)]` 清零
 5. 协议常量集中（PROTOCOL_VERSION + features::* + 测试裸字符串替换）
 6. `PersistedApp::from_snapshot` 一处实现替换 4 份复制（收益最大的单点）
@@ -484,5 +487,5 @@ spawn 管线（preset→LaunchCfg→env 注入→AgentInstance）、删除级联
 ## 附 · 审查方法与可信度说明
 
 - 三个独立审查 agent 分别覆盖：工作区架构（94 次工具调用）、app.rs 方法级拆解（全文 6632 行通读）、全仓可维护性（102 次工具调用）。
-- 关键结论经人工抽查验证：client→server 伪依赖 ✓、LmuxServer 字段全 pub ✓、client 依赖 term 仅为 b64 ✓、中文字符串错误分派 ✓、ui.rs 未被编译 ✓、LmuxApp 59 字段 ✓、blocking 锁 17+ 处 ✓。
-- 剔除的误报：审查 A 声称"工作区当前无法编译（app.rs:4964 多余 `}`）"——实测 `cargo check -p lmux-app` 干净通过，系审查时撞上文件编辑中间态。本报告其余行号以当前工作树为准，执行各阶段前建议重新核对行号（代码在活跃变动中）。
+- 关键结论经人工抽查验证：client→server 伪依赖 ✓、MuxlaneServer 字段全 pub ✓、client 依赖 term 仅为 b64 ✓、中文字符串错误分派 ✓、ui.rs 未被编译 ✓、MuxlaneApp 59 字段 ✓、blocking 锁 17+ 处 ✓。
+- 剔除的误报：审查 A 声称"工作区当前无法编译（app.rs:4964 多余 `}`）"——实测 `cargo check -p muxlane-app` 干净通过，系审查时撞上文件编辑中间态。本报告其余行号以当前工作树为准，执行各阶段前建议重新核对行号（代码在活跃变动中）。

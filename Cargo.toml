@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/lmux-core",
-    "crates/lmux-term",
-    "crates/lmux-server",
-    "crates/lmux-client",
-    "crates/lmux-store",
-    "crates/lmux-app",
+    "crates/muxlane-core",
+    "crates/muxlane-term",
+    "crates/muxlane-server",
+    "crates/muxlane-client",
+    "crates/muxlane-store",
+    "crates/muxlane-app",
 ]
 
 [workspace.package]

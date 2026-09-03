@@ -1,0 +1,13 @@
+[package]
+name = "muxlane-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+muxlane-core = { path = "../muxlane-core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

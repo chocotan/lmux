@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Muxlane
+Comment=Native multi-agent terminal client
+Exec=muxlane
+Icon=muxlane
+Terminal=false
+Categories=Development;TerminalEmulator;
+StartupNotify=true

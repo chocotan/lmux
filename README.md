@@ -1,11 +1,11 @@
-# lmux
+# Muxlane
 
 > **原生 Rust + GPUI 多 Agent 工作台与高性能终端客户端**
 > 专为 AI Coding Agent、多项目协同、分布式远程机器管理而生。每台机器既是轻量客户端也是高内聚服务端；一次连接，自动发现远端实例上的所有机器、项目与常驻会话。
 
 ---
 
-![lmux Workbench Split View](docs/images/workbench-split.png)
+![Muxlane Workbench Split View](docs/images/workbench-split.png)
 
 ---
 
@@ -47,7 +47,7 @@
 ---
 
 ### 4. 会话持久化与零阻断重连
-- **无感常驻后台**：本地所有会话运行在隔离的 lmux 专属 tmux server 中。关闭桌面 GUI 仅仅是 Detach 客户端，后台编译、开发测试或 Agent 任务永不中断。
+- **无感常驻后台**：本地所有会话运行在隔离的 muxlane 专属 tmux server 中。关闭桌面 GUI 仅仅是 Detach 客户端，后台编译、开发测试或 Agent 任务永不中断。
 - **冷启动与重连历史自动回填**：创建窗口或断线重连时，通过 `capture-pane` 机制秒级回填完整的历史上下文缓冲区，告别重连后终端白板。
 
 ---
@@ -56,7 +56,7 @@
 - **零配置穿透连接**：支持通过 `~/.ssh/config` 别名、指定公钥或标准账号直连远程机器。
 - **智能远程服务纳管**：
   - 自动探测远程机器环境（支持区分离线、未启动、未安装等细粒度状态）；
-  - 支持一键将本地 `lmux --headless` 上传并静默拉起远程守护服务；
+  - 支持一键将本地 `muxlane --headless` 上传并静默拉起远程守护服务；
   - 远程连接断开后仅清除本地缓存视图，绝对安全，绝不误杀远端运行中的任务会话。
 - **标准化 Hook 链路**：深度集成 Claude / Codex / OpenCode / Pi 等 Agent 的状态汇报机制，精准抓取 Assistant 任务结果并推送全局桌面提醒。
 
@@ -74,14 +74,14 @@
 
 ```bash
 # 调试运行
-cargo run -p lmux-app
+cargo run -p muxlane-app
 
 # 使用指定 Shell 启动
-LMUX_SHELL=/usr/bin/zsh cargo run -p lmux-app
+MUXLANE_SHELL=/usr/bin/zsh cargo run -p muxlane-app
 
 # 编译优化发布版本
-cargo build --release -p lmux-app
-./target/release/lmux
+cargo build --release -p muxlane-app
+./target/release/muxlane
 ```
 
 ### 运行 Headless 服务端
@@ -89,7 +89,7 @@ cargo build --release -p lmux-app
 在无桌面界面的云服务器或远程工作站上直接运行：
 
 ```bash
-lmux --headless
+muxlane --headless
 ```
 
 ### 连接远程机器
@@ -97,8 +97,8 @@ lmux --headless
 通过命令行快速附加：
 
 ```bash
-lmux --connect my-dev-server
-lmux --connect user@192.168.1.100
+muxlane --connect my-dev-server
+muxlane --connect user@192.168.1.100
 ```
 
 或直接在桌面界面中点击左下角 **「连接」** 按钮，根据弹窗输入 SSH 主机名与端口即可直观管理。
@@ -110,10 +110,10 @@ lmux --connect user@192.168.1.100
 ```bash
 # 制作 Linux 独立分发归档
 scripts/package-linux.sh
-# 产物输出至：dist/lmux-0.1.0-linux-x86_64.tar.gz
+# 产物输出至：dist/muxlane-0.1.0-linux-x86_64.tar.gz
 
 # 安装到本地用户环境 (~/.local/bin)
-PREFIX="$HOME/.local" packaging/install.sh target/release/lmux
+PREFIX="$HOME/.local" packaging/install.sh target/release/muxlane
 ```
 
 ---

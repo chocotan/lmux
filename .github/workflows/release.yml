@@ -38,11 +38,16 @@ jobs:
         shell: bash
         run: |
           RAW_TAG="${{ inputs.tag_name || github.ref_name }}"
-          if [[ -z "$RAW_TAG" ]]; then
-            RAW_TAG="v0.0.1"
+          if [[ ! "$RAW_TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Invalid release tag: $RAW_TAG" >&2
+            exit 1
           fi
-          # Strip 'v' prefix if present for version string
-          VERSION="${RAW_TAG#v}"
+          VERSION="${BASH_REMATCH[1]}"
+          CARGO_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          if [[ "$VERSION" != "$CARGO_VERSION" ]]; then
+            echo "Release tag version $VERSION does not match Cargo version $CARGO_VERSION" >&2
+            exit 1
+          fi
           echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building Release for Tag: $RAW_TAG, Version: $VERSION"
@@ -59,7 +64,7 @@ jobs:
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "lmux $TAG" \
+              --title "Muxlane $TAG" \
               --generate-notes
           fi
 
@@ -95,24 +100,24 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build lmux-app (Release)
-        run: cargo build -p lmux-app --release
+      - name: Build muxlane-app (Release)
+        run: cargo build -p muxlane-app --release
 
       - name: Package Linux tar.gz
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
           ARCH="$(uname -m)"
-          NAME="lmux-${VERSION}-linux-${ARCH}"
+          NAME="muxlane-${VERSION}-linux-${ARCH}"
           DIST="dist/$NAME"
           mkdir -p "$DIST"
-          install -Dm755 target/release/lmux "$DIST/lmux"
+          install -Dm755 target/release/muxlane "$DIST/muxlane"
           cp README.md "$DIST/README.md"
-          cp packaging/lmux.desktop "$DIST/lmux.desktop"
-          cp packaging/lmux.svg "$DIST/lmux.svg"
+          cp packaging/muxlane.desktop "$DIST/muxlane.desktop"
+          cp packaging/muxlane.svg "$DIST/muxlane.svg"
           cp packaging/install.sh "$DIST/install.sh"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
-          sha256sum "dist/$NAME.tar.gz" > "dist/$NAME.tar.gz.sha256"
+          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
 
       - name: Package Linux AppImage
         env:
@@ -152,8 +157,8 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build lmux-app (Release)
-        run: cargo build -p lmux-app --release --target ${{ matrix.target }}
+      - name: Build muxlane-app (Release)
+        run: cargo build -p muxlane-app --release --target ${{ matrix.target }}
 
       - name: Package macOS tar.gz & zip
         env:
@@ -161,15 +166,15 @@ jobs:
           TARGET: ${{ matrix.target }}
           ARCH: ${{ matrix.arch }}
         run: |
-          NAME="lmux-${VERSION}-macos-${ARCH}"
+          NAME="muxlane-${VERSION}-macos-${ARCH}"
           DIST="dist/$NAME"
           mkdir -p "$DIST"
-          install -m 755 "target/${TARGET}/release/lmux" "$DIST/lmux"
+          install -m 755 "target/${TARGET}/release/muxlane" "$DIST/muxlane"
           cp README.md "$DIST/README.md"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
-          sha256sum "dist/$NAME.tar.gz" > "dist/$NAME.tar.gz.sha256"
+          (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
           (cd dist && zip -r "$NAME.zip" "$NAME")
-          sha256sum "dist/$NAME.zip" > "dist/$NAME.zip.sha256"
+          (cd dist && shasum -a 256 "$NAME.zip" > "$NAME.zip.sha256")
 
       - name: Upload macOS Artifacts to Release
         shell: bash
@@ -179,5 +184,5 @@ jobs:
         run: |
           gh release upload "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 dist/*.zip dist/*.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
 
-  # Windows is intentionally not published yet: lmux-server and lmux-client
+  # Windows is intentionally not published yet: muxlane-server and muxlane-client
   # currently depend on Unix domain sockets and the runtime depends on tmux.

@@ -3036,112 +3036,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "lmux-app"
-version = "0.0.2"
-dependencies = [
- "anyhow",
- "gpui",
- "gpui_platform",
- "lmux-client",
- "lmux-core",
- "lmux-server",
- "lmux-store",
- "lmux-term",
- "notify-rust",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "lmux-client"
-version = "0.0.2"
-dependencies = [
- "anyhow",
- "flate2",
- "lmux-core",
- "lmux-server",
- "lmux-term",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "lmux-core"
-version = "0.0.2"
-dependencies = [
- "anyhow",
- "base64",
- "hmac",
- "rand 0.9.5",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "toml 0.8.23",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "lmux-server"
-version = "0.0.2"
-dependencies = [
- "anyhow",
- "base64",
- "bytes",
- "fs2",
- "lmux-core",
- "lmux-store",
- "lmux-term",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "lmux-store"
-version = "0.0.2"
-dependencies = [
- "anyhow",
- "lmux-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "lmux-term"
-version = "0.0.2"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "base64",
- "bytes",
- "lmux-core",
- "portable-pty",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "ulid",
- "vte 0.13.1",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3390,6 +3284,112 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "muxlane-app"
+version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui_platform",
+ "muxlane-client",
+ "muxlane-core",
+ "muxlane-server",
+ "muxlane-store",
+ "muxlane-term",
+ "notify-rust",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "muxlane-client"
+version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "muxlane-core",
+ "muxlane-server",
+ "muxlane-term",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
+name = "muxlane-core"
+version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "base64",
+ "hmac",
+ "rand 0.9.5",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
+name = "muxlane-server"
+version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "fs2",
+ "muxlane-core",
+ "muxlane-store",
+ "muxlane-term",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
+name = "muxlane-store"
+version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "muxlane-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "muxlane-term"
+version = "0.0.2"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "base64",
+ "bytes",
+ "muxlane-core",
+ "portable-pty",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "ulid",
+ "vte 0.13.1",
 ]
 
 [[package]]

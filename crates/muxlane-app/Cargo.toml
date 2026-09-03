@@ -1,0 +1,27 @@
+[package]
+name = "muxlane-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "muxlane"
+path = "src/main.rs"
+
+[dependencies]
+muxlane-core = { path = "../muxlane-core" }
+muxlane-term = { path = "../muxlane-term" }
+muxlane-server = { path = "../muxlane-server" }
+muxlane-client = { path = "../muxlane-client" }
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+muxlane-store = { path = "../muxlane-store" }
+notify-rust = "4"
+
+[dev-dependencies]
+tempfile.workspace = true
