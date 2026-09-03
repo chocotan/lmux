@@ -3,6 +3,7 @@ mod app;
 mod i18n;
 mod sound;
 mod term_view;
+mod terminal_keys;
 mod text_field;
 mod theme;
 
@@ -394,10 +395,6 @@ fn main() {
                 KeyBinding::new("alt-7", app::SelectTab7, None),
                 KeyBinding::new("alt-8", app::SelectTab8, None),
                 KeyBinding::new("alt-9", app::SelectTab9, None),
-                KeyBinding::new("alt-left", app::FocusPaneLeft, None),
-                KeyBinding::new("alt-right", app::FocusPaneRight, None),
-                KeyBinding::new("alt-up", app::FocusPaneUp, None),
-                KeyBinding::new("alt-down", app::FocusPaneDown, None),
             ]);
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             let _ = cx.open_window(

@@ -13,6 +13,16 @@ fn vterm_tracks_terminal_mouse_modes() {
 }
 
 #[test]
+fn vterm_tracks_application_cursor_mode() {
+    let vt = VTerm::new(80, 24);
+    assert!(!vt.modes().app_cursor);
+    vt.feed(b"\x1b[?1h");
+    assert!(vt.modes().app_cursor);
+    vt.feed(b"\x1b[?1l");
+    assert!(!vt.modes().app_cursor);
+}
+
+#[test]
 fn wide_character_forces_following_text_into_next_run() {
     let vt = VTerm::new(10, 3);
     vt.feed("你a".as_bytes());

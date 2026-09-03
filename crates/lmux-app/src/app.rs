@@ -33,10 +33,6 @@ gpui::actions!(
         SelectTab7,
         SelectTab8,
         SelectTab9,
-        FocusPaneLeft,
-        FocusPaneRight,
-        FocusPaneUp,
-        FocusPaneDown,
         ToggleTheme,
     ]
 );
@@ -1384,38 +1380,6 @@ impl LmuxApp {
                 cx.notify();
             }
         }
-    }
-
-    fn cycle_active_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let all_panes = self
-            .pane_tree
-            .all_groups()
-            .into_iter()
-            .map(|g| g.id.clone())
-            .collect::<Vec<_>>();
-        if all_panes.len() <= 1 {
-            return;
-        }
-        let pos = all_panes
-            .iter()
-            .position(|p| p == &self.active_pane)
-            .unwrap_or(0);
-        let next_pos = if forward {
-            (pos + 1) % all_panes.len()
-        } else if pos == 0 {
-            all_panes.len() - 1
-        } else {
-            pos - 1
-        };
-        self.active_pane = all_panes[next_pos].clone();
-        self.active = self
-            .pane_tree
-            .group(&self.active_pane)
-            .and_then(|g| g.active.clone());
-        if let Some(active) = self.active.clone() {
-            self.focus_agent(&active, window, cx);
-        }
-        cx.notify();
     }
 
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
@@ -6006,18 +5970,6 @@ impl Render for LmuxApp {
             }))
             .on_action(cx.listener(|this, _: &SelectTab9, window, cx| {
                 this.select_tab_n(8, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneLeft, window, cx| {
-                this.cycle_active_pane(false, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneRight, window, cx| {
-                this.cycle_active_pane(true, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneUp, window, cx| {
-                this.cycle_active_pane(false, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPaneDown, window, cx| {
-                this.cycle_active_pane(true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleTheme, _window, cx| {
                 this.toggle_theme(cx);

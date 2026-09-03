@@ -498,60 +498,6 @@ impl TermView {
         ));
     }
 
-    fn keystroke_bytes(ks: &gpui::Keystroke) -> Vec<u8> {
-        let key = ks.key.as_str();
-        if ks.modifiers.control {
-            // 全局命令面板快捷键，交给 root action，不发给 PTY。
-            if key == "k" || key == "w" || (ks.modifiers.shift && key == "t") {
-                return vec![];
-            }
-            // 粘贴由 TermView 自己处理；Ctrl+C 无选区时仍走 SIGINT。
-            if key == "v" && !ks.modifiers.alt {
-                return vec![];
-            }
-            if key.len() == 1 {
-                let c = key.as_bytes()[0].to_ascii_lowercase();
-                if c.is_ascii_lowercase() {
-                    return vec![c - b'a' + 1];
-                }
-            }
-        }
-
-        let mut out = match key {
-            "enter" => b"\r".to_vec(),
-            "tab" => b"\t".to_vec(),
-            "backspace" => vec![0x7f],
-            "escape" => b"\x1b".to_vec(),
-            "up" => b"\x1b[A".to_vec(),
-            "down" => b"\x1b[B".to_vec(),
-            "right" => b"\x1b[C".to_vec(),
-            "left" => b"\x1b[D".to_vec(),
-            "home" => b"\x1b[H".to_vec(),
-            "end" => b"\x1b[F".to_vec(),
-            "pageup" => b"\x1b[5~".to_vec(),
-            "pagedown" => b"\x1b[6~".to_vec(),
-            "delete" => b"\x1b[3~".to_vec(),
-            "space" => b" ".to_vec(),
-            _ => {
-                // 普通可打印文本（含 IME 汉字输入等）由 InputHandler 提交，避免与 KeyDown 重复写入。
-                let printable = ks.key_char.as_ref().is_some_and(|text| !text.is_empty());
-                if printable && !ks.modifiers.control && !ks.modifiers.alt {
-                    return vec![];
-                }
-                ks.key_char
-                    .as_ref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&ks.key)
-                    .as_bytes()
-                    .to_vec()
-            }
-        };
-        if ks.modifiers.alt && !out.is_empty() {
-            out.insert(0, 0x1b);
-        }
-        out
-    }
-
     fn paste_clipboard(&self, cx: &mut Context<Self>) {
         let text = cx
             .read_from_clipboard()
@@ -808,8 +754,9 @@ impl Render for TermView {
                     return;
                 }
                 if let Some(sink) = this.input_sink() {
-                    let bytes = Self::keystroke_bytes(ks);
-                    if !bytes.is_empty() {
+                    if let Some(bytes) =
+                        crate::terminal_keys::encode_event(ev, this.vterm.modes().app_cursor)
+                    {
                         let is_enter = bytes.contains(&b'\r') || bytes.contains(&b'\n');
                         sink.write(&bytes);
                         if is_enter {
@@ -1216,18 +1163,6 @@ fn dim_u32(c: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn ks(key: &str, ch: Option<&str>, ctrl: bool, alt: bool) -> gpui::Keystroke {
-        let modifiers = gpui::Modifiers {
-            control: ctrl,
-            alt,
-            ..Default::default()
-        };
-        gpui::Keystroke {
-            modifiers,
-            key: key.into(),
-            key_char: ch.map(Into::into),
-        }
-    }
     #[test]
     fn terminal_preedit_is_not_committed_until_final_text() {
         let marked = std::sync::Mutex::new(None);
@@ -1295,66 +1230,6 @@ mod tests {
         assert_eq!(
             mouse_report(0, 1, 2, false, false, false, false, false, false),
             vec![0x1b, b'[', b'M', 35, 34, 35]
-        );
-    }
-
-    #[test]
-    fn terminal_key_mapping() {
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("enter", None, false, false)),
-            b"\r"
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("backspace", None, false, false)),
-            vec![0x7f]
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("up", None, false, false)),
-            b"\x1b[A"
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("c", Some("c"), true, false)),
-            vec![0x03]
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("v", Some("v"), true, false)),
-            Vec::<u8>::new()
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("k", Some("k"), true, false)),
-            Vec::<u8>::new()
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("w", Some("w"), true, false)),
-            Vec::<u8>::new()
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("a", Some("a"), false, false)),
-            Vec::<u8>::new()
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("escape", Some("\x1b"), false, false)),
-            b"\x1b".to_vec()
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("escape", None, false, false)),
-            b"\x1b".to_vec()
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("enter", Some("\r"), false, false)),
-            b"\r".to_vec()
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("tab", Some("\t"), false, false)),
-            b"\t".to_vec()
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("backspace", Some("\x08"), false, false)),
-            vec![0x7f]
-        );
-        assert_eq!(
-            TermView::keystroke_bytes(&ks("s", Some("ß"), false, true)),
-            [vec![0x1b], "ß".as_bytes().to_vec()].concat()
         );
     }
 }
