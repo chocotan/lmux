@@ -617,3 +617,16 @@ impl MuxlaneApp {
             .into_any_element()
     }
 }
+
+impl MuxlaneApp {
+    pub(crate) fn toggle_osc52_clipboard(&mut self, cx: &mut Context<Self>) {
+        self.osc52_clipboard_enabled = !self.osc52_clipboard_enabled;
+        for term in self.terms.values() {
+            term.update(cx, |term, _cx| {
+                term.set_osc52_clipboard_enabled(self.osc52_clipboard_enabled)
+            });
+        }
+        self.persist();
+        cx.notify();
+    }
+}

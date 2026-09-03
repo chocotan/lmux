@@ -1,4 +1,5 @@
 //! Agent session opening, focus, deletion, and terminal caching.
+use crate::app::palette::NewSessionTarget;
 use crate::app::MuxlaneApp;
 use crate::term_view::TermView;
 use crate::theme::Theme;
@@ -458,5 +459,95 @@ impl MuxlaneApp {
         if clear_maximized {
             self.maximized_pane = None;
         }
+    }
+}
+
+impl MuxlaneApp {
+    pub(crate) fn spawn_preset(
+        &mut self,
+        preset: &muxlane_core::AgentPreset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.new_session_target.take();
+        if let Some(NewSessionTarget::Remote { host, project }) = target.clone() {
+            self.palette_open = false;
+            self.spawn_remote_agent(host, project, Some(preset.clone()), window, cx);
+            return;
+        }
+        let target_local_id = match target {
+            Some(NewSessionTarget::Local(id)) => Some(id),
+            _ => None,
+        };
+        let project = target_local_id
+            .as_ref()
+            .and_then(|id| self.last_snapshot.project(id))
+            .cloned()
+            .or_else(|| {
+                self.active
+                    .as_ref()
+                    .and_then(|id| self.last_snapshot.agent(id))
+                    .and_then(|agent| self.last_snapshot.project(&agent.project))
+                    .cloned()
+            })
+            .or_else(|| self.last_snapshot.projects.first().cloned());
+        let Some(project) = project else { return };
+        let params = muxlane_core::protocol::AgentSpawnParams {
+            project: project.id.clone(),
+            agent_type: Some(preset.agent_type),
+            program: (preset.agent_type != muxlane_core::model::AgentType::Shell).then(|| {
+                preset
+                    .executable_in(&project.path)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| preset.program.clone())
+            }),
+            args: Some(preset.args.clone()),
+            env: Some(preset.env.clone().into_iter().collect()),
+            preset_name: Some(preset.label.clone()),
+        };
+        let server = Arc::clone(&self.server);
+        let pane = self.active_pane.clone();
+        let project_key = format!("local:{}", project.id);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let agent = server.spawn_agent(params).await?;
+                    let session = server
+                        .session(&agent.id)
+                        .await
+                        .ok_or_else(|| anyhow::anyhow!("spawned agent has no session"))?;
+                    Ok::<_, anyhow::Error>((agent, session))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok((agent, session)) => {
+                    let agent_id = agent.id.clone();
+                    let term = Self::create_local_term(
+                        agent_id.clone(),
+                        session,
+                        &this.font_family,
+                        Theme::for_mode(this.theme_mode),
+                        this.osc52_clipboard_enabled,
+                        cx,
+                    );
+                    this.collapsed_projects.remove(&project_key);
+                    this.terms.insert(agent_id.clone(), term);
+                    this.pane_tree.open_tab(&pane, agent_id.clone());
+                    this.activate_tab(&pane, &agent_id, cx);
+                    this.focus_agent(&agent_id, window, cx);
+                    this.palette_open = false;
+                    this.new_session_target = None;
+                    this.persist();
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.notifications.update(cx, |center, cx| {
+                        center.show_error(format!("创建会话失败：{error}"), cx)
+                    });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 }

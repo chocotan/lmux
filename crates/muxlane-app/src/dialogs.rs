@@ -591,6 +591,22 @@ impl MuxlaneApp {
             )
             .into_any_element()
     }
+
+    pub(crate) fn open_connect_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.connect_dialog = true;
+        self.connect_focus_index = 0;
+        self.project_dialog = false;
+        self.dialog_error = None;
+        self.connect_input.update(cx, |input, cx| input.reset(cx));
+        self.connect_username
+            .update(cx, |input, cx| input.reset(cx));
+        self.connect_password
+            .update(cx, |input, cx| input.reset(cx));
+        self.connect_key_path
+            .update(cx, |input, cx| input.reset(cx));
+        self.connect_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
 }
 
 #[cfg(test)]

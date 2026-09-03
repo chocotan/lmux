@@ -8,7 +8,7 @@ use gpui::{
 use muxlane_core::SplitAxis;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum NewSessionTarget {
+pub(crate) enum NewSessionTarget {
     Local(muxlane_core::model::ProjectId),
     Remote {
         host: String,

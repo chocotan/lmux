@@ -6,6 +6,76 @@ use gpui::{AppContext, Context, Window};
 use std::sync::Arc;
 
 impl MuxlaneApp {
+    pub(crate) fn restore_remotes(
+        server: &Arc<muxlane_server::MuxlaneServer>,
+        persisted: &muxlane_store::PersistedApp,
+        connect_to: &[String],
+        tx: &tokio::sync::mpsc::Sender<muxlane_client::ClientEvent>,
+    ) -> Vec<Arc<muxlane_client::RemoteHost>> {
+        let mut remotes = Vec::new();
+        for saved in &persisted.remote_configs {
+            let target = muxlane_client::parse_target(&saved.target);
+            let name = match &target {
+                muxlane_client::Target::Socket(path) => {
+                    path.rsplit('/').next().unwrap_or(path).to_string()
+                }
+                muxlane_client::Target::Ssh { host, .. } => host.clone(),
+            };
+            let auth = match &saved.auth {
+                muxlane_store::PersistedRemoteAuth::SshConfig => muxlane_client::SshAuth::SshConfig,
+                muxlane_store::PersistedRemoteAuth::PublicKey {
+                    username,
+                    identity_file,
+                } => muxlane_client::SshAuth::PublicKey {
+                    username: username.clone(),
+                    identity_file: identity_file.clone(),
+                },
+                muxlane_store::PersistedRemoteAuth::Password { username, password } => {
+                    muxlane_client::SshAuth::Password {
+                        username: username.clone(),
+                        password: password.clone().unwrap_or_default(),
+                    }
+                }
+            };
+            let remote = muxlane_client::RemoteHost::new(
+                muxlane_client::HostCfg {
+                    name,
+                    target,
+                    auth,
+                    retry_base_ms: 500,
+                },
+                tx.clone(),
+            );
+            server.rt_spawn(Arc::clone(&remote).run_loop());
+            remotes.push(remote);
+        }
+        for target in connect_to {
+            let parsed = muxlane_client::parse_target(target);
+            let name = match &parsed {
+                muxlane_client::Target::Socket(path) => {
+                    path.rsplit('/').next().unwrap_or(path).to_string()
+                }
+                muxlane_client::Target::Ssh { host, .. } => host.clone(),
+            };
+            let cfg = muxlane_client::HostCfg {
+                name,
+                target: parsed,
+                auth: muxlane_client::SshAuth::SshConfig,
+                retry_base_ms: 500,
+            };
+            if remotes
+                .iter()
+                .any(|remote: &Arc<muxlane_client::RemoteHost>| remote.cfg.name == cfg.name)
+            {
+                continue;
+            }
+            let host = muxlane_client::RemoteHost::new(cfg, tx.clone());
+            server.rt_spawn(Arc::clone(&host).run_loop());
+            remotes.push(host);
+        }
+        remotes
+    }
+
     pub(crate) fn add_remote_target(&mut self, target: String, cx: &mut Context<Self>) {
         let target = target.trim().to_string();
         if target.is_empty() {
