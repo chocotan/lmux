@@ -1,4 +1,5 @@
 //! muxlane-server：本机 Unix socket 服务端（client 也能连它：对端机器的 muxlane、或本机 hook 脚本）
+mod api;
 mod state;
 mod subs;
 
@@ -7,8 +8,8 @@ pub use subs::SubRegistry;
 
 use fs2::FileExt;
 use muxlane_core::protocol::{
-    methods, read_frame, write_frame, AgentReportParams, EventMsg, Response, TermSubscribeParams,
-    TermSubscribeResult,
+    methods, read_frame, write_frame, AgentReportParams, EventMsg, Request, Response,
+    TermSubscribeParams, TermSubscribeResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,17 +41,17 @@ impl Default for DirtyFlag {
 }
 
 pub struct MuxlaneServer {
-    pub state: Arc<RwLock<ServerState>>,
-    pub runtime: tokio::runtime::Handle,
+    state: Arc<RwLock<ServerState>>,
+    runtime: tokio::runtime::Handle,
     /// 会话表独立（PtySession 非 Sync，不能进 RwLock 的共享读）
-    pub sessions: Arc<Mutex<HashMap<muxlane_core::model::AgentId, Arc<muxlane_term::PtySession>>>>,
-    pub subs: Arc<Mutex<SubRegistry>>,
-    pub socket_path: PathBuf,
-    pub dirty: DirtyFlag,
+    sessions: Arc<Mutex<HashMap<muxlane_core::model::AgentId, Arc<muxlane_term::PtySession>>>>,
+    subs: Arc<Mutex<SubRegistry>>,
+    socket_path: PathBuf,
+    dirty: DirtyFlag,
     /// 全局状态事件广播（agent.status_changed 等）
-    pub events: tokio::sync::broadcast::Sender<EventMsg>,
-    pub auth: muxlane_core::AuthSecret,
-    pub lifecycle: Arc<Mutex<()>>,
+    events: tokio::sync::broadcast::Sender<EventMsg>,
+    auth: muxlane_core::AuthSecret,
+    lifecycle: Arc<Mutex<()>>,
     persistence_path: StdRwLock<Option<PathBuf>>,
 }
 
@@ -169,7 +170,7 @@ impl MuxlaneServer {
         lock_file.try_lock_exclusive().map_err(|_| {
             anyhow::anyhow!("another muxlane instance owns {}", lock_path.display())
         })?;
-        let _instance_lock = lock_file; // 保持到 serve 结束
+        let _instance_lock = lock_file;
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
         }
@@ -181,7 +182,6 @@ impl MuxlaneServer {
         }
         tracing::info!(path = %self.socket_path.display(), "muxlane server listening");
 
-        // 订阅流泵：把 broadcast 字节流转成 TermData EventMsg 分发给订阅者
         {
             let subs = Arc::clone(&self.subs);
             tokio::spawn(async move {
@@ -203,43 +203,233 @@ impl MuxlaneServer {
         }
     }
 
-    async fn destroy_sessions(
+    async fn handle_system_hello(&self, req: Request) -> anyhow::Result<Response> {
+        Ok(Response::ok(
+            req.id,
+            serde_json::to_value(muxlane_core::protocol::HelloResult {
+                version: env!("CARGO_PKG_VERSION").into(),
+                protocol: muxlane_core::protocol::PROTOCOL_VERSION,
+                features: vec![
+                    muxlane_core::protocol::features::PROJECT_ADD.into(),
+                    muxlane_core::protocol::features::AGENT_SPAWN.into(),
+                    muxlane_core::protocol::features::TERM_INPUT.into(),
+                    muxlane_core::protocol::features::TERM_RESIZE.into(),
+                ],
+            })?,
+        ))
+    }
+
+    async fn handle_state_list(&self, req: Request) -> anyhow::Result<Response> {
+        Ok(Response::ok(
+            req.id,
+            serde_json::to_value(self.snapshot().await)?,
+        ))
+    }
+
+    async fn handle_events_subscribe(
         &self,
-        agents: &[muxlane_core::model::AgentId],
-    ) -> (
-        Vec<muxlane_core::model::AgentId>,
-        Vec<muxlane_core::model::AgentId>,
-    ) {
-        let sessions: HashMap<_, _> = {
-            let mut live = self.sessions.lock().await;
-            agents
-                .iter()
-                .filter_map(|agent| live.remove(agent).map(|session| (agent.clone(), session)))
-                .collect()
+        req: Request,
+        status_rx: &mut Option<tokio::sync::broadcast::Receiver<EventMsg>>,
+        ev_tx: &mpsc::Sender<EventMsg>,
+    ) -> anyhow::Result<Response> {
+        *status_rx = Some(self.subscribe_events());
+        let _ = ev_tx
+            .send(EventMsg::new(
+                muxlane_core::protocol::events::STATE_CHANGED,
+                serde_json::json!({}),
+            ))
+            .await;
+        Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
+    }
+
+    async fn handle_term_subscribe(
+        &self,
+        req: Request,
+        ev_tx: &mpsc::Sender<EventMsg>,
+        connection_subs: &mut Vec<String>,
+    ) -> anyhow::Result<Response> {
+        let params = match serde_json::from_value::<TermSubscribeParams>(req.params) {
+            Ok(params) => params,
+            Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
         };
-        let mut destroyed = Vec::new();
-        let mut failed = Vec::new();
-        for agent in agents {
-            if let Some(session) = sessions.get(agent) {
-                if session.kill_persistent() {
-                    destroyed.push(agent.clone());
+        let prepared = {
+            let session = self.sessions.lock().await.get(&params.agent).cloned();
+            session.map(|session| {
+                let (snapshot, rx) = session.subscribe();
+                (
+                    muxlane_core::model::new_id("sub"),
+                    muxlane_core::protocol::b64_encode(&snapshot),
+                    rx,
+                    session,
+                )
+            })
+        };
+        let Some((sub_id, replay_b64, rx, session)) = prepared else {
+            return Ok(Response::err(
+                req.id,
+                "no_such_agent",
+                format!("agent {} not running", params.agent),
+            ));
+        };
+        self.subs
+            .lock()
+            .await
+            .add(&sub_id, &params.agent, ev_tx.clone(), rx, session);
+        connection_subs.push(sub_id.clone());
+        Ok(Response::ok(
+            req.id,
+            serde_json::to_value(TermSubscribeResult { sub_id, replay_b64 })?,
+        ))
+    }
+
+    async fn handle_term_unsubscribe(
+        &self,
+        req: Request,
+        connection_subs: &mut Vec<String>,
+    ) -> anyhow::Result<Response> {
+        if let Some(sub_id) = req.params["sub_id"].as_str() {
+            self.subs.lock().await.remove(sub_id);
+            connection_subs.retain(|id| id != sub_id);
+        }
+        Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
+    }
+
+    async fn handle_term_input(&self, req: Request) -> anyhow::Result<Response> {
+        let params =
+            match serde_json::from_value::<muxlane_core::protocol::TermInputParams>(req.params) {
+                Ok(params) => params,
+                Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+            };
+        let Some(session) = self.sessions.lock().await.get(&params.agent).cloned() else {
+            return Ok(Response::err(req.id, "no_such_agent", params.agent));
+        };
+        let data = muxlane_core::protocol::b64_decode(&params.data_b64)?;
+        session.write_input(&data);
+        if data.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+            self.mark_working(&params.agent).await;
+        }
+        Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
+    }
+
+    async fn handle_term_resize(&self, req: Request) -> anyhow::Result<Response> {
+        let params =
+            match serde_json::from_value::<muxlane_core::protocol::TermResizeParams>(req.params) {
+                Ok(params) => params,
+                Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+            };
+        let Some(session) = self.sessions.lock().await.get(&params.agent).cloned() else {
+            return Ok(Response::err(req.id, "no_such_agent", params.agent));
+        };
+        session.resize(params.cols, params.rows)?;
+        Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
+    }
+
+    async fn handle_agent_spawn(&self, req: Request) -> anyhow::Result<Response> {
+        let params =
+            match serde_json::from_value::<muxlane_core::protocol::AgentSpawnParams>(req.params) {
+                Ok(params) => params,
+                Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+            };
+        match self.spawn_agent(params).await {
+            Ok(instance) => Ok(Response::ok(req.id, serde_json::to_value(instance)?)),
+            Err(error) => {
+                let message = error.to_string();
+                let code = if message.starts_with("no such project:") {
+                    "no_such_project"
                 } else {
-                    failed.push(agent.clone());
-                }
-            } else {
-                destroyed.push(agent.clone());
+                    "spawn_failed"
+                };
+                Ok(Response::err(req.id, code, message))
             }
         }
-        let mut subs = self.subs.lock().await;
-        for agent in &destroyed {
-            subs.mark_agent_exit(agent);
+    }
+
+    async fn handle_agent_delete(&self, req: Request) -> anyhow::Result<Response> {
+        let params =
+            match serde_json::from_value::<muxlane_core::protocol::AgentDeleteParams>(req.params) {
+                Ok(params) => params,
+                Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+            };
+        match self.delete_agent(&params.agent).await {
+            Ok(result) if result.failed_agents.is_empty() => {
+                Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
+            }
+            Ok(result) => Ok(Response::err(
+                req.id,
+                "delete_failed",
+                format!(
+                    "failed to destroy agent {}",
+                    result.failed_agents.join(", ")
+                ),
+            )),
+            Err(error) => Ok(Response::err(
+                req.id,
+                "persistence_failed",
+                error.to_string(),
+            )),
         }
-        (destroyed, failed)
+    }
+
+    async fn handle_project_add(&self, req: Request) -> anyhow::Result<Response> {
+        let params =
+            match serde_json::from_value::<muxlane_core::protocol::ProjectAddParams>(req.params) {
+                Ok(params) => params,
+                Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+            };
+        match self.add_project(params).await {
+            Ok(project) => Ok(Response::ok(req.id, serde_json::to_value(project)?)),
+            Err(error) => Ok(Response::err(req.id, "invalid_path", error.to_string())),
+        }
+    }
+
+    async fn handle_project_delete(&self, req: Request) -> anyhow::Result<Response> {
+        let params =
+            match serde_json::from_value::<muxlane_core::protocol::ProjectDeleteParams>(req.params)
+            {
+                Ok(params) => params,
+                Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+            };
+        match self.delete_project(&params.project).await {
+            Ok(result) => Ok(Response::ok(req.id, serde_json::to_value(result)?)),
+            Err(error) => Ok(Response::err(
+                req.id,
+                "persistence_failed",
+                error.to_string(),
+            )),
+        }
+    }
+
+    async fn handle_agent_report(&self, req: Request) -> anyhow::Result<Response> {
+        let params = match serde_json::from_value::<AgentReportParams>(req.params) {
+            Ok(params) => params,
+            Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+        };
+        if !self.auth.verify(&params.agent, &params.token) {
+            return Ok(Response::err(
+                req.id,
+                "unauthorized",
+                "invalid or expired hook token",
+            ));
+        }
+        let _ = self.state.write().await.report_hook(&params).await;
+        self.dirty.bump();
+        Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
+    }
+
+    async fn handle_unknown_method(
+        &self,
+        request_id: u64,
+        method: &str,
+    ) -> anyhow::Result<Response> {
+        Ok(Response::err(
+            request_id,
+            "unknown_method",
+            format!("unknown method: {method}"),
+        ))
     }
 
     async fn handle_conn(self: Arc<Self>, stream: UnixStream) -> anyhow::Result<()> {
         let (read_half, mut write_half) = stream.into_split();
-        // 独立 reader task 持有累积缓冲：select! 切换到事件分支时不会取消半帧读取。
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(read_half);
@@ -256,325 +446,61 @@ impl MuxlaneServer {
         let mut status_rx: Option<tokio::sync::broadcast::Receiver<EventMsg>> = None;
         let mut dirty_rx = self.dirty.subscribe();
         let mut dirty_seen = *dirty_rx.borrow_and_update();
-        let mut connection_subs: Vec<String> = Vec::new();
+        let mut connection_subs = Vec::new();
 
         loop {
             tokio::select! {
-                frame = frame_rx.recv() => {
-                    match frame {
-                        Some(Ok(v)) => {
-                            let req: muxlane_core::protocol::Request = match serde_json::from_value(v) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    write_frame(&mut write_half, &Response::err(0, "bad_request", e.to_string())).await?;
-                                    continue;
-                                }
-                            };
-                            match req.method.as_str() {
-                                methods::SYSTEM_HELLO => {
-                                    write_frame(
-                                        &mut write_half,
-                                        &Response::ok(
-                                            req.id,
-                                            serde_json::to_value(muxlane_core::protocol::HelloResult {
-                                                version: env!("CARGO_PKG_VERSION").into(),
-                                                protocol: muxlane_core::protocol::PROTOCOL_VERSION,
-                                                features: vec![
-                                                    muxlane_core::protocol::features::PROJECT_ADD.into(),
-                                                    muxlane_core::protocol::features::AGENT_SPAWN.into(),
-                                                    muxlane_core::protocol::features::TERM_INPUT.into(),
-                                                    muxlane_core::protocol::features::TERM_RESIZE.into(),
-                                                ],
-                                            })?,
-                                        ),
-                                    )
-                                    .await?;
-                                }
-                                methods::STATE_LIST => {
-                                    let snap = self.state.read().await.snapshot();
-                                    write_frame(&mut write_half, &Response::ok(req.id, serde_json::to_value(snap)?)).await?;
-                                }
-                                methods::EVENTS_SUBSCRIBE => {
-                                    status_rx = Some(self.events.subscribe());
-                                    let resp = Response::ok(req.id, serde_json::json!({"ok": true}));
-                                    write_frame(&mut write_half, &resp).await?;
-                                    let _ = ev_tx.send(EventMsg::new(muxlane_core::protocol::events::STATE_CHANGED, serde_json::json!({}))).await;
-                                }
-                                methods::TERM_SUBSCRIBE => {
-                                    let resp = match serde_json::from_value::<TermSubscribeParams>(req.params) {
-                                        Ok(params) => {
-                                            // 块内完成订阅准备，Arc 不跨 await 进入 future 状态机
-                                            let prepared = {
-                                                let sess_opt = self.sessions.lock().await.get(&params.agent).cloned();
-                                                sess_opt.map(|sess| {
-                                                    let (snap, rx) = sess.subscribe();
-                                                    (muxlane_core::model::new_id("sub"), muxlane_core::protocol::b64_encode(&snap), rx, sess)
-                                                })
-                                            };
-                                            match prepared {
-                                                Some((sub_id, replay_b64, rx, sess)) => {
-                                                    self.subs.lock().await.add(&sub_id, &params.agent, ev_tx.clone(), rx, sess);
-                                                    connection_subs.push(sub_id.clone());
-                                                    Response::ok(req.id, serde_json::to_value(TermSubscribeResult { sub_id, replay_b64 })?)
-                                                }
-                                                None => Response::err(req.id, "no_such_agent", format!("agent {} not running", params.agent)),
-                                            }
-                                        }
-                                        Err(e) => Response::err(req.id, "bad_params", e.to_string()),
-                                    };
-                                    write_frame(&mut write_half, &resp).await?;
-                                }
-                                methods::TERM_UNSUBSCRIBE => {
-                                    if let Some(sid) = req.params["sub_id"].as_str() {
-                                        self.subs.lock().await.remove(sid);
-                                        connection_subs.retain(|id| id != sid);
-                                    }
-                                    write_frame(&mut write_half, &Response::ok(req.id, serde_json::json!({"ok": true}))).await?;
-                                }
-                                methods::TERM_INPUT => {
-                                    match serde_json::from_value::<muxlane_core::protocol::TermInputParams>(req.params) {
-                                        Ok(params) => {
-                                            let session = self.sessions.lock().await.get(&params.agent).cloned();
-                                            match session {
-                                                Some(session) => {
-                                                    let data = muxlane_core::protocol::b64_decode(&params.data_b64)?;
-                                                    session.write_input(&data);
-                                                    // 提交型输入（含换行）→ working；命令结束后
-                                                    // 屏幕检测（提示符规则）自动 Working→Idle。
-                                                    if data.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
-                                                        let mut st = self.state.write().await;
-                                                        let events = st.mark_screen_working(&params.agent);
-                                                        drop(st);
-                                                        for event in events {
-                                                            let _ = self.events.send(event);
-                                                        }
-                                                        self.dirty.bump();
-                                                    }
-                                                    write_frame(&mut write_half, &Response::ok(req.id, serde_json::json!({"ok": true}))).await?;
-                                                }
-                                                None => write_frame(&mut write_half, &Response::err(req.id, "no_such_agent", params.agent)).await?,
-                                            }
-                                        }
-                                        Err(error) => write_frame(&mut write_half, &Response::err(req.id, "bad_params", error.to_string())).await?,
-                                    }
-                                }
-                                methods::TERM_RESIZE => {
-                                    match serde_json::from_value::<muxlane_core::protocol::TermResizeParams>(req.params) {
-                                        Ok(params) => {
-                                            let session = self.sessions.lock().await.get(&params.agent).cloned();
-                                            match session {
-                                                Some(session) => {
-                                                    session.resize(params.cols, params.rows)?;
-                                                    write_frame(&mut write_half, &Response::ok(req.id, serde_json::json!({"ok": true}))).await?;
-                                                }
-                                                None => write_frame(&mut write_half, &Response::err(req.id, "no_such_agent", params.agent)).await?,
-                                            }
-                                        }
-                                        Err(error) => write_frame(&mut write_half, &Response::err(req.id, "bad_params", error.to_string())).await?,
-                                    }
-                                }
-                                methods::AGENT_SPAWN => {
-                                    match serde_json::from_value::<muxlane_core::protocol::AgentSpawnParams>(req.params) {
-                                        Ok(params) => {
-                                            let _lifecycle = self.lifecycle.lock().await;
-                                            let project = self.state.read().await.projects.iter()
-                                                .find(|project| project.id == params.project)
-                                                .cloned();
-                                            match project {
-                                                Some(project) => {
-                                                    let agent_type = params.agent_type.unwrap_or(muxlane_core::model::AgentType::Shell);
-                                                    let agent_id = muxlane_core::model::new_id(agent_type.as_str());
-                                                    let tmux_name = format!("muxlane-{}", agent_id);
-                                                    let title = params.preset_name.unwrap_or_else(|| {
-                                                        if agent_type == muxlane_core::model::AgentType::Shell {
-                                                            muxlane_term::default_shell_program().rsplit('/').next().unwrap_or("shell").into()
-                                                        } else {
-                                                            agent_type.as_str().to_string()
-                                                        }
-                                                    });
-                                                    let mut cfg = if agent_type == muxlane_core::model::AgentType::Shell && params.program.is_none() {
-                                                        muxlane_term::LaunchCfg::shell(
-                                                            agent_id.clone(),
-                                                            project.path.clone(),
-                                                        )
-                                                    } else {
-                                                        let program = params.program.unwrap_or_else(|| agent_type.as_str().to_string());
-                                                        muxlane_term::LaunchCfg {
-                                                            agent: agent_id.clone(),
-                                                            agent_type,
-                                                            cwd: project.path.clone(),
-                                                            env: params.env.unwrap_or_default(),
-                                                            program_override: Some(program),
-                                                            args: params.args.unwrap_or_default(),
-                                                            cols: 120,
-                                                            rows: 32,
-                                                            tmux_session: Some(tmux_name.clone()),
-                                                        }
-                                                    };
-                                                    cfg.tmux_session = Some(tmux_name.clone());
-                                                    cfg.env.push(("MUXLANE_AGENT_ID".into(), agent_id.clone()));
-                                                    cfg.env.push(("MUXLANE_SOCKET".into(), self.socket_path.display().to_string()));
-                                                    cfg.env.push(("MUXLANE_HOOK_TOKEN".into(), self.hook_token(&agent_id)));
-                                                    match muxlane_term::PtySession::spawn(cfg) {
-                                                        Ok(session) => {
-                                                            let tmux_session = session.tmux_session_name().map(str::to_string);
-                                                            self.sessions.lock().await.insert(agent_id.clone(), Arc::clone(&session));
-                                                            let instance = muxlane_core::model::AgentInstance {
-                                                                id: agent_id.clone(),
-                                                                project: project.id.clone(),
-                                                                agent_type,
-                                                                title,
-                                                                status: muxlane_core::model::AgentStatus::Idle,
-                                                                status_since: muxlane_core::model::now_secs(),
-                                                                seen: true,
-                                                                tmux_session,
-                                                            };
-                                                            self.state.write().await.add_agent(project, instance.clone());
-                                                            self.persist_runtime_state().await?;
-                                                            self.dirty.bump();
-                                                            write_frame(&mut write_half, &Response::ok(req.id, serde_json::to_value(instance)?)).await?;
-                                                        }
-                                                        Err(error) => write_frame(&mut write_half, &Response::err(req.id, "spawn_failed", error.to_string())).await?,
-                                                    }
-                                                }
-                                                None => write_frame(&mut write_half, &Response::err(req.id, "no_such_project", params.project)).await?,
-                                            }
-                                        }
-                                        Err(error) => write_frame(&mut write_half, &Response::err(req.id, "bad_params", error.to_string())).await?,
-                                    }
-                                }
-                                methods::AGENT_DELETE => {
-                                    match serde_json::from_value::<muxlane_core::protocol::AgentDeleteParams>(req.params) {
-                                        Ok(params) => {
-                                            let session = self.sessions.lock().await.remove(&params.agent);
-                                            if let Some(sess) = session { sess.kill_persistent(); }
-                                            self.subs.lock().await.mark_agent_exit(&params.agent);
-                                            self.state.write().await.remove_agent(&params.agent);
-                                            self.dirty.bump();
-                                            write_frame(&mut write_half, &Response::ok(req.id, serde_json::json!({"ok": true}))).await?;
-                                        }
-                                        Err(e) => {
-                                            write_frame(&mut write_half, &Response::err(req.id, "bad_params", e.to_string())).await?;
-                                        }
-                                    }
-                                }
-                                methods::PROJECT_ADD => {
-                                    match serde_json::from_value::<muxlane_core::protocol::ProjectAddParams>(req.params) {
-                                        Ok(params) => {
-                                            let path = std::path::PathBuf::from(&params.path)
-                                                .canonicalize()
-                                                .map_err(|error| anyhow::anyhow!("invalid project path: {error}"));
-                                            match path {
-                                                Ok(path) if path.is_dir() => {
-                                                    let name = params.name
-                                                        .filter(|name| !name.trim().is_empty())
-                                                        .unwrap_or_else(|| path.file_name()
-                                                            .map(|value| value.to_string_lossy().into_owned())
-                                                            .unwrap_or_else(|| path.display().to_string()));
-                                                    let project = muxlane_core::model::Project {
-                                                        id: muxlane_core::model::new_id("project"),
-                                                        name,
-                                                        path,
-                                                        branch: None,
-                                                        agents: vec![],
-                                                    };
-                                                    let added = self.state.write().await.add_project(project.clone());
-                                                    if added {
-                                                        self.persist_runtime_state().await?;
-                                                        self.dirty.bump();
-                                                    }
-                                                    write_frame(&mut write_half, &Response::ok(req.id, serde_json::to_value(project)?)).await?;
-                                                }
-                                                _ => write_frame(&mut write_half, &Response::err(req.id, "invalid_path", params.path)).await?,
-                                            }
-                                        }
-                                        Err(error) => write_frame(&mut write_half, &Response::err(req.id, "bad_params", error.to_string())).await?,
-                                    }
-                                }
-                                methods::PROJECT_DELETE => {
-                                    match serde_json::from_value::<muxlane_core::protocol::ProjectDeleteParams>(req.params) {
-                                        Ok(params) => {
-                                            let _lifecycle = self.lifecycle.lock().await;
-                                            let agents: Vec<_> = self.state.read().await.agents.iter()
-                                                .filter(|agent| agent.project == params.project)
-                                                .map(|agent| agent.id.clone())
-                                                .collect();
-                                            let (destroyed_agents, failed_agents) = self.destroy_sessions(&agents).await;
-                                            {
-                                                let mut state = self.state.write().await;
-                                                for agent in &destroyed_agents {
-                                                    state.remove_agent(agent);
-                                                }
-                                                if failed_agents.is_empty() {
-                                                    state.projects.retain(|project| project.id != params.project);
-                                                }
-                                            }
-                                            self.dirty.bump();
-                                            if let Err(error) = self.persist_runtime_state().await {
-                                                write_frame(
-                                                    &mut write_half,
-                                                    &Response::err(req.id, "persistence_failed", error.to_string()),
-                                                ).await?;
-                                                continue;
-                                            }
-                                            write_frame(&mut write_half, &Response::ok(
-                                                req.id,
-                                                serde_json::to_value(muxlane_core::protocol::DeleteScopeResult {
-                                                    destroyed_agents,
-                                                    failed_agents,
-                                                })?,
-                                            )).await?;
-                                        }
-                                        Err(e) => write_frame(&mut write_half, &Response::err(req.id, "bad_params", e.to_string())).await?,
-                                    }
-                                }
-                                methods::AGENT_REPORT => {
-                                    match serde_json::from_value::<AgentReportParams>(req.params) {
-                                        Ok(params) => {
-                                            if !self.auth.verify(&params.agent, &params.token) {
-                                                write_frame(
-                                                    &mut write_half,
-                                                    &Response::err(req.id, "unauthorized", "invalid or expired hook token"),
-                                                )
-                                                .await?;
-                                                continue;
-                                            }
-                                            let _events = self.state.write().await.report_hook(&params).await;
-                                            write_frame(&mut write_half, &Response::ok(req.id, serde_json::json!({"ok": true}))).await?;
-                                            self.dirty.bump();
-                                        }
-                                        Err(e) => {
-                                            write_frame(&mut write_half, &Response::err(req.id, "bad_params", e.to_string())).await?;
-                                        }
-                                    }
-                                }
-                                other => {
-                                    write_frame(&mut write_half, &Response::err(req.id, "unknown_method", format!("unknown method: {other}"))).await?;
-                                }
+                frame = frame_rx.recv() => match frame {
+                    Some(Ok(value)) => {
+                        let req: Request = match serde_json::from_value(value) {
+                            Ok(req) => req,
+                            Err(error) => {
+                                write_frame(&mut write_half, &Response::err(0, "bad_request", error.to_string())).await?;
+                                continue;
                             }
-                        }
-                        Some(Err(muxlane_core::Error::Eof)) | None => break,
-                        Some(Err(e)) => return Err(e.into()),
+                        };
+                        let response = match req.method.as_str() {
+                            methods::SYSTEM_HELLO => self.handle_system_hello(req).await?,
+                            methods::STATE_LIST => self.handle_state_list(req).await?,
+                            methods::EVENTS_SUBSCRIBE => self.handle_events_subscribe(req, &mut status_rx, &ev_tx).await?,
+                            methods::TERM_SUBSCRIBE => self.handle_term_subscribe(req, &ev_tx, &mut connection_subs).await?,
+                            methods::TERM_UNSUBSCRIBE => self.handle_term_unsubscribe(req, &mut connection_subs).await?,
+                            methods::TERM_INPUT => self.handle_term_input(req).await?,
+                            methods::TERM_RESIZE => self.handle_term_resize(req).await?,
+                            methods::AGENT_SPAWN => self.handle_agent_spawn(req).await?,
+                            methods::AGENT_DELETE => self.handle_agent_delete(req).await?,
+                            methods::PROJECT_ADD => self.handle_project_add(req).await?,
+                            methods::PROJECT_DELETE => self.handle_project_delete(req).await?,
+                            methods::AGENT_REPORT => self.handle_agent_report(req).await?,
+                            other => self.handle_unknown_method(req.id, other).await?,
+                        };
+                        write_frame(&mut write_half, &response).await?;
                     }
-                }
-                ev = ev_rx.recv() => {
-                    match ev {
-                        Some(msg) => write_frame(&mut write_half, &msg).await?,
-                        None => break,
+                    Some(Err(muxlane_core::Error::Eof)) | None => break,
+                    Some(Err(error)) => return Err(error.into()),
+                },
+                event = ev_rx.recv() => match event {
+                    Some(message) => write_frame(&mut write_half, &message).await?,
+                    None => break,
+                },
+                status = async {
+                    match status_rx.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        None => std::future::pending().await,
                     }
-                }
-                status = async { match status_rx.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if true => {
-                    match status {
-                        Ok(msg) => write_frame(&mut write_half, &msg).await?,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {} // 丢帧继续
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
+                } => match status {
+                    Ok(message) => write_frame(&mut write_half, &message).await?,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
                 Ok(()) = dirty_rx.changed() => {
-                    let cur = *dirty_rx.borrow_and_update();
-                    if cur != dirty_seen {
-                        dirty_seen = cur;
-                        let _ = ev_tx.try_send(EventMsg::new(muxlane_core::protocol::events::STATE_CHANGED, serde_json::json!({})));
+                    let current = *dirty_rx.borrow_and_update();
+                    if current != dirty_seen {
+                        dirty_seen = current;
+                        let _ = ev_tx.try_send(EventMsg::new(
+                            muxlane_core::protocol::events::STATE_CHANGED,
+                            serde_json::json!({}),
+                        ));
                     }
                 }
                 else => break,

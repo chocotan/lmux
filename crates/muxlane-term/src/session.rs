@@ -386,7 +386,9 @@ impl PtySession {
             } else {
                 true
             };
-        self.kill();
+        if destroyed {
+            self.kill();
+        }
         destroyed
     }
 

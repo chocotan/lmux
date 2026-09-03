@@ -12,7 +12,6 @@ use gpui::{
     WindowOptions,
 };
 use muxlane_core::model::MachineInfo;
-use muxlane_core::protocol::{extract_osc_title, strip_ansi};
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -133,78 +132,11 @@ fn main() {
         rt.spawn(async move { srv.serve().await.expect("server died") });
     }
     {
-        let state = Arc::clone(&state);
-        let dirty = server.dirty.clone();
-        let sessions = Arc::clone(&server.sessions);
-        let subs = Arc::clone(&server.subs);
-        let events = server.events.clone();
+        let server = Arc::clone(&server);
         rt.spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let mut exited = Vec::new();
-                let mut screens = Vec::new();
-                {
-                    let map = sessions.lock().await;
-                    for (id, sess) in map.iter() {
-                        if let Some(ev) = sess.try_take_exit() {
-                            if matches!(ev, muxlane_term::SessionEvent::Exit { .. }) {
-                                exited.push(id.clone());
-                                continue;
-                            }
-                        }
-                        let replay = sess.replay_snapshot();
-                        let start = replay.len().saturating_sub(64 * 1024);
-                        let tail = &replay[start..];
-                        let mut lines = strip_ansi(tail);
-                        if lines.len() > 8 {
-                            lines = lines.split_off(lines.len() - 8);
-                        }
-                        screens.push((
-                            id.clone(),
-                            muxlane_core::detect::ScreenInput {
-                                bottom_lines: lines,
-                                osc_title: extract_osc_title(tail),
-                                secs_since_output: None,
-                                bell: tail.last() == Some(&0x07),
-                            },
-                        ));
-                    }
-                }
-                if !exited.is_empty() {
-                    {
-                        let mut map = sessions.lock().await;
-                        for id in &exited {
-                            map.remove(id);
-                        }
-                    }
-                    {
-                        let mut registry = subs.lock().await;
-                        for id in &exited {
-                            registry.mark_agent_exit(id);
-                        }
-                    }
-                    let mut st = state.write().await;
-                    for id in &exited {
-                        for event in st.agent_exit(id) {
-                            let _ = events.send(event);
-                        }
-                    }
-                    drop(st);
-                    dirty.bump();
-                }
-                if !screens.is_empty() {
-                    let mut st = state.write().await;
-                    let mut changed = false;
-                    for (id, screen) in &screens {
-                        if !st.observe_screen(id, screen).is_empty() {
-                            changed = true;
-                        }
-                    }
-                    drop(st);
-                    if changed {
-                        dirty.bump();
-                    }
-                }
+                server.maintain_sessions().await;
             }
         });
     }
@@ -244,7 +176,6 @@ fn main() {
 
     // 恢复持久 tmux 会话；GUI 关闭只 detach，进程继续运行。
     {
-        let sessions = Arc::clone(&server.sessions);
         for saved in &persisted.sessions {
             let alive = std::process::Command::new("tmux")
                 .args(["-L", "muxlane", "has-session", "-t", &saved.tmux_session])
@@ -269,7 +200,7 @@ fn main() {
                     ("MUXLANE_AGENT_ID".into(), saved.agent_id.clone()),
                     (
                         "MUXLANE_SOCKET".into(),
-                        server.socket_path.display().to_string(),
+                        server.socket_path().display().to_string(),
                     ),
                     (
                         "MUXLANE_HOOK_TOKEN".into(),
@@ -293,24 +224,21 @@ fn main() {
                     seen: true,
                     tmux_session: Some(saved.tmux_session.clone()),
                 };
-                state.blocking_write().add_agent(project, instance);
-                sessions
-                    .blocking_lock()
-                    .insert(saved.agent_id.clone(), session);
+                rt.block_on(server.restore_agent(project, instance, session));
             }
         }
 
         // 不自动创建启动目录项目；用户从左侧“添加项目”显式添加。
     }
+    let initial_snapshot = rt.block_on(server.snapshot());
     // 立即落盘当前可恢复会话，避免用户未点开 tab 就关闭导致元数据丢失。
     {
-        let snap = state.blocking_read().snapshot();
-        persisted.projects = snap.projects.clone();
+        persisted.projects = initial_snapshot.projects.clone();
         persisted.initialized = true;
         for project in &mut persisted.projects {
             project.agents.clear();
         }
-        persisted.sessions = snap
+        persisted.sessions = initial_snapshot
             .agents
             .iter()
             .filter_map(|a| {
@@ -330,13 +258,13 @@ fn main() {
     if headless {
         // 纯服务端：持续落盘 authoritative state，远端删除后不会在重启时复活。
         tracing::info!("muxlane headless server running");
-        let state = Arc::clone(&state);
+        let server = Arc::clone(&server);
         let mut headless_persisted = persisted.clone();
         let headless_store_path = store_path.clone();
         rt.block_on(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let snap = state.read().await.snapshot();
+                let snap = server.snapshot().await;
                 headless_persisted.projects = snap.projects.clone();
                 for project in &mut headless_persisted.projects {
                     project.agents.clear();
@@ -365,6 +293,7 @@ fn main() {
     let server_for_app = Arc::clone(&server);
     let connect_for_app = connect_to.clone();
     let persisted_for_app = persisted.clone();
+    let initial_snapshot_for_app = initial_snapshot.clone();
     let store_for_app = store_path.clone();
     gpui_platform::application()
         .with_assets(Assets)
@@ -397,6 +326,7 @@ fn main() {
                         app::MuxlaneApp::new(
                             cx,
                             Arc::clone(&server_for_app),
+                            initial_snapshot_for_app.clone(),
                             connect_for_app.clone(),
                             persisted_for_app.clone(),
                             store_for_app.clone(),

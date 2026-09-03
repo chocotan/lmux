@@ -41,7 +41,7 @@ async fn spawn_server() -> (
 
 async fn launch_agent(
     server: &Arc<MuxlaneServer>,
-    state: &Arc<RwLock<ServerState>>,
+    _state: &Arc<RwLock<ServerState>>,
     script: &str,
 ) -> AgentId {
     let agent_id = muxlane_core::model::new_id("shell");
@@ -57,7 +57,6 @@ async fn launch_agent(
         tmux_session: None,
     };
     let sess = muxlane_term::PtySession::spawn(cfg).unwrap();
-    server.sessions.lock().await.insert(agent_id.clone(), sess);
     let project = Project {
         id: "p_test".into(),
         name: "testproj".into(),
@@ -75,7 +74,7 @@ async fn launch_agent(
         seen: true,
         tmux_session: None,
     };
-    state.write().await.add_agent(project, instance);
+    server.restore_agent(project, instance, sess).await;
     agent_id
 }
 
@@ -100,7 +99,7 @@ async fn remote_term_input_reaches_pty_and_project_add_validates_path() {
     .unwrap();
     let _: Response = serde_json::from_value(read_frame(&mut conn).await.unwrap()).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let replay = server.sessions.lock().await[&agent].replay_snapshot();
+    let replay = server.session(&agent).await.unwrap().replay_snapshot();
     assert!(String::from_utf8_lossy(&replay).contains("REMOTE:hello"));
 
     let project_dir = dir.path().join("remote-project");
@@ -154,7 +153,7 @@ async fn project_delete_destroys_scoped_sessions_and_state() {
     assert_eq!(result.destroyed_agents, vec![agent]);
     assert!(state.read().await.projects.is_empty());
     assert!(state.read().await.agents.is_empty());
-    assert!(server.sessions.lock().await.is_empty());
+    assert_eq!(server.session_count().await, 0);
 }
 
 #[tokio::test]
@@ -492,10 +491,10 @@ async fn connection_drop_cleans_terminal_subscriptions() {
     .await
     .unwrap();
     let _ = read_frame(&mut conn).await.unwrap();
-    assert_eq!(srv.subs.lock().await.len(), 1);
+    assert_eq!(srv.subscription_count().await, 1);
     drop(conn);
     for _ in 0..20 {
-        if srv.subs.lock().await.is_empty() {
+        if srv.subscription_count().await == 0 {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -534,7 +533,7 @@ async fn agent_delete_kills_and_cleans_state() {
     .unwrap();
     let resp: Response = serde_json::from_value(read_frame(&mut rpc).await.unwrap()).unwrap();
     assert!(resp.result.is_some());
-    assert!(!srv.sessions.lock().await.contains_key(&agent));
+    assert!(srv.session(&agent).await.is_none());
     assert!(!state.read().await.agents.iter().any(|a| a.id == agent));
     assert!(!state.read().await.projects[0].agents.contains(&agent));
     let ev = tokio::time::timeout(std::time::Duration::from_secs(1), read_frame(&mut events))

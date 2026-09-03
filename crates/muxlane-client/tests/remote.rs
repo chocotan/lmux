@@ -101,11 +101,18 @@ async fn remote_host_connects_and_receives_events() {
         seen: true,
         tmux_session: None,
     };
+    let second_id = second.id.clone();
     state.write().await.agents.push(second);
     state.write().await.projects[0]
         .agents
-        .push("shell_second".into());
-    server.dirty.bump();
+        .push(second_id.clone());
+    server
+        .add_project(muxlane_core::protocol::ProjectAddParams {
+            path: dir.path().display().to_string(),
+            name: Some("refresh-trigger".into()),
+        })
+        .await
+        .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut refreshed = false;
     while std::time::Instant::now() < deadline {
@@ -124,10 +131,6 @@ async fn remote_host_connects_and_receives_events() {
     assert!(refreshed, "state.changed refreshes remote snapshot");
 
     // 对端 hook 上报 → 客户端应收到 StatusChanged
-    {
-        let sess = server.sessions.lock().await;
-        let _ = &sess;
-    }
     state
         .write()
         .await
@@ -157,7 +160,6 @@ async fn remote_host_connects_and_receives_events() {
         "client receives remote status change"
     );
 
-    // server.sessions 用掉 unused 警告
     drop(server);
     let _ = agent_id;
 }

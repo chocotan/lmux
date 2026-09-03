@@ -157,30 +157,6 @@ struct SplitDrag {
     sizes: Vec<f32>,
 }
 
-fn shell_split_launch_cfg(
-    agent_id: AgentId,
-    cwd: std::path::PathBuf,
-    socket: String,
-    hook_token: String,
-    tmux_session: String,
-) -> muxlane_term::LaunchCfg {
-    muxlane_term::LaunchCfg {
-        agent: agent_id.clone(),
-        agent_type: muxlane_core::model::AgentType::Shell,
-        cwd,
-        env: vec![
-            ("MUXLANE_AGENT_ID".into(), agent_id.clone()),
-            ("MUXLANE_SOCKET".into(), socket),
-            ("MUXLANE_HOOK_TOKEN".into(), hook_token),
-        ],
-        program_override: None,
-        args: vec![],
-        cols: 120,
-        rows: 32,
-        tmux_session: Some(tmux_session),
-    }
-}
-
 fn resolve_local_project_path(raw_path: &str) -> Option<std::path::PathBuf> {
     let raw_path = raw_path.trim();
     if raw_path.is_empty() {
@@ -403,44 +379,42 @@ impl MuxlaneApp {
     pub fn new(
         cx: &mut Context<Self>,
         server: Arc<MuxlaneServer>,
+        initial_snapshot: Snapshot,
         connect_to: Vec<String>,
         persisted: muxlane_store::PersistedApp,
         store_path: std::path::PathBuf,
     ) -> Self {
-        let state = Arc::clone(&server.state);
         // 本地状态事件 → 通知列表
-        if let Ok(mut local_rx) = server.state.try_read().map(|s| s.events.subscribe()) {
-            cx.spawn(async move |this, cx| loop {
-                match local_rx.recv().await {
-                    Ok(ev) => {
-                        if ev.event == muxlane_core::protocol::events::AGENT_STATUS {
-                            if let Ok(p) = serde_json::from_value::<
-                                muxlane_core::protocol::AgentStatusEvent,
-                            >(ev.params)
-                            {
-                                this.update(cx, |this, cx| {
-                                    this.push_notification(p.agent, p.from, p.to, p.message);
-                                    cx.notify();
-                                })
-                                .ok();
-                            }
+        let mut local_rx = server.subscribe_events();
+        cx.spawn(async move |this, cx| loop {
+            match local_rx.recv().await {
+                Ok(ev) => {
+                    if ev.event == muxlane_core::protocol::events::AGENT_STATUS {
+                        if let Ok(p) = serde_json::from_value::<
+                            muxlane_core::protocol::AgentStatusEvent,
+                        >(ev.params)
+                        {
+                            this.update(cx, |this, cx| {
+                                this.push_notification(p.agent, p.from, p.to, p.message);
+                                cx.notify();
+                            })
+                            .ok();
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
                 }
-            })
-            .detach();
-        }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        })
+        .detach();
 
         // 每 1s 拉一次快照（P0 轮询；P1 换事件驱动）
-        let state_for_poll = state.clone();
+        let server_for_poll = Arc::clone(&server);
         cx.spawn(async move |this, cx| loop {
-            let snap = {
-                let state = state_for_poll.clone();
-                cx.background_spawn(async move { state.read().await.snapshot() })
-                    .await
-            };
+            let server = Arc::clone(&server_for_poll);
+            let snap = cx
+                .background_spawn(async move { server.snapshot().await })
+                .await;
             this.update(cx, |this, cx| {
                 this.last_snapshot = snap;
                 cx.notify();
@@ -613,7 +587,6 @@ impl MuxlaneApp {
             .detach();
         }
 
-        let initial_snapshot = state.try_read().map(|s| s.snapshot()).unwrap_or_default();
         let first_agent = initial_snapshot.agents.first().map(|a| a.id.clone());
         let valid: std::collections::HashSet<AgentId> = initial_snapshot
             .agents
@@ -764,17 +737,27 @@ impl MuxlaneApp {
             .map(|agent| agent.id.clone())
             .collect();
         for agent in opened {
-            let session = app.server.sessions.blocking_lock().get(&agent).cloned();
-            if let Some(session) = session {
-                let term = Self::create_local_term(
-                    agent.clone(),
-                    session,
-                    &app.font_family,
-                    Theme::for_mode(app.theme_mode),
-                    cx,
-                );
-                app.terms.insert(agent, term);
-            }
+            let server = Arc::clone(&app.server);
+            let session_agent = agent.clone();
+            cx.spawn(async move |this, cx| {
+                let session = cx
+                    .background_spawn(async move { server.session(&session_agent).await })
+                    .await;
+                if let Some(session) = session {
+                    let _ = this.update(cx, |this, cx| {
+                        let term = Self::create_local_term(
+                            agent.clone(),
+                            session,
+                            &this.font_family,
+                            Theme::for_mode(this.theme_mode),
+                            cx,
+                        );
+                        this.terms.insert(agent, term);
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
         }
         // 仅 UI 自动化使用；真实交互仍由用户点击 agent 打开 tab。
         if std::env::var("MUXLANE_TEST_AUTO_OPEN").as_deref() == Ok("1") {
@@ -1041,15 +1024,12 @@ impl MuxlaneApp {
         }
         // 本地 Done 会话查看后回到 Idle（herdr seen 语义）。
         if self.last_snapshot.agent(agent).is_some() {
-            let changed = !self
-                .server
-                .state
-                .blocking_write()
-                .mark_seen(agent)
-                .is_empty();
-            if changed {
-                self.server.dirty.bump();
-            }
+            let server = Arc::clone(&self.server);
+            let agent = agent.clone();
+            server.rt_spawn({
+                let server = Arc::clone(&server);
+                async move { server.mark_seen(&agent).await }
+            });
         }
         self.persist();
     }
@@ -1077,14 +1057,13 @@ impl MuxlaneApp {
         // 与屏幕采样同走 DetectionEngine：既避免与引擎内部状态互斥（否则引擎
         // 推导出的候选 idle 会因等于陈旧内部状态而永不提交，spinner 卡死），
         // 又保证 Idle 状态下输入命令立即显示 working 反馈。
-        let server_state = self.server.state.clone();
         let agent_id = agent.clone();
         if local {
-            cx.background_spawn(async move {
-                let mut st = server_state.write().await;
-                let _ = st.mark_screen_working(&agent_id);
-            })
-            .detach();
+            let server = Arc::clone(&self.server);
+            server.rt_spawn({
+                let server = Arc::clone(&server);
+                async move { server.mark_working(&agent_id).await }
+            });
         }
     }
 
@@ -1136,22 +1115,17 @@ impl MuxlaneApp {
             return;
         }
         if !self.terms.contains_key(agent) {
-            let sess = {
-                let map = futures_lite_block(&self.server.sessions);
-                map.get(agent).cloned()
-            };
-            if let Some(sess) = sess {
-                let term = Self::create_local_term(
-                    agent.clone(),
-                    sess,
-                    &self.font_family,
-                    Theme::for_mode(self.theme_mode),
-                    cx,
-                );
-                self.terms.insert(agent.clone(), term);
-            } else {
+            let Some(sess) = self.server.try_session(agent) else {
                 return;
-            }
+            };
+            let term = Self::create_local_term(
+                agent.clone(),
+                sess,
+                &self.font_family,
+                Theme::for_mode(self.theme_mode),
+                cx,
+            );
+            self.terms.insert(agent.clone(), term);
         }
         let pane = self.active_pane.clone();
         self.pane_tree.open_tab(&pane, agent.clone());
@@ -1306,15 +1280,12 @@ impl MuxlaneApp {
             }
         }
         if self.last_snapshot.agent(agent).is_some() {
-            let changed = !self
-                .server
-                .state
-                .blocking_write()
-                .mark_seen(agent)
-                .is_empty();
-            if changed {
-                self.server.dirty.bump();
-            }
+            let server = Arc::clone(&self.server);
+            let agent = agent.clone();
+            server.rt_spawn({
+                let server = Arc::clone(&server);
+                async move { server.mark_seen(&agent).await }
+            });
         }
         cx.notify();
     }
@@ -1439,13 +1410,10 @@ impl MuxlaneApp {
                 .iter()
                 .any(|candidate| &candidate.id == agent)
         });
-        self.delete_session(agent, remote, cx);
+        self.delete_session(agent, remote, window, cx);
         if clears_zoom {
             // 关闭 zoom owner 的选中会话不能把 zoom 转移给下一个会话。
             self.maximized_pane = None;
-        }
-        if let Some(active) = self.active.clone() {
-            self.focus_agent(&active, window, cx);
         }
     }
 
@@ -1479,8 +1447,6 @@ impl MuxlaneApp {
             self.spawn_remote_agent(host, project, Some(preset.clone()), window, cx);
             return;
         }
-        let lifecycle = Arc::clone(&self.server.lifecycle);
-        let _lifecycle = lifecycle.blocking_lock();
         let target_local_id = match target {
             Some(NewSessionTarget::Local(id)) => Some(id),
             _ => None,
@@ -1493,91 +1459,75 @@ impl MuxlaneApp {
                 self.active
                     .as_ref()
                     .and_then(|id| self.last_snapshot.agent(id))
-                    .and_then(|a| self.last_snapshot.project(&a.project))
+                    .and_then(|agent| self.last_snapshot.project(&agent.project))
                     .cloned()
             })
             .or_else(|| self.last_snapshot.projects.first().cloned());
         let Some(project) = project else { return };
-        let agent_id = muxlane_core::model::new_id(preset.agent_type.as_str());
-        let tmux_name = format!("muxlane-{}", agent_id);
-        let mut cfg = muxlane_term::LaunchCfg {
-            agent: agent_id.clone(),
-            agent_type: preset.agent_type,
-            cwd: project.path.clone(),
-            env: preset
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            program_override: if preset.agent_type == muxlane_core::model::AgentType::Shell {
-                None
-            } else {
-                Some(
-                    preset
-                        .executable_in(&project.path)
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| preset.program.clone()),
-                )
-            },
-            args: preset.args.clone(),
-            cols: 120,
-            rows: 32,
-            tmux_session: Some(tmux_name.clone()),
-        };
-        cfg.env.push(("MUXLANE_AGENT_ID".into(), agent_id.clone()));
-        cfg.env.push((
-            "MUXLANE_SOCKET".into(),
-            self.server.socket_path.display().to_string(),
-        ));
-        cfg.env.push((
-            "MUXLANE_HOOK_TOKEN".into(),
-            self.server.hook_token(&agent_id),
-        ));
-        let Ok(session) = muxlane_term::PtySession::spawn(cfg) else {
-            return;
-        };
-        self.server
-            .sessions
-            .blocking_lock()
-            .insert(agent_id.clone(), Arc::clone(&session));
-        let instance = muxlane_core::model::AgentInstance {
-            id: agent_id.clone(),
+        let params = muxlane_core::protocol::AgentSpawnParams {
             project: project.id.clone(),
-            agent_type: preset.agent_type,
-            title: preset.label.clone(),
-            status: muxlane_core::model::AgentStatus::Idle,
-            status_since: muxlane_core::model::now_secs(),
-            seen: true,
-            tmux_session: Some(tmux_name),
+            agent_type: Some(preset.agent_type),
+            program: (preset.agent_type != muxlane_core::model::AgentType::Shell).then(|| {
+                preset
+                    .executable_in(&project.path)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| preset.program.clone())
+            }),
+            args: Some(preset.args.clone()),
+            env: Some(preset.env.clone().into_iter().collect()),
+            preset_name: Some(preset.label.clone()),
         };
-        let project_key = format!("local:{}", project.id);
-        self.server
-            .state
-            .blocking_write()
-            .add_agent(project, instance);
-        self.server.dirty.bump();
-        let term = Self::create_local_term(
-            agent_id.clone(),
-            session,
-            &self.font_family,
-            Theme::for_mode(self.theme_mode),
-            cx,
-        );
-        self.collapsed_projects.remove(&project_key);
-        self.terms.insert(agent_id.clone(), term);
+        let server = Arc::clone(&self.server);
         let pane = self.active_pane.clone();
-        self.pane_tree.open_tab(&pane, agent_id.clone());
-        self.activate_tab(&pane, &agent_id);
-        self.focus_agent(&agent_id, window, cx);
-        self.palette_open = false;
-        self.new_session_target = None;
-        self.persist();
-        cx.notify();
+        let project_key = format!("local:{}", project.id);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let agent = server.spawn_agent(params).await?;
+                    let session = server
+                        .session(&agent.id)
+                        .await
+                        .ok_or_else(|| anyhow::anyhow!("spawned agent has no session"))?;
+                    Ok::<_, anyhow::Error>((agent, session))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok((agent, session)) => {
+                    let agent_id = agent.id.clone();
+                    let term = Self::create_local_term(
+                        agent_id.clone(),
+                        session,
+                        &this.font_family,
+                        Theme::for_mode(this.theme_mode),
+                        cx,
+                    );
+                    this.collapsed_projects.remove(&project_key);
+                    this.terms.insert(agent_id.clone(), term);
+                    this.pane_tree.open_tab(&pane, agent_id.clone());
+                    this.activate_tab(&pane, &agent_id);
+                    this.focus_agent(&agent_id, window, cx);
+                    this.palette_open = false;
+                    this.new_session_target = None;
+                    this.persist();
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.error_toast =
+                        Some((format!("创建会话失败：{error}"), std::time::Instant::now()));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
-    fn spawn_shell_for_pane(&mut self, pane: &PaneId, cx: &mut Context<Self>) -> Option<AgentId> {
-        let lifecycle = Arc::clone(&self.server.lifecycle);
-        let _lifecycle = lifecycle.blocking_lock();
+    fn spawn_shell_for_pane(
+        &mut self,
+        pane: &PaneId,
+        split_axis: Option<SplitAxis>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let project = self
             .pane_tree
             .group(pane)
@@ -1585,63 +1535,71 @@ impl MuxlaneApp {
             .and_then(|id| self.last_snapshot.agent(&id))
             .and_then(|agent| self.last_snapshot.project(&agent.project))
             .cloned()
-            .or_else(|| self.last_snapshot.projects.first().cloned())?;
-        let project_id = project.id.clone();
-        let agent_id = muxlane_core::model::new_id("shell");
-        let tmux_name = format!("muxlane-{}", agent_id);
-        let cfg = shell_split_launch_cfg(
-            agent_id.clone(),
-            project.path.clone(),
-            self.server.socket_path.display().to_string(),
-            self.server.hook_token(&agent_id),
-            tmux_name.clone(),
-        );
-        let session = muxlane_term::PtySession::spawn(cfg).ok()?;
-        self.server
-            .sessions
-            .blocking_lock()
-            .insert(agent_id.clone(), Arc::clone(&session));
-        let shell_title = muxlane_term::default_shell_program()
-            .rsplit('/')
-            .next()
-            .unwrap_or("shell")
-            .to_string();
-        self.server.state.blocking_write().add_agent(
-            project,
-            muxlane_core::model::AgentInstance {
-                id: agent_id.clone(),
-                project: project_id.clone(),
-                agent_type: muxlane_core::model::AgentType::Shell,
-                title: shell_title,
-                status: muxlane_core::model::AgentStatus::Idle,
-                status_since: muxlane_core::model::now_secs(),
-                seen: true,
-                tmux_session: Some(tmux_name),
-            },
-        );
-        self.server.dirty.bump();
-        let term = Self::create_local_term(
-            agent_id.clone(),
-            session,
-            &self.font_family,
-            Theme::for_mode(self.theme_mode),
-            cx,
-        );
-        let project_key = format!("local:{}", project_id);
-        self.collapsed_projects.remove(&project_key);
-        self.terms.insert(agent_id.clone(), term);
-        Some(agent_id)
+            .or_else(|| self.last_snapshot.projects.first().cloned());
+        let Some(project) = project else { return };
+        let params = muxlane_core::protocol::AgentSpawnParams {
+            project: project.id.clone(),
+            agent_type: Some(muxlane_core::model::AgentType::Shell),
+            program: None,
+            args: None,
+            env: None,
+            preset_name: None,
+        };
+        let server = Arc::clone(&self.server);
+        let pane = pane.clone();
+        let project_key = format!("local:{}", project.id);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let agent = server.spawn_agent(params).await?;
+                    let session = server
+                        .session(&agent.id)
+                        .await
+                        .ok_or_else(|| anyhow::anyhow!("spawned agent has no session"))?;
+                    Ok::<_, anyhow::Error>((agent, session))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok((agent, session)) => {
+                    let agent_id = agent.id.clone();
+                    let term = Self::create_local_term(
+                        agent_id.clone(),
+                        session,
+                        &this.font_family,
+                        Theme::for_mode(this.theme_mode),
+                        cx,
+                    );
+                    this.collapsed_projects.remove(&project_key);
+                    this.terms.insert(agent_id.clone(), term);
+                    if let Some(axis) = split_axis {
+                        if let Some(new_pane) = this.pane_tree.split(&pane, axis, agent_id.clone())
+                        {
+                            this.active_pane = new_pane;
+                            this.active = Some(agent_id.clone());
+                            this.maximized_pane = None;
+                        }
+                    } else {
+                        this.pane_tree.open_tab(&pane, agent_id.clone());
+                        this.activate_tab(&pane, &agent_id);
+                    }
+                    this.focus_agent(&agent_id, window, cx);
+                    this.persist();
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.error_toast = Some((
+                        format!("创建 Shell 失败：{error}"),
+                        std::time::Instant::now(),
+                    ));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn new_shell_tab(&mut self, pane: &PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(agent_id) = self.spawn_shell_for_pane(pane, cx) else {
-            return;
-        };
-        self.pane_tree.open_tab(pane, agent_id.clone());
-        self.activate_tab(pane, &agent_id);
-        self.focus_agent(&agent_id, window, cx);
-        self.persist();
-        cx.notify();
+        self.spawn_shell_for_pane(pane, None, window, cx);
     }
 
     /// 显式分屏：新 pane 始终启动普通 Shell，不复制当前 agent 类型。
@@ -1652,18 +1610,7 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(agent_id) = self.spawn_shell_for_pane(pane, cx) else {
-            return;
-        };
-        if let Some(new_pane) = self.pane_tree.split(pane, axis, agent_id.clone()) {
-            self.active_pane = new_pane;
-            self.active = Some(agent_id.clone());
-            // split 产生新 pane，必须退出最大化让它立即可见（herdr 语义）
-            self.maximized_pane = None;
-            self.focus_agent(&agent_id, window, cx);
-        }
-        self.persist();
-        cx.notify();
+        self.spawn_shell_for_pane(pane, Some(axis), window, cx);
     }
 
     fn toggle_maximize(&mut self, pane: &PaneId, cx: &mut Context<Self>) {
@@ -1692,9 +1639,10 @@ impl MuxlaneApp {
         };
         if let Some(index) = self.remotes.iter().position(|host| host.cfg.name == name) {
             self.remotes[index].stop();
-            self.server
-                .runtime
-                .block_on(muxlane_client::release_remote_tunnel(&name));
+            let release_name = name.clone();
+            self.server.rt_spawn(async move {
+                muxlane_client::release_remote_tunnel(&release_name).await;
+            });
             self.remotes.remove(index);
             self.remote_snaps.remove(&name);
             self.remote_states.remove(&name);
@@ -1826,26 +1774,34 @@ impl MuxlaneApp {
             cx.notify();
             return;
         }
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let project = muxlane_core::model::Project {
-            id: muxlane_core::model::new_id("project"),
-            name,
-            path,
-            branch: None,
-            agents: vec![],
+        let server = Arc::clone(&self.server);
+        let params = muxlane_core::protocol::ProjectAddParams {
+            path: path.display().to_string(),
+            name: None,
         };
-        if self.server.state.blocking_write().add_project(project) {
-            self.last_snapshot = self.server.state.blocking_read().snapshot();
-            self.server.dirty.bump();
-            self.project_dialog = false;
-            self.dialog_error = None;
-            self.project_input.update(cx, |input, cx| input.reset(cx));
-            self.persist();
-        }
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    server.add_project(params).await?;
+                    Ok::<_, anyhow::Error>(server.snapshot().await)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(snapshot) => {
+                    this.last_snapshot = snapshot;
+                    this.project_dialog = false;
+                    this.dialog_error = None;
+                    this.project_input.update(cx, |input, cx| input.reset(cx));
+                    this.persist();
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.dialog_error = Some(error.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn handle_project_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
@@ -1864,7 +1820,13 @@ impl MuxlaneApp {
         cx.notify();
     }
 
-    fn delete_session(&mut self, agent: &AgentId, remote: bool, cx: &mut Context<Self>) {
+    fn delete_session(
+        &mut self,
+        agent: &AgentId,
+        remote: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if remote {
             let host_name = self
                 .remote_snaps
@@ -1875,13 +1837,13 @@ impl MuxlaneApp {
                 if let Some(host) = self
                     .remotes
                     .iter()
-                    .find(|h| h.cfg.name == host_name)
+                    .find(|host| host.cfg.name == host_name)
                     .cloned()
                 {
-                    if let Some(sock) = host.endpoint_now() {
+                    if let Some(socket) = host.endpoint_now() {
                         let id = agent.clone();
                         self.server.rt_spawn(async move {
-                            let _ = muxlane_client::delete_agent(&sock, &id).await;
+                            let _ = muxlane_client::delete_agent(&socket, &id).await;
                         });
                     }
                 }
@@ -1892,14 +1854,57 @@ impl MuxlaneApp {
                     }
                 }
             }
-        } else {
-            let session = self.server.sessions.blocking_lock().remove(agent);
-            if let Some(sess) = session {
-                sess.kill_persistent();
-            }
-            self.server.state.blocking_write().remove_agent(agent);
-            self.server.dirty.bump();
+            self.finish_delete_session(agent, window, cx);
+            return;
         }
+
+        let server = Arc::clone(&self.server);
+        let agent = agent.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let agent_for_delete = agent.clone();
+            let (result, snapshot) = cx
+                .background_spawn(async move {
+                    let result = server.delete_agent(&agent_for_delete).await;
+                    let snapshot = server.snapshot().await;
+                    (result, snapshot)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.last_snapshot = snapshot;
+                match result {
+                    Ok(result) if result.failed_agents.is_empty() => {
+                        this.finish_delete_session(&agent, window, cx);
+                    }
+                    Ok(result) => {
+                        this.error_toast = Some((
+                            format!(
+                                "{} 个 tmux 会话未能销毁，会话仍保留",
+                                result.failed_agents.len()
+                            ),
+                            std::time::Instant::now(),
+                        ));
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        if this.last_snapshot.agent(&agent).is_none() {
+                            this.finish_delete_session(&agent, window, cx);
+                        }
+                        this.error_toast =
+                            Some((format!("删除会话失败：{error}"), std::time::Instant::now()));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn finish_delete_session(
+        &mut self,
+        agent: &AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
             self.pane_tree.close_tab(&pane, agent);
         }
@@ -1907,14 +1912,17 @@ impl MuxlaneApp {
         if let Some(cancelled) = self.mirror_cancel.remove(agent) {
             cancelled.store(true, std::sync::atomic::Ordering::Release);
         }
-        self.notifications.retain(|n| &n.agent != agent);
+        self.notifications.retain(|item| &item.agent != agent);
         if self.active.as_ref() == Some(agent) {
             self.active = self
                 .pane_tree
                 .group(&self.active_pane)
-                .and_then(|g| g.active.clone());
+                .and_then(|group| group.active.clone());
         }
         self.session_menu = None;
+        if let Some(active) = self.active.clone() {
+            self.focus_agent(&active, window, cx);
+        }
         self.persist();
         cx.notify();
     }
@@ -2003,66 +2011,53 @@ impl MuxlaneApp {
         self.delete_busy = true;
         match confirm.target {
             DeleteTarget::LocalProject { project, .. } => {
-                let lifecycle = Arc::clone(&self.server.lifecycle);
-                let _lifecycle = lifecycle.blocking_lock();
-                let agents: Vec<_> = self
-                    .server
-                    .state
-                    .blocking_read()
+                let server = Arc::clone(&self.server);
+                let project_for_delete = project.clone();
+                let affected_agents: Vec<_> = self
+                    .last_snapshot
                     .agents
                     .iter()
                     .filter(|agent| agent.project == project)
                     .map(|agent| agent.id.clone())
                     .collect();
-                let sessions: HashMap<_, _> = {
-                    let mut live = self.server.sessions.blocking_lock();
-                    agents
-                        .iter()
-                        .filter_map(|agent| {
-                            live.remove(agent).map(|session| (agent.clone(), session))
+                cx.spawn(async move |this, cx| {
+                    let (result, snapshot) = cx
+                        .background_spawn(async move {
+                            let result = server.delete_project(&project_for_delete).await;
+                            let snapshot = server.snapshot().await;
+                            (result, snapshot)
                         })
-                        .collect()
-                };
-                let mut destroyed = Vec::new();
-                let mut failed = Vec::new();
-                for agent in &agents {
-                    if sessions
-                        .get(agent)
-                        .is_none_or(|session| session.kill_persistent())
-                    {
-                        destroyed.push(agent.clone());
-                    } else {
-                        failed.push(agent.clone());
-                    }
-                }
-                {
-                    let mut subs = self.server.subs.blocking_lock();
-                    for agent in &destroyed {
-                        subs.mark_agent_exit(agent);
-                    }
-                }
-                {
-                    let mut state = self.server.state.blocking_write();
-                    for agent in &destroyed {
-                        state.remove_agent(agent);
-                    }
-                    if failed.is_empty() {
-                        state.projects.retain(|item| item.id != project);
-                    }
-                }
-                self.last_snapshot = self.server.state.blocking_read().snapshot();
-                self.server.dirty.bump();
-                self.cleanup_removed_agents(&destroyed);
-                if failed.is_empty() {
-                    self.delete_confirm = None;
-                    self.delete_busy = false;
-                } else {
-                    self.delete_error =
-                        Some(format!("{} 个 tmux 会话未能销毁，项目仍保留", failed.len()));
-                    self.delete_busy = false;
-                }
-                self.persist();
-                cx.notify();
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.last_snapshot = snapshot;
+                        match result {
+                            Ok(result) => {
+                                this.cleanup_removed_agents(&result.destroyed_agents);
+                                if result.failed_agents.is_empty() {
+                                    this.delete_confirm = None;
+                                } else {
+                                    this.delete_error = Some(format!(
+                                        "{} 个 tmux 会话未能销毁，项目仍保留",
+                                        result.failed_agents.len()
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                let removed: Vec<_> = affected_agents
+                                    .iter()
+                                    .filter(|agent| this.last_snapshot.agent(agent).is_none())
+                                    .cloned()
+                                    .collect();
+                                this.cleanup_removed_agents(&removed);
+                                this.delete_error = Some(error.to_string());
+                            }
+                        }
+                        this.delete_busy = false;
+                        this.persist();
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             DeleteTarget::RemoteProject { host, project, .. } => {
                 let endpoint = self
@@ -2076,16 +2071,15 @@ impl MuxlaneApp {
                     cx.notify();
                     return;
                 };
-                let runtime = self.server.runtime.clone();
                 let project_for_rpc = project.clone();
                 cx.spawn(async move |this, cx| {
-                    let result = runtime
-                        .spawn(async move {
+                    let result = cx
+                        .background_spawn(async move {
                             muxlane_client::delete_project(&endpoint, &project_for_rpc).await
                         })
                         .await;
                     let _ = this.update(cx, |this, cx| match result {
-                        Ok(Ok(result)) => {
+                        Ok(result) => {
                             if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
                                 if result.failed_agents.is_empty() {
                                     snapshot.projects.retain(|item| item.id != project);
@@ -2105,11 +2099,6 @@ impl MuxlaneApp {
                             }
                             this.delete_busy = false;
                             this.persist();
-                            cx.notify();
-                        }
-                        Ok(Err(error)) => {
-                            this.delete_error = Some(error.to_string());
-                            this.delete_busy = false;
                             cx.notify();
                         }
                         Err(error) => {
@@ -2194,7 +2183,7 @@ impl MuxlaneApp {
                     .on_click(cx.listener({
                         let id = menu.agent.clone();
                         let remote = menu.remote;
-                        move |this, _ev, _window, cx| this.delete_session(&id, remote, cx)
+                        move |this, _ev, window, cx| this.delete_session(&id, remote, window, cx)
                     }))
                     .child(if menu.remote {
                         "删除远程会话"
@@ -2519,10 +2508,9 @@ impl MuxlaneApp {
             return;
         };
         let host_name = confirm.host.clone();
-        let runtime = self.server.runtime.clone();
         cx.spawn(async move |this, cx| {
-            let result = runtime
-                .spawn(async move {
+            let result = cx
+                .background_spawn(async move {
                     if confirm.upgrade {
                         remote.upgrade_and_retry().await
                     } else if confirm.install {
@@ -2537,23 +2525,19 @@ impl MuxlaneApp {
             let _ = this.update(cx, |this, cx| {
                 this.bootstrap_progress.remove(&host_name);
                 match result {
-                    Ok(Ok(())) => {
+                    Ok(()) => {
                         this.bootstrap_confirm = None;
                         this.bootstrap_error = None;
                         cx.notify();
                     }
-                    Ok(Err(error)) => {
-                        let err_str = error.to_string();
-                        if err_str.contains("已取消") {
+                    Err(error) => {
+                        let error = error.to_string();
+                        if error.contains("已取消") {
                             this.bootstrap_confirm = None;
                             this.bootstrap_error = None;
                         } else {
-                            this.bootstrap_error = Some(err_str);
+                            this.bootstrap_error = Some(error);
                         }
-                        cx.notify();
-                    }
-                    Err(error) => {
-                        this.bootstrap_error = Some(error.to_string());
                         cx.notify();
                     }
                 }
@@ -3686,16 +3670,15 @@ impl MuxlaneApp {
         let Some(endpoint) = endpoint else {
             return;
         };
-        let runtime = self.server.runtime.clone();
         let target_project = project.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result = runtime
-                .spawn(async move {
+            let result = cx
+                .background_spawn(async move {
                     muxlane_client::spawn_agent(&endpoint, &project, preset.as_ref()).await
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(Ok(agent)) => {
+                Ok(agent) => {
                     let agent_id = agent.id.clone();
                     if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
                         if let Some(project) = snapshot
@@ -3716,7 +3699,7 @@ impl MuxlaneApp {
                     this.persist();
                     cx.notify();
                 }
-                Ok(Err(error)) => {
+                Err(error) => {
                     let text = error.to_string();
                     this.error_toast = Some((
                         format!("远程创建会话失败：{text}"),
@@ -3737,13 +3720,6 @@ impl MuxlaneApp {
                             .detach();
                         }
                     }
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.error_toast = Some((
-                        format!("远程创建会话失败：{error}"),
-                        std::time::Instant::now(),
-                    ));
                     cx.notify();
                 }
             });
@@ -3767,13 +3743,14 @@ impl MuxlaneApp {
             cx.notify();
             return;
         }
-        let runtime = self.server.runtime.clone();
         cx.spawn(async move |this, cx| {
-            let result = runtime
-                .spawn(async move { muxlane_client::add_project(&endpoint, path.trim()).await })
+            let result = cx
+                .background_spawn(async move {
+                    muxlane_client::add_project(&endpoint, path.trim()).await
+                })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
-                Ok(Ok(project)) => {
+                Ok(project) => {
                     if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
                         if !snapshot.projects.iter().any(|item| item.id == project.id) {
                             snapshot.projects.push(project);
@@ -3784,7 +3761,7 @@ impl MuxlaneApp {
                     this.persist();
                     cx.notify();
                 }
-                Ok(Err(error)) => {
+                Err(error) => {
                     let text = error.to_string();
                     if text.contains("unknown_method")
                         && text.contains(muxlane_core::protocol::features::PROJECT_ADD)
@@ -3807,10 +3784,6 @@ impl MuxlaneApp {
                     } else {
                         this.dialog_error = Some(text);
                     }
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.dialog_error = Some(error.to_string());
                     cx.notify();
                 }
             });
@@ -4478,7 +4451,7 @@ impl MuxlaneApp {
                         .iter()
                         .any(|candidate| candidate.id == agent)
                 });
-                self.delete_session(&agent, remote, cx);
+                self.delete_session(&agent, remote, window, cx);
             }
             if let Ok(mut metrics) = self.split_metrics.lock() {
                 metrics.clear();
@@ -5044,21 +5017,6 @@ impl MuxlaneApp {
         }
     }
 }
-/// P0 临时：短超时阻塞拿会话表（调用方保证持有少量临界区）
-fn futures_lite_block(
-    m: &Arc<tokio::sync::Mutex<HashMap<AgentId, Arc<muxlane_term::PtySession>>>>,
-) -> MutexGuardMap<'_> {
-    match m.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            m.blocking_lock()
-        }
-    }
-}
-type MutexGuardMap<'a> =
-    tokio::sync::MutexGuard<'a, HashMap<AgentId, Arc<muxlane_term::PtySession>>>;
-
 fn format_relative_time(then: u64, lang: Language) -> String {
     let now = muxlane_core::model::now_secs();
     let diff = now.saturating_sub(then);
@@ -6675,23 +6633,5 @@ mod tests {
         assert!(session_menu.is_none());
         assert!(tree_menu.is_none());
         assert!(!dismiss_context_menus(&mut session_menu, &mut tree_menu));
-    }
-
-    #[test]
-    fn explicit_split_launch_config_is_always_shell() {
-        let cfg = shell_split_launch_cfg(
-            "new-pane".into(),
-            std::env::temp_dir(),
-            "/tmp/muxlane.sock".into(),
-            "token".into(),
-            "muxlane-new-pane".into(),
-        );
-        assert_eq!(cfg.agent_type, muxlane_core::model::AgentType::Shell);
-        assert!(cfg
-            .env
-            .iter()
-            .any(|(key, value)| key == "MUXLANE_AGENT_ID" && value == "new-pane"));
-        assert!(cfg.program_override.is_none());
-        assert_eq!(cfg.tmux_session.as_deref(), Some("muxlane-new-pane"));
     }
 }
