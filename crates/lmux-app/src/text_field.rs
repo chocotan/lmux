@@ -1,6 +1,8 @@
+use crate::theme::{Theme, ThemeMode};
 use gpui::{
-    canvas, div, prelude::*, px, rgba, Bounds, Context, ElementInputHandler, EntityInputHandler,
-    FocusHandle, Focusable, Pixels, Point, Render, SharedString, UTF16Selection, Window,
+    canvas, div, point, prelude::*, px, rgba, size, Bounds, Context, ElementInputHandler,
+    EntityInputHandler, FocusHandle, Focusable, Pixels, Point, Render, SharedString,
+    UTF16Selection, Window,
 };
 use std::ops::Range;
 
@@ -42,7 +44,7 @@ pub struct TextField {
     selected_range: Range<usize>,
     marked_range: Option<Range<usize>>,
     secure: bool,
-    dark_mode: bool,
+    theme_mode: ThemeMode,
 }
 
 impl TextField {
@@ -54,7 +56,7 @@ impl TextField {
             selected_range: 0..0,
             marked_range: None,
             secure: false,
-            dark_mode: false,
+            theme_mode: ThemeMode::Light,
         }
     }
 
@@ -64,8 +66,8 @@ impl TextField {
         field
     }
 
-    pub fn set_dark_mode(&mut self, dark: bool, cx: &mut Context<Self>) {
-        self.dark_mode = dark;
+    pub fn set_theme_mode(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
+        self.theme_mode = mode;
         cx.notify();
     }
 
@@ -407,12 +409,20 @@ impl EntityInputHandler for TextField {
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
+        range_utf16: Range<usize>,
         element_bounds: Bounds<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        Some(element_bounds)
+        let pad = 12.0;
+        let approx_char = 7.2;
+        let start = utf16_to_byte(&self.content, range_utf16.start).min(self.content.len());
+        let prefix = self.content[..start].chars().count();
+        let x = f32::from(element_bounds.origin.x) + pad + prefix as f32 * approx_char;
+        Some(Bounds {
+            origin: point(px(x), element_bounds.origin.y),
+            size: size(px(2.), element_bounds.size.height),
+        })
     }
 
     fn character_index_for_point(
@@ -431,34 +441,15 @@ impl Render for TextField {
         let focus = self.focus.clone();
         let focused = focus.is_focused(window);
 
-        let border_c = if focused {
-            if self.dark_mode {
-                0x528bff
-            } else {
-                0x3d6cd8ff
-            }
-        } else if self.dark_mode {
-            0x3e4451ff
-        } else {
-            0xd8d6ceff
-        };
-        let bg_c = if self.dark_mode {
-            0x21252bff
-        } else {
-            0xfafaf7ff
-        };
+        let theme = Theme::for_mode(self.theme_mode);
+        let border_c = if focused { theme.accent } else { theme.line };
+        let bg_c = theme.bg0;
         let text_c = if self.content.is_empty() {
-            if self.dark_mode {
-                0x5c6370ff
-            } else {
-                0x8b90a0ff
-            }
-        } else if self.dark_mode {
-            0xd7dae0ff
+            theme.fg2
         } else {
-            0x252525ff
+            theme.fg0
         };
-        let cursor_c = if self.dark_mode { 0x528bff } else { 0x3d6cd8ff };
+        let cursor_c = theme.accent;
 
         let content_len = self.content.len();
         let sel_start = self.selected_range.start.min(content_len);
@@ -506,15 +497,7 @@ impl Render for TextField {
                 row = row.child(div().child(before));
             }
             if has_selection {
-                row = row.child(
-                    div()
-                        .bg(rgba(if self.dark_mode {
-                            0x3d6cd866
-                        } else {
-                            0x3d6cd844
-                        }))
-                        .child(selected),
-                );
+                row = row.child(div().bg(rgba(theme.selection())).child(selected));
             } else {
                 row = row.child(div().w(px(1.5)).h(px(16.)).bg(rgba(cursor_c)));
             }

@@ -40,22 +40,35 @@ pub fn default_shell_program() -> String {
             return s.to_string();
         }
     }
-    // /etc/passwd 登录 shell
-    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
-        let uid = unsafe { libc_getuid() };
-        for line in passwd.lines() {
-            let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 7 && fields[2].parse::<u32>().ok() == Some(uid) {
-                let sh = fields[6];
-                if std::path::Path::new(sh).exists() {
-                    return sh.to_string();
+    #[cfg(unix)]
+    {
+        // /etc/passwd 登录 shell
+        if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+            let uid = unsafe { libc_getuid() };
+            for line in passwd.lines() {
+                let fields: Vec<&str> = line.split(':').collect();
+                if fields.len() >= 7 && fields[2].parse::<u32>().ok() == Some(uid) {
+                    let sh = fields[6];
+                    if std::path::Path::new(sh).exists() {
+                        return sh.to_string();
+                    }
                 }
             }
         }
+        "/bin/bash".into()
     }
-    "/bin/bash".into()
+    #[cfg(not(unix))]
+    {
+        if let Ok(pwsh) = std::env::var("COMSPEC") {
+            if !pwsh.trim().is_empty() {
+                return pwsh;
+            }
+        }
+        "powershell.exe".into()
+    }
 }
 
+#[cfg(unix)]
 extern "C" {
     #[link_name = "getuid"]
     fn libc_getuid() -> u32;
@@ -385,6 +398,31 @@ impl PtySession {
             let _ = killer.kill();
         }
     }
+
+    /// 从后台 tmux 会话捕获历史缓冲区（解决首次/重连 attach 时历史缺失）。
+    pub fn capture_history(&self) -> Option<Vec<u8>> {
+        let name = self.tmux_session_name.as_deref()?;
+        let target = format!("={name}");
+        let output = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                "lmux",
+                "capture-pane",
+                "-p",
+                "-e",
+                "-S",
+                "-50000",
+                "-t",
+                &target,
+            ])
+            .output()
+            .ok()?;
+        if output.status.success() && !output.stdout.is_empty() {
+            Some(output.stdout)
+        } else {
+            None
+        }
+    }
 }
 
 fn update_tmux_environment(session: &str, env: &[(String, String)]) {
@@ -398,41 +436,21 @@ fn update_tmux_environment(session: &str, env: &[(String, String)]) {
 }
 
 fn configure_tmux_server() {
+    // 完全采用 remote-agent 方案：
+    // mouse on：tmux 原生全面接管鼠标（滚轮向上自动进入 copy-mode 浏览历史，滚轮向下到底自动退出，
+    // 在全屏/AltScreen 应用如 vim/codex/pi 中自动透传滚轮），
+    // 选区按住 Shift 则仍可在前端直接划词复制。
     for (option, value) in [
         ("status", "off"),
         ("mouse", "on"),
         ("extended-keys", "on"),
         ("extended-keys-format", "csi-u"),
+        ("history-limit", "50000"),
+        ("set-clipboard", "external"),
+        ("set-titles", "off"),
     ] {
         let _ = std::process::Command::new("tmux")
             .args(["-L", "lmux", "set-option", "-g", option, value])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-    // 禁用 tmux 内置鼠标拖拽进入 copy-mode（避免拖拽调整大小时被 tmux 截获并卡在 0/0，同时保留鼠标滚轮滚动）
-    for cmd in [
-        &["-L", "lmux", "unbind-key", "-n", "MouseDrag1Pane"][..],
-        &["-L", "lmux", "unbind-key", "-n", "MouseDrag1Border"][..],
-        &[
-            "-L",
-            "lmux",
-            "unbind-key",
-            "-T",
-            "copy-mode",
-            "MouseDrag1Pane",
-        ][..],
-        &[
-            "-L",
-            "lmux",
-            "unbind-key",
-            "-T",
-            "copy-mode-vi",
-            "MouseDrag1Pane",
-        ][..],
-    ] {
-        let _ = std::process::Command::new("tmux")
-            .args(cmd)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
@@ -451,7 +469,41 @@ fn tmux_config_path() -> PathBuf {
         let _ = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
     }
     let path = base.join("tmux.conf");
-    const CONFIG: &str = "set -g status off\nset -g mouse on\nunbind -n MouseDrag1Pane\nunbind -n MouseDrag1Border\nunbind -T copy-mode MouseDrag1Pane\nunbind -T copy-mode-vi MouseDrag1Pane\nset -g extended-keys on\nset -g extended-keys-format csi-u\nset -g default-terminal tmux-256color\nset -ag terminal-overrides ',xterm-256color:RGB'\n";
+    const CONFIG: &str = "\
+set-option -g status off
+set-option -g set-titles off
+set-option -g default-terminal \"xterm-256color\"
+set-option -g terminal-overrides \",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB\"
+set-option -ga terminal-features \",xterm-256color:RGB:clipboard,tmux-256color:RGB:clipboard,*-256color:RGB:clipboard,*:clipboard\"
+set-option -g xterm-keys on
+set-option -g history-limit 50000
+set-option -g window-size latest
+set-option -g mouse on
+set-option -g set-clipboard external
+set-option -sg escape-time 10
+set-environment -gu NO_COLOR
+set-environment -g COLORTERM truecolor
+set-environment -g CLICOLOR 1
+set-environment -g CLICOLOR_FORCE 1
+set-environment -g FORCE_COLOR 1
+set-window-option -g allow-rename on
+set-window-option -g automatic-rename off
+set-window-option -g mode-keys vi
+bind-key v copy-mode
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+bind-key -T copy-mode-vi Enter send-keys -X copy-selection-and-cancel
+bind-key -T copy-mode-vi Escape send-keys -X cancel
+bind-key -n MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -M }
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-and-cancel
+bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-selection-and-cancel
+bind-key -T copy-mode-vi MouseUp1Pane send-keys -X copy-selection-and-cancel
+bind-key -T copy-mode MouseUp1Pane send-keys -X copy-selection-and-cancel
+bind-key -T copy-mode-vi DoubleClick1Pane send-keys -X select-word \\; send-keys -X copy-pipe
+bind-key -n DoubleClick1Pane copy-mode -H \\; send-keys -X select-word \\; send-keys -X copy-pipe
+bind-key -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X copy-pipe
+bind-key -n TripleClick1Pane copy-mode -H \\; send-keys -X select-line \\; send-keys -X copy-pipe
+";
     if std::fs::read_to_string(&path).ok().as_deref() != Some(CONFIG) {
         let _ = std::fs::write(&path, CONFIG);
         #[cfg(unix)]
@@ -501,10 +553,14 @@ mod tests {
     #[test]
     fn lmux_tmux_config_enables_scrollback_without_status_bar() {
         let config = std::fs::read_to_string(tmux_config_path()).unwrap();
-        assert!(config.contains("set -g mouse on"));
-        assert!(config.contains("set -g status off"));
-        assert!(config.contains("set -g extended-keys on"));
-        assert!(config.contains("set -g extended-keys-format csi-u"));
+        assert!(config.contains("set-option -g mouse on"));
+        assert!(config.contains("set-option -g set-titles off"));
+        assert!(config.contains("set-option -g status off"));
+        assert!(config.contains("set-option -g xterm-keys on"));
+        assert!(config.contains("set-option -g history-limit 50000"));
+        assert!(config.contains("copy-mode -M"));
+        assert!(config.contains("MouseDragEnd1Pane"));
+        assert!(config.contains("MouseUp1Pane"));
     }
 
     #[tokio::test]

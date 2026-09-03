@@ -240,9 +240,10 @@ pub struct TermView {
     scroll_accum: Arc<std::sync::Mutex<f32>>,
     scrollbar_drag: Option<f32>,
     selecting: bool,
-    mouse_press_pending: Option<u8>,
+    forwarding_mouse: bool,
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
     _drain: Task<()>,
+    _clipboard: Task<()>,
 }
 
 impl EventEmitter<TermEnterEvent> for TermView {}
@@ -262,10 +263,23 @@ impl TermView {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> Self {
-        let vterm = VTerm::new(120, 32);
+        let (vterm, mut clipboard_rx) = VTerm::new_with_clipboard(120, 32);
         let (replay, mut rx) = session.subscribe();
         vterm.feed(&replay);
         let vterm_for_task = vterm.clone();
+        let clipboard = cx.spawn(async move |view, cx| {
+            while let Some(text) = clipboard_rx.recv().await {
+                let stop = view
+                    .update(cx, move |_view, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        cx.write_to_primary(ClipboardItem::new_string(text));
+                    })
+                    .is_err();
+                if stop {
+                    break;
+                }
+            }
+        });
         let session_for_task = Arc::clone(&session);
         let drain = cx.spawn(async move |view, cx| {
             loop {
@@ -317,9 +331,10 @@ impl TermView {
             scroll_accum: Arc::new(std::sync::Mutex::new(0.0)),
             scrollbar_drag: None,
             selecting: false,
-            mouse_press_pending: None,
+            forwarding_mouse: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             _drain: drain,
+            _clipboard: clipboard,
         }
     }
 
@@ -333,6 +348,9 @@ impl TermView {
         cx: &mut Context<Self>,
     ) -> Self {
         let idle = cx.spawn(async move |_view, _cx| {
+            std::future::pending::<()>().await;
+        });
+        let idle_clip = cx.spawn(async move |_view, _cx| {
             std::future::pending::<()>().await;
         });
         Self {
@@ -349,9 +367,10 @@ impl TermView {
             scroll_accum: Arc::new(std::sync::Mutex::new(0.0)),
             scrollbar_drag: None,
             selecting: false,
-            mouse_press_pending: None,
+            forwarding_mouse: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             _drain: idle,
+            _clipboard: idle_clip,
         }
     }
 
@@ -394,24 +413,25 @@ impl TermView {
 
     fn finish_mouse(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
         let mut handled = false;
-        if let Some(button) = self.mouse_press_pending.take() {
+        if self.forwarding_mouse {
             if let (Some(sink), Some((line, col, _))) =
                 (self.input_sink(), self.grid_point(event.position))
             {
-                let modes = self.vterm.modes();
+                let sgr = self.vterm.modes().mouse && self.vterm.modes().sgr_mouse;
                 sink.write(&mouse_report(
-                    button,
+                    0,
                     col,
                     line.max(0) as usize,
-                    modes.sgr_mouse,
+                    sgr,
                     false,
                     event.modifiers.shift,
                     event.modifiers.alt,
                     event.modifiers.control,
                     false,
                 ));
-                handled = true;
             }
+            self.forwarding_mouse = false;
+            handled = true;
         }
         if event.button == MouseButton::Left && self.selecting {
             self.selecting = false;
@@ -420,7 +440,7 @@ impl TermView {
                 .selection_to_string()
                 .filter(|text| !text.is_empty())
             {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.write_to_primary(ClipboardItem::new_string(text));
             }
             handled = true;
         }
@@ -428,6 +448,36 @@ impl TermView {
             cx.stop_propagation();
             cx.notify();
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn report_mouse(
+        &self,
+        button: u8,
+        col: usize,
+        line: i32,
+        pressed: bool,
+        motion: bool,
+        shift: bool,
+        alt: bool,
+        control: bool,
+    ) {
+        let Some(sink) = self.input_sink() else {
+            return;
+        };
+        // tmux 作为外层终端默认认 X10 鼠标协议；应用自开 SGR 时再切 SGR。
+        let sgr = self.vterm.modes().mouse && self.vterm.modes().sgr_mouse;
+        sink.write(&mouse_report(
+            button,
+            col,
+            line.max(0) as usize,
+            sgr,
+            pressed,
+            shift,
+            alt,
+            control,
+            motion,
+        ));
     }
 
     fn keystroke_bytes(ks: &gpui::Keystroke) -> Vec<u8> {
@@ -485,11 +535,12 @@ impl TermView {
     }
 
     fn paste_clipboard(&self, cx: &mut Context<Self>) {
-        let Some(text) = cx
+        let text = cx
             .read_from_clipboard()
             .and_then(|item| item.text())
-            .filter(|text| !text.is_empty())
-        else {
+            .or_else(|| cx.read_from_primary().and_then(|item| item.text()))
+            .filter(|text| !text.is_empty());
+        let Some(text) = text else {
             return;
         };
         let Some(sink) = self.input_sink() else {
@@ -538,7 +589,9 @@ impl TermView {
 
         let modes = self.vterm.modes();
         let count = lines.unsigned_abs().min(100) as usize;
-        if modes.mouse {
+        // tmux mouse on 时，主屏滚轮也发给 PTY，由 tmux 进 copy-mode 滚完整 history。
+        // 应用自开 mouse tracking（vim/htop）时同样转发。
+        if modes.mouse || !modes.alt_screen {
             let Some(sink) = self.input_sink() else {
                 return;
             };
@@ -546,7 +599,7 @@ impl TermView {
                 lines > 0,
                 col,
                 row,
-                modes.sgr_mouse,
+                modes.mouse && modes.sgr_mouse,
                 event.modifiers.shift,
                 event.modifiers.alt,
                 event.modifiers.control,
@@ -554,7 +607,7 @@ impl TermView {
             for _ in 0..count {
                 sink.write(&report);
             }
-        } else if modes.alt_screen && modes.alternate_scroll {
+        } else if modes.alternate_scroll || modes.alt_screen {
             let Some(sink) = self.input_sink() else {
                 return;
             };
@@ -655,7 +708,7 @@ fn mouse_report(
 ) -> Vec<u8> {
     let mut code = if motion {
         32 + button
-    } else if pressed {
+    } else if sgr {
         button
     } else {
         3
@@ -677,7 +730,7 @@ fn mouse_report(
             0x1b,
             b'[',
             b'M',
-            if motion { code } else { 32 + code },
+            32 + code,
             (33 + col.min(222)) as u8,
             (33 + row.min(222)) as u8,
         ]
@@ -720,7 +773,8 @@ impl Render for TermView {
                         .selection_to_string()
                         .filter(|text| !text.is_empty())
                     {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        cx.write_to_primary(ClipboardItem::new_string(text));
                         cx.stop_propagation();
                         return;
                     }
@@ -929,11 +983,11 @@ impl Render for TermView {
                                         state.inner.origin.y + state.line_height * run.row as f32,
                                     );
                                     let bg = if run.selected {
-                                        rgba(0xbed2f0ff).into()
+                                        rgba(term_theme.selection()).into()
                                     } else {
                                         run.bg
                                     };
-                                    if bg != rgba(0xffffffff).into() {
+                                    if bg != rgba(term_theme.bg0).into() {
                                         window.paint_quad(fill(
                                             Bounds {
                                                 origin,
@@ -958,7 +1012,7 @@ impl Render for TermView {
                                     );
                                 }
                                 if let Some(cursor) = state.visible_cursor {
-                                    let mut color = rgba(0x3d6cd8c0);
+                                    let mut color = rgba(term_theme.cursor());
                                     if !focused {
                                         color.a = 0.35;
                                     }
@@ -973,6 +1027,7 @@ impl Render for TermView {
             )
             .child(
                 div()
+                    .id("term-selection-layer")
                     .absolute()
                     .size_full()
                     .on_mouse_down(
@@ -993,25 +1048,25 @@ impl Render for TermView {
                                     return;
                                 }
                             }
-                            let modes = this.vterm.modes();
-                            if modes.mouse && !event.modifiers.shift {
-                                if let Some(sink) = this.input_sink() {
-                                    sink.write(&mouse_report(
-                                        0,
-                                        col,
-                                        line.max(0) as usize,
-                                        modes.sgr_mouse,
-                                        true,
-                                        event.modifiers.shift,
-                                        event.modifiers.alt,
-                                        event.modifiers.control,
-                                        false,
-                                    ));
-                                    this.mouse_press_pending = Some(0);
-                                }
-                            } else {
+                            // Shift：本地划选。其余拖选/点击交给 tmux（mouse on + copy-mode）。
+                            if event.modifiers.shift {
                                 this.vterm.begin_selection(line, col, right);
                                 this.selecting = true;
+                                this.forwarding_mouse = false;
+                            } else {
+                                this.vterm.stop_selection();
+                                this.selecting = false;
+                                this.forwarding_mouse = true;
+                                this.report_mouse(
+                                    0,
+                                    col,
+                                    line,
+                                    true,
+                                    false,
+                                    false,
+                                    event.modifiers.alt,
+                                    event.modifiers.control,
+                                );
                             }
                             cx.stop_propagation();
                         }),
@@ -1021,7 +1076,7 @@ impl Render for TermView {
                     }))
                     .on_mouse_move(cx.listener(
                         |this, event: &gpui::MouseMoveEvent, _window, cx| {
-                            if this.selecting && event.pressed_button == Some(MouseButton::Left) {
+                            if this.selecting {
                                 if let Some((line, col, right)) = this.grid_point(event.position) {
                                     this.vterm.update_selection(line, col, right);
                                     cx.notify();
@@ -1029,29 +1084,21 @@ impl Render for TermView {
                                 cx.stop_propagation();
                                 return;
                             }
-                            if let (Some(button), true) = (
-                                this.mouse_press_pending,
-                                this.vterm.mouse_motion_reporting(),
-                            ) {
-                                if event.pressed_button == Some(MouseButton::Left) {
-                                    if let (Some(sink), Some((line, col, _))) =
-                                        (this.input_sink(), this.grid_point(event.position))
-                                    {
-                                        let modes = this.vterm.modes();
-                                        sink.write(&mouse_report(
-                                            button,
-                                            col,
-                                            line.max(0) as usize,
-                                            modes.sgr_mouse,
-                                            true,
-                                            event.modifiers.shift,
-                                            event.modifiers.alt,
-                                            event.modifiers.control,
-                                            true,
-                                        ));
-                                        cx.stop_propagation();
-                                    }
+                            if this.forwarding_mouse {
+                                if let Some((line, col, _)) = this.grid_point(event.position) {
+                                    this.report_mouse(
+                                        0,
+                                        col,
+                                        line,
+                                        true,
+                                        true,
+                                        event.modifiers.shift,
+                                        event.modifiers.alt,
+                                        event.modifiers.control,
+                                    );
                                 }
+                                cx.stop_propagation();
+                                return;
                             }
                             let Some(grab_offset) = this.scrollbar_drag else {
                                 return;
@@ -1096,7 +1143,7 @@ impl Render for TermView {
                                 .w(px(SCROLLBAR_WIDTH))
                                 .h(px(geometry.track_height))
                                 .rounded_sm()
-                                .bg(rgba(0x2a2e381a))
+                                .bg(rgba(term_theme.scrollbar_track()))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(
@@ -1133,7 +1180,7 @@ impl Render for TermView {
                                         .w_full()
                                         .h(px(geometry.thumb_height))
                                         .rounded_sm()
-                                        .bg(rgba(0x6f7480aa)),
+                                        .bg(rgba(term_theme.scrollbar_thumb())),
                                 ),
                         )
                     }),
@@ -1221,11 +1268,15 @@ mod tests {
         );
         assert_eq!(
             mouse_report(0, 1, 2, true, false, false, false, false, false),
-            b"\x1b[<3;2;3m"
+            b"\x1b[<0;2;3m"
         );
         assert_eq!(
             mouse_report(0, 1, 2, false, true, false, false, false, true),
-            vec![0x1b, b'[', b'M', 32, 34, 35]
+            vec![0x1b, b'[', b'M', 64, 34, 35]
+        );
+        assert_eq!(
+            mouse_report(0, 1, 2, false, false, false, false, false, false),
+            vec![0x1b, b'[', b'M', 35, 34, 35]
         );
     }
 

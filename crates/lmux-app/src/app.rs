@@ -5,9 +5,9 @@ use crate::term_view::TermView;
 use crate::text_field::TextField;
 use crate::theme::{Theme, ThemeMode};
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgba, svg, Context, Entity, FocusHandle, Focusable,
-    MouseButton, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Svg,
-    Window,
+    canvas, deferred, div, prelude::*, px, relative, rgba, svg, Context, Entity, FocusHandle,
+    Focusable, MouseButton, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString,
+    Styled, Svg, Window,
 };
 use lmux_core::model::{AgentId, Snapshot};
 use lmux_core::{PaneId, PaneNode, SplitAxis};
@@ -50,7 +50,7 @@ const CONNECT_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox=
 const THEME_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M20 15.5A8.5 8.5 0 1 1 8.5 4 6.5 6.5 0 0 0 20 15.5z'/></svg>"#;
 const NOTIFICATION_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9'/><path d='M10 21h4'/></svg>"#;
 const PLUS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round'><path d='M12 5v14M5 12h14'/></svg>"#;
-const SETTINGS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='3'/><path d='M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.41 1.41-.06-.06A1.7 1.7 0 0 0 16.45 18a1.7 1.7 0 0 0-1 .62 1.7 1.7 0 0 0-.4 1.1V20h-2v-.28a1.7 1.7 0 0 0-1.1-1.57 1.7 1.7 0 0 0-1.88.34l-.06.06-1.41-1.41.06-.06A1.7 1.7 0 0 0 8 15.55a1.7 1.7 0 0 0-.62-1 1.7 1.7 0 0 0-1.1-.4H6v-2h.28a1.7 1.7 0 0 0 1.57-1.1A1.7 1.7 0 0 0 7.5 9.17l-.06-.06 1.41-1.41.06.06A1.7 1.7 0 0 0 10.55 8a1.7 1.7 0 0 0 1-.62 1.7 1.7 0 0 0 .4-1.1V6h2v.28a1.7 1.7 0 0 0 1.1 1.57 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.41 1.41-.06.06A1.7 1.7 0 0 0 16 10.45a1.7 1.7 0 0 0 .62 1 1.7 1.7 0 0 0 1.1.4H18v2h-.28A1.7 1.7 0 0 0 16.15 15z'/></svg>"#;
+const SETTINGS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.7' stroke-linejoin='round'><path d='M9.38 5.67L10.72 3.04H13.28L14.62 5.67L17.43 4.76L19.24 6.57L18.33 9.38L20.96 10.72V13.28L18.33 14.62L19.24 17.43L17.43 19.24L14.62 18.33L13.28 20.96H10.72L9.38 18.33L6.57 19.24L4.76 17.43L5.67 14.62L3.04 13.28V10.72L5.67 9.38L4.76 6.57L6.57 4.76Z'/><circle cx='12' cy='12' r='3'/></svg>"#;
 const SVG_ASSETS: &[(&str, &[u8])] = &[
     ("icons/split-horizontal.svg", SPLIT_HORIZONTAL_ICON),
     ("icons/split-vertical.svg", SPLIT_VERTICAL_ICON),
@@ -83,7 +83,33 @@ fn panel_icon(data: &[u8], color: u32) -> Svg {
         .iter()
         .find_map(|(path, bytes)| (*bytes == data).then_some(*path))
         .expect("panel icon must be registered");
-    svg().path(path).size(px(14.)).text_color(rgba(color))
+    svg().path(path).size(px(15.)).text_color(rgba(color))
+}
+
+struct HoverTip {
+    text: SharedString,
+}
+
+impl Render for HoverTip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(rgba(0x1a1d24f2))
+            .border_1()
+            .border_color(rgba(0x00000066))
+            .text_size(px(11.))
+            .text_color(rgba(0xffffffff))
+            .child(self.text.clone())
+    }
+}
+
+fn hover_tip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView {
+    let text = text.into();
+    move |_, cx| cx.new(|_| HoverTip { text: text.clone() }).into()
 }
 #[derive(Clone)]
 struct DragTab {
@@ -238,6 +264,7 @@ pub struct LmuxApp {
     toast_seq: u64,
     theme_mode: ThemeMode,
     font_family: String,
+    notifications_open: bool,
     settings_open: bool,
     settings_theme_menu: bool,
     settings_font_menu: bool,
@@ -267,6 +294,7 @@ pub struct LmuxApp {
     tree_menu: Option<TreeMenu>,
     delete_confirm: Option<DeleteConfirm>,
     delete_error: Option<String>,
+    delete_busy: bool,
     bootstrap_confirm: Option<BootstrapConfirm>,
     bootstrap_error: Option<String>,
     store_path: std::path::PathBuf,
@@ -431,19 +459,29 @@ impl LmuxApp {
         })
         .detach();
 
-        // working spinner 动画、高帧率(40 FPS)丝滑呼吸闪烁与 toast 自动超时。
+        // working spinner / attention pulse / toast 超时只在确实需要动画时运行。
         cx.spawn(async move |this, cx| {
             let mut anim_tick: usize = 0;
             loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(25))
-                    .await;
+                let should_animate = match this.update(cx, |this, _cx| this.should_animate()) {
+                    Ok(should_animate) => should_animate,
+                    Err(_) => break,
+                };
+                let delay = if should_animate {
+                    std::time::Duration::from_millis(100)
+                } else {
+                    std::time::Duration::from_millis(250)
+                };
+                cx.background_executor().timer(delay).await;
+                if !should_animate {
+                    continue;
+                }
                 if this
                     .update(cx, |this, cx| {
                         anim_tick = anim_tick.wrapping_add(1);
-                        this.spinner_frame = (anim_tick / 4) % 8; // 100ms 每帧旋转
-                        this.pulse_phase = anim_tick % 72; // 1.8s 完整高分辨率正弦呼吸周期 (72 采样步进)
-                        if anim_tick.is_multiple_of(40) {
+                        this.spinner_frame = anim_tick % 8; // 100ms 每帧旋转
+                        this.pulse_phase = anim_tick % 36; // 3.6s 完整平滑呼吸周期
+                        if anim_tick.is_multiple_of(10) {
                             this.toasts.retain(|t| t.created_at.elapsed().as_secs() < 6);
                             if this
                                 .error_toast
@@ -617,46 +655,45 @@ impl LmuxApp {
             .as_deref()
             .and_then(Language::from_id)
             .unwrap_or_else(Language::detect);
-        let is_dark = theme_mode.is_dark();
         let palette_input = cx.new(|cx| {
             let mut field = TextField::new("输入命令、项目名或 Agent 名…", cx);
-            field.set_dark_mode(is_dark, cx);
+            field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_input = cx.new(|cx| {
             let mut field = TextField::new("nuc 或 192.168.1.20", cx);
-            field.set_dark_mode(is_dark, cx);
+            field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_username = cx.new(|cx| {
             let mut field = TextField::new("用户名（可选）", cx);
-            field.set_dark_mode(is_dark, cx);
+            field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_password = cx.new(|cx| {
             let mut field = TextField::new_secure("密码", cx);
-            field.set_dark_mode(is_dark, cx);
+            field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_key_path = cx.new(|cx| {
             let mut field = TextField::new("私钥路径（可选）", cx);
-            field.set_dark_mode(is_dark, cx);
+            field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let project_input = cx.new(|cx| {
             let mut field = TextField::new("~/projects/my-project", cx);
-            field.set_dark_mode(is_dark, cx);
+            field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let remote_project_input = cx.new(|cx| {
             let mut field = TextField::new("~/projects/remote-project", cx);
-            field.set_dark_mode(is_dark, cx);
+            field.set_theme_mode(theme_mode, cx);
             field
         });
 
@@ -679,6 +716,7 @@ impl LmuxApp {
             toast_seq: 0,
             theme_mode,
             font_family,
+            notifications_open: false,
             settings_open: false,
             settings_theme_menu: false,
             settings_font_menu: false,
@@ -708,6 +746,7 @@ impl LmuxApp {
             tree_menu: None,
             delete_confirm: None,
             delete_error: None,
+            delete_busy: false,
             bootstrap_confirm: None,
             bootstrap_error: None,
             store_path,
@@ -839,6 +878,22 @@ impl LmuxApp {
             }
         }
         None
+    }
+
+    fn should_animate(&self) -> bool {
+        let attention = |snapshot: &Snapshot| {
+            snapshot.agents.iter().any(|agent| {
+                matches!(
+                    agent.status,
+                    lmux_core::model::AgentStatus::Working | lmux_core::model::AgentStatus::Blocked
+                ) || (agent.status == lmux_core::model::AgentStatus::Done && !agent.seen)
+            })
+        };
+
+        !self.toasts.is_empty()
+            || self.error_toast.is_some()
+            || attention(&self.last_snapshot)
+            || self.remote_snaps.values().any(attention)
     }
 
     fn push_notification(
@@ -1375,21 +1430,21 @@ impl LmuxApp {
     }
 
     fn apply_theme_to_inputs(&mut self, cx: &mut Context<Self>) {
-        let is_dark = self.theme_mode.is_dark();
+        let mode = self.theme_mode;
         self.palette_input
-            .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.connect_input
-            .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.connect_username
-            .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.connect_password
-            .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.connect_key_path
-            .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.project_input
-            .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.remote_project_input
-            .update(cx, |input, cx| input.set_dark_mode(is_dark, cx));
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         let theme = Theme::for_mode(self.theme_mode);
         for term in self.terms.values() {
             term.update(cx, |term, cx| term.set_theme(theme, cx));
@@ -1524,6 +1579,7 @@ impl LmuxApp {
             seen: true,
             tmux_session: Some(tmux_name),
         };
+        let project_key = format!("local:{}", project.id);
         self.server
             .state
             .blocking_write()
@@ -1536,6 +1592,7 @@ impl LmuxApp {
             Theme::for_mode(self.theme_mode),
             cx,
         );
+        self.collapsed_projects.remove(&project_key);
         self.terms.insert(agent_id.clone(), term);
         let pane = self.active_pane.clone();
         self.pane_tree.open_tab(&pane, agent_id.clone());
@@ -1582,7 +1639,7 @@ impl LmuxApp {
             project,
             lmux_core::model::AgentInstance {
                 id: agent_id.clone(),
-                project: project_id,
+                project: project_id.clone(),
                 agent_type: lmux_core::model::AgentType::Shell,
                 title: shell_title,
                 status: lmux_core::model::AgentStatus::Idle,
@@ -1599,6 +1656,8 @@ impl LmuxApp {
             Theme::for_mode(self.theme_mode),
             cx,
         );
+        let project_key = format!("local:{}", project_id);
+        self.collapsed_projects.remove(&project_key);
         self.terms.insert(agent_id.clone(), term);
         Some(agent_id)
     }
@@ -1964,9 +2023,13 @@ impl LmuxApp {
     }
 
     fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        if self.delete_busy {
+            return;
+        }
         let Some(confirm) = self.delete_confirm.clone() else {
             return;
         };
+        self.delete_busy = true;
         match confirm.target {
             DeleteTarget::LocalProject { project, .. } => {
                 let lifecycle = Arc::clone(&self.server.lifecycle);
@@ -2021,9 +2084,11 @@ impl LmuxApp {
                 self.cleanup_removed_agents(&destroyed);
                 if failed.is_empty() {
                     self.delete_confirm = None;
+                    self.delete_busy = false;
                 } else {
                     self.delete_error =
                         Some(format!("{} 个 tmux 会话未能销毁，项目仍保留", failed.len()));
+                    self.delete_busy = false;
                 }
                 self.persist();
                 cx.notify();
@@ -2036,6 +2101,7 @@ impl LmuxApp {
                     .and_then(|remote| remote.endpoint_now());
                 let Some(endpoint) = endpoint else {
                     self.delete_error = Some("远端当前不可连接，未执行删除".into());
+                    self.delete_busy = false;
                     cx.notify();
                     return;
                 };
@@ -2066,15 +2132,18 @@ impl LmuxApp {
                                     result.failed_agents.len()
                                 ));
                             }
+                            this.delete_busy = false;
                             this.persist();
                             cx.notify();
                         }
                         Ok(Err(error)) => {
                             this.delete_error = Some(error.to_string());
+                            this.delete_busy = false;
                             cx.notify();
                         }
                         Err(error) => {
                             this.delete_error = Some(error.to_string());
+                            this.delete_busy = false;
                             cx.notify();
                         }
                     });
@@ -2110,6 +2179,7 @@ impl LmuxApp {
                 self.remote_states.remove(&host);
                 self.cleanup_removed_agents(&removed_agents);
                 self.delete_confirm = None;
+                self.delete_busy = false;
                 self.persist();
                 cx.notify();
             }
@@ -2360,7 +2430,7 @@ impl LmuxApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x00000033))
+            .bg(rgba(theme.overlay()))
             .child(
                 div()
                     .w(px(460.))
@@ -2412,26 +2482,40 @@ impl LmuxApp {
                                     .rounded_sm()
                                     .text_color(rgba(theme.fg0))
                                     .hover(|style| style.bg(rgba(theme.bg2)))
+                                    .cursor_pointer()
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.delete_confirm = None;
                                         this.delete_error = None;
+                                        this.delete_busy = false;
                                         cx.notify();
                                     }))
                                     .child("取消"),
                             )
-                            .child(
+                            .child({
+                                let busy = self.delete_busy;
                                 div()
                                     .id("delete-confirm-submit")
                                     .px_3()
                                     .py_1()
                                     .rounded_sm()
                                     .bg(rgba(theme.red))
-                                    .text_color(rgba(0xffffffff))
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.confirm_delete(cx)
+                                    .text_color(rgba(theme.on_accent))
+                                    .cursor_pointer()
+                                    .when(!busy, |el| {
+                                        el.hover(|style| {
+                                            style.bg(rgba(Theme::with_alpha(theme.red, 0xcc)))
+                                        })
+                                        .active(|style| {
+                                            style.bg(rgba(Theme::with_alpha(theme.red, 0x99)))
+                                        })
+                                    })
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        if !this.delete_busy {
+                                            this.confirm_delete(cx);
+                                        }
                                     }))
-                                    .child("确认删除"),
-                            ),
+                                    .child(if busy { "删除中…" } else { "确认删除" })
+                            }),
                     ),
             )
             .into_any_element()
@@ -2526,7 +2610,7 @@ impl LmuxApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x00000033))
+            .bg(rgba(theme.overlay()))
             .child(
                 div()
                     .w(px(480.))
@@ -2625,7 +2709,7 @@ impl LmuxApp {
                                     .px_3()
                                     .py_1()
                                     .bg(rgba(theme.accent))
-                                    .text_color(rgba(0xffffffff))
+                                    .text_color(rgba(theme.on_accent))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.confirm_bootstrap(cx)
                                     }))
@@ -2634,6 +2718,22 @@ impl LmuxApp {
                     ),
             )
             .into_any_element()
+    }
+
+    fn open_connect_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.connect_dialog = true;
+        self.connect_focus_index = 0;
+        self.project_dialog = false;
+        self.dialog_error = None;
+        self.connect_input.update(cx, |input, cx| input.reset(cx));
+        self.connect_username
+            .update(cx, |input, cx| input.reset(cx));
+        self.connect_password
+            .update(cx, |input, cx| input.reset(cx));
+        self.connect_key_path
+            .update(cx, |input, cx| input.reset(cx));
+        self.connect_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     fn dismiss_settings_menus(&mut self) {
@@ -2673,6 +2773,259 @@ impl LmuxApp {
         cx.notify();
     }
 
+    fn render_notifications_popover(
+        &mut self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let unread_count = self.notifications.iter().filter(|n| n.unread).count();
+
+        div()
+            .id("notifications-backdrop")
+            .absolute()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    this.notifications_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("notifications-popover")
+                    .occlude()
+                    .absolute()
+                    .bottom(px(40.))
+                    .left(px(8.))
+                    .w(px(320.))
+                    .max_h(px(420.))
+                    .flex()
+                    .flex_col()
+                    .bg(rgba(theme.bg1))
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .rounded_md()
+                    .shadow_xl()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _event, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .h(px(34.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(rgba(theme.line))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(panel_icon(NOTIFICATION_ICON, theme.fg1))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgba(theme.fg0))
+                                            .child(i18n::text(
+                                                self.language,
+                                                "通知中心",
+                                                "Notifications",
+                                            )),
+                                    )
+                                    .when(unread_count > 0, |header| {
+                                        header.child(
+                                            div()
+                                                .px_1p5()
+                                                .py(px(1.))
+                                                .rounded_full()
+                                                .bg(rgba(theme.accent))
+                                                .text_color(rgba(theme.on_accent))
+                                                .text_size(px(9.))
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .child(format!("{unread_count}")),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when(!self.notifications.is_empty(), |el| {
+                                        el.child(
+                                            div()
+                                                .id("clear-notifications")
+                                                .cursor_pointer()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_xs()
+                                                .text_size(px(10.))
+                                                .text_color(rgba(theme.fg2))
+                                                .hover(|s| {
+                                                    s.bg(rgba(theme.bg2))
+                                                        .text_color(rgba(theme.fg0))
+                                                })
+                                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                                    this.notifications.clear();
+                                                    cx.notify();
+                                                }))
+                                                .child(i18n::text(self.language, "清空", "Clear")),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .id("close-notifications")
+                                            .cursor_pointer()
+                                            .px_1()
+                                            .text_size(px(14.))
+                                            .text_color(rgba(theme.fg2))
+                                            .hover(|s| s.text_color(rgba(theme.fg0)))
+                                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                                this.notifications_open = false;
+                                                cx.notify();
+                                            }))
+                                            .child("×"),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("notifications-scroll")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .when(self.notifications.is_empty(), |list| {
+                                list.child(
+                                    div()
+                                        .py_8()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgba(theme.fg2))
+                                                .child(i18n::text(
+                                                    self.language,
+                                                    "暂无通知",
+                                                    "No notifications",
+                                                )),
+                                        ),
+                                )
+                            })
+                            .children(self.notifications.iter().enumerate().map(|(idx, n)| {
+                                let dot_color = match n.to {
+                                    lmux_core::model::AgentStatus::Blocked => theme.yellow,
+                                    lmux_core::model::AgentStatus::Done => theme.green,
+                                    lmux_core::model::AgentStatus::Working => theme.accent,
+                                    _ => theme.fg2,
+                                };
+                                let status_text = match n.to {
+                                    lmux_core::model::AgentStatus::Blocked => {
+                                        i18n::text(self.language, "等待输入", "Input required")
+                                    }
+                                    lmux_core::model::AgentStatus::Done => {
+                                        i18n::text(self.language, "任务完成", "Task completed")
+                                    }
+                                    lmux_core::model::AgentStatus::Working => {
+                                        i18n::text(self.language, "执行中", "Working")
+                                    }
+                                    _ => i18n::text(self.language, "空闲", "Idle"),
+                                };
+                                let agent_id = n.agent.clone();
+                                let is_unread = n.unread;
+                                let time_str = format_relative_time(n.time_secs, self.language);
+
+                                div()
+                                    .id(gpui::ElementId::Name(
+                                        format!("notif-popover-item-{idx}").into(),
+                                    ))
+                                    .relative()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .px_3()
+                                    .py_2()
+                                    .border_b_1()
+                                    .border_color(rgba(theme.line))
+                                    .when(is_unread, |el| {
+                                        el.bg(rgba(Theme::with_alpha(theme.accent, 0x0f)))
+                                    })
+                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener({
+                                        let agent_id = agent_id.clone();
+                                        move |this, _ev, window, cx| {
+                                            this.notifications_open = false;
+                                            this.jump_to_agent(&agent_id, window, cx);
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(
+                                                        div()
+                                                            .w(px(6.))
+                                                            .h(px(6.))
+                                                            .rounded_full()
+                                                            .bg(rgba(dot_color)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.))
+                                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                            .text_color(rgba(theme.fg0))
+                                                            .child(format!(
+                                                                "{} · {}",
+                                                                n.machine_name, n.project_name
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(10.))
+                                                            .text_color(rgba(dot_color))
+                                                            .child(status_text),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgba(theme.fg2))
+                                                    .child(time_str),
+                                            ),
+                                    )
+                                    .when_some(n.message.clone(), |row, msg| {
+                                        row.child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgba(if is_unread {
+                                                    theme.fg0
+                                                } else {
+                                                    theme.fg1
+                                                }))
+                                                .child(truncate(&msg, 90)),
+                                        )
+                                    })
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
     fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
         div()
@@ -2684,7 +3037,7 @@ impl LmuxApp {
             .items_start()
             .justify_center()
             .pt(px(48.))
-            .bg(rgba(0x00000033))
+            .bg(rgba(theme.overlay()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| {
@@ -2695,9 +3048,9 @@ impl LmuxApp {
             .child(
                 div()
                     .id("settings-page")
+                    .relative()
                     .occlude()
                     .w(px(560.))
-                    .max_h(px(620.))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
@@ -2773,6 +3126,8 @@ impl LmuxApp {
                             )
                             .child({
                                 let selected = Theme::for_mode(self.theme_mode);
+                                let language = self.language;
+                                let current_mode = self.theme_mode;
                                 div()
                                     .relative()
                                     .child(
@@ -2786,6 +3141,7 @@ impl LmuxApp {
                                             .gap_2()
                                             .border_1()
                                             .border_color(rgba(theme.line))
+                                            .bg(rgba(theme.bg0))
                                             .hover(|s| s.bg(rgba(theme.bg2)))
                                             .on_click(cx.listener(|this, _event, _window, cx| {
                                                 let open = !this.settings_theme_menu;
@@ -2816,27 +3172,34 @@ impl LmuxApp {
                                                 div()
                                                     .text_size(px(12.))
                                                     .text_color(rgba(theme.fg1))
-                                                    .child("⌄"),
+                                                    .child(if self.settings_theme_menu {
+                                                        "⌃"
+                                                    } else {
+                                                        "⌄"
+                                                    }),
                                             ),
                                     )
-                                    .when(self.settings_theme_menu, |menu| {
-                                        menu.child(
-                                            div()
-                                                .id("settings-theme-menu")
-                                                .absolute()
-                                                .top(px(34.))
-                                                .right(px(0.))
-                                                .w(px(210.))
-                                                .max_h(px(280.))
-                                                .overflow_y_scroll()
-                                                .bg(rgba(theme.bg1))
-                                                .border_1()
-                                                .border_color(rgba(theme.line))
-                                                .shadow_lg()
-                                                .children(ThemeMode::ALL.into_iter().map(|mode| {
-                                                    let selected = mode == self.theme_mode;
-                                                    let swatch = Theme::for_mode(mode);
-                                                    div()
+                                    .when(self.settings_theme_menu, |anchor| {
+                                        anchor.child(
+                                            deferred(
+                                                div()
+                                                    .id("settings-theme-menu")
+                                                    .absolute()
+                                                    .top_full()
+                                                    .left_0()
+                                                    .w(px(210.))
+                                                    .max_h(px(280.))
+                                                    .overflow_y_scroll()
+                                                    .bg(rgba(theme.bg1))
+                                                    .border_1()
+                                                    .border_color(rgba(theme.line))
+                                                    .shadow_lg()
+                                                    .occlude()
+                                                    .children(ThemeMode::ALL.into_iter().map(
+                                                        |mode| {
+                                                            let selected = mode == current_mode;
+                                                            let swatch = Theme::for_mode(mode);
+                                                            div()
                                                         .id(gpui::ElementId::Name(
                                                             format!(
                                                                 "settings-theme-option-{}",
@@ -2872,8 +3235,7 @@ impl LmuxApp {
                                                                 .text_size(px(11.))
                                                                 .text_color(rgba(theme.fg0))
                                                                 .child(
-                                                                    if self.language
-                                                                        == Language::English
+                                                                    if language == Language::English
                                                                     {
                                                                         mode.label_en()
                                                                     } else {
@@ -2882,7 +3244,10 @@ impl LmuxApp {
                                                                 ),
                                                         )
                                                         .child(if selected { "✓" } else { "" })
-                                                })),
+                                                        },
+                                                    )),
+                                            )
+                                            .with_priority(1),
                                         )
                                     })
                             }),
@@ -2898,6 +3263,7 @@ impl LmuxApp {
                             .child(i18n::text(self.language, "终端字体", "Terminal font")),
                     )
                     .child(div().px_4().pb_4().flex().justify_end().child({
+                        let current_font = self.font_family.clone();
                         div()
                             .relative()
                             .child(
@@ -2910,6 +3276,7 @@ impl LmuxApp {
                                     .items_center()
                                     .border_1()
                                     .border_color(rgba(theme.line))
+                                    .bg(rgba(theme.bg0))
                                     .hover(|s| s.bg(rgba(theme.bg2)))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         let open = !this.settings_font_menu;
@@ -2926,58 +3293,68 @@ impl LmuxApp {
                                             .child(self.font_family.clone()),
                                     )
                                     .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(rgba(theme.fg1))
-                                            .child("⌄"),
+                                        div().text_size(px(12.)).text_color(rgba(theme.fg1)).child(
+                                            if self.settings_font_menu {
+                                                "⌃"
+                                            } else {
+                                                "⌄"
+                                            },
+                                        ),
                                     ),
                             )
-                            .when(self.settings_font_menu, |menu| {
-                                menu.child(
-                                    div()
-                                        .absolute()
-                                        .top(px(34.))
-                                        .right(px(0.))
-                                        .w(px(260.))
-                                        .bg(rgba(theme.bg1))
-                                        .border_1()
-                                        .border_color(rgba(theme.line))
-                                        .shadow_lg()
-                                        .children(FONT_FAMILIES.iter().map(|family| {
-                                            let selected = self.font_family == *family;
-                                            let family = (*family).to_string();
-                                            div()
-                                                .id(gpui::ElementId::Name(
-                                                    format!(
-                                                        "settings-font-option-{}",
-                                                        family.replace(' ', "-")
+                            .when(self.settings_font_menu, |anchor| {
+                                anchor.child(
+                                    deferred(
+                                        div()
+                                            .id("settings-font-menu")
+                                            .absolute()
+                                            .top_full()
+                                            .left_0()
+                                            .w(px(260.))
+                                            .max_h(px(280.))
+                                            .overflow_y_scroll()
+                                            .bg(rgba(theme.bg1))
+                                            .border_1()
+                                            .border_color(rgba(theme.line))
+                                            .shadow_lg()
+                                            .occlude()
+                                            .children(FONT_FAMILIES.iter().map(|family| {
+                                                let selected = current_font == *family;
+                                                let family = (*family).to_string();
+                                                div()
+                                                    .id(gpui::ElementId::Name(
+                                                        format!(
+                                                            "settings-font-option-{}",
+                                                            family.replace(' ', "-")
+                                                        )
+                                                        .into(),
+                                                    ))
+                                                    .h(px(30.))
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .when(selected, |el| el.bg(rgba(theme.bg2)))
+                                                    .when(!selected, |el| {
+                                                        el.hover(|s| s.bg(rgba(theme.bg2)))
+                                                    })
+                                                    .on_click(cx.listener({
+                                                        let family = family.clone();
+                                                        move |this, _event, _window, cx| {
+                                                            this.set_font_family(&family, cx);
+                                                        }
+                                                    }))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .text_size(px(11.))
+                                                            .text_color(rgba(theme.fg0))
+                                                            .font_family(family.clone())
+                                                            .child(family),
                                                     )
-                                                    .into(),
-                                                ))
-                                                .h(px(30.))
-                                                .px_2()
-                                                .flex()
-                                                .items_center()
-                                                .when(selected, |el| el.bg(rgba(theme.bg2)))
-                                                .when(!selected, |el| {
-                                                    el.hover(|s| s.bg(rgba(theme.bg2)))
-                                                })
-                                                .on_click(cx.listener({
-                                                    let family = family.clone();
-                                                    move |this, _event, _window, cx| {
-                                                        this.set_font_family(&family, cx);
-                                                    }
-                                                }))
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .text_size(px(11.))
-                                                        .text_color(rgba(theme.fg0))
-                                                        .font_family(family.clone())
-                                                        .child(family),
-                                                )
-                                                .child(if selected { "✓" } else { "" })
-                                        })),
+                                                    .child(if selected { "✓" } else { "" })
+                                            })),
+                                    )
+                                    .with_priority(1),
                                 )
                             })
                     }))
@@ -2995,6 +3372,7 @@ impl LmuxApp {
                                     .child(i18n::text(self.language, "语言", "Language")),
                             )
                             .child({
+                                let current_language = self.language;
                                 div()
                                     .relative()
                                     .child(
@@ -3007,6 +3385,7 @@ impl LmuxApp {
                                             .items_center()
                                             .border_1()
                                             .border_color(rgba(theme.line))
+                                            .bg(rgba(theme.bg0))
                                             .hover(|s| s.bg(rgba(theme.bg2)))
                                             .on_click(cx.listener(|this, _event, _window, cx| {
                                                 let open = !this.settings_language_menu;
@@ -3025,24 +3404,32 @@ impl LmuxApp {
                                                 div()
                                                     .text_size(px(12.))
                                                     .text_color(rgba(theme.fg1))
-                                                    .child("⌄"),
+                                                    .child(if self.settings_language_menu {
+                                                        "⌃"
+                                                    } else {
+                                                        "⌄"
+                                                    }),
                                             ),
                                     )
-                                    .when(self.settings_language_menu, |menu| {
-                                        menu.child(
-                                            div()
-                                                .absolute()
-                                                .top(px(34.))
-                                                .right(px(0.))
-                                                .w(px(180.))
-                                                .bg(rgba(theme.bg1))
-                                                .border_1()
-                                                .border_color(rgba(theme.line))
-                                                .shadow_lg()
-                                                .children(Language::ALL.into_iter().map(
-                                                    |language| {
-                                                        let selected = language == self.language;
-                                                        div()
+                                    .when(self.settings_language_menu, |anchor| {
+                                        anchor.child(
+                                            deferred(
+                                                div()
+                                                    .id("settings-language-menu")
+                                                    .absolute()
+                                                    .top_full()
+                                                    .left_0()
+                                                    .w(px(180.))
+                                                    .bg(rgba(theme.bg1))
+                                                    .border_1()
+                                                    .border_color(rgba(theme.line))
+                                                    .shadow_lg()
+                                                    .occlude()
+                                                    .children(Language::ALL.into_iter().map(
+                                                        |language| {
+                                                            let selected =
+                                                                language == current_language;
+                                                            div()
                                                             .id(gpui::ElementId::Name(
                                                                 format!(
                                                                     "settings-language-option-{}",
@@ -3066,8 +3453,10 @@ impl LmuxApp {
                                                                 },
                                                             ))
                                                             .child(language.label())
-                                                    },
-                                                )),
+                                                        },
+                                                    )),
+                                            )
+                                            .with_priority(1),
                                         )
                                     })
                             }),
@@ -3136,7 +3525,7 @@ impl LmuxApp {
             .items_start()
             .justify_center()
             .pt(px(90.))
-            .bg(rgba(0x00000033))
+            .bg(rgba(theme.overlay()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _ev, _window, cx| {
@@ -3203,7 +3592,8 @@ impl LmuxApp {
                                     .text_size(px(11.))
                                     .text_color(rgba(theme.fg1))
                                     .when(auth_mode == ConnectAuthMode::SshConfig, |item| {
-                                        item.bg(rgba(theme.accent)).text_color(rgba(0xffffffff))
+                                        item.bg(rgba(theme.accent))
+                                            .text_color(rgba(theme.on_accent))
                                     })
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.connect_auth_mode = ConnectAuthMode::SshConfig;
@@ -3220,7 +3610,8 @@ impl LmuxApp {
                                     .text_size(px(11.))
                                     .text_color(rgba(theme.fg1))
                                     .when(auth_mode == ConnectAuthMode::PublicKey, |item| {
-                                        item.bg(rgba(theme.accent)).text_color(rgba(0xffffffff))
+                                        item.bg(rgba(theme.accent))
+                                            .text_color(rgba(theme.on_accent))
                                     })
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.connect_auth_mode = ConnectAuthMode::PublicKey;
@@ -3237,7 +3628,8 @@ impl LmuxApp {
                                     .text_size(px(11.))
                                     .text_color(rgba(theme.fg1))
                                     .when(auth_mode == ConnectAuthMode::Password, |item| {
-                                        item.bg(rgba(theme.accent)).text_color(rgba(0xffffffff))
+                                        item.bg(rgba(theme.accent))
+                                            .text_color(rgba(theme.on_accent))
                                     })
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.connect_auth_mode = ConnectAuthMode::Password;
@@ -3295,7 +3687,7 @@ impl LmuxApp {
                                     .py_1()
                                     .rounded_sm()
                                     .bg(rgba(theme.accent))
-                                    .text_color(rgba(0xffffffff))
+                                    .text_color(rgba(theme.on_accent))
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         let target = this.connect_input.read(cx).text();
                                         this.add_remote_target(target, cx);
@@ -3324,6 +3716,7 @@ impl LmuxApp {
             return;
         };
         let runtime = self.server.runtime.clone();
+        let target_project = project.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = runtime
                 .spawn(async move {
@@ -3343,6 +3736,10 @@ impl LmuxApp {
                         }
                         snapshot.agents.push(agent);
                     }
+                    let remote_project_key = format!("remote:{}:{}", host, target_project);
+                    this.collapsed_projects.remove(&remote_project_key);
+                    let remote_machine_key = format!("machine:remote:{}", host);
+                    this.collapsed_machines.remove(&remote_machine_key);
                     this.open_remote_agent(&agent_id, cx);
                     this.focus_agent(&agent_id, window, cx);
                     this.persist();
@@ -3462,7 +3859,7 @@ impl LmuxApp {
             .items_start()
             .justify_center()
             .pt(px(90.))
-            .bg(rgba(0x00000033))
+            .bg(rgba(theme.overlay()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| {
@@ -3564,7 +3961,7 @@ impl LmuxApp {
                                     .py_1()
                                     .rounded_sm()
                                     .bg(rgba(theme.accent))
-                                    .text_color(rgba(0xffffffff))
+                                    .text_color(rgba(theme.on_accent))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         if let Some(host) = this.remote_project_dialog.clone() {
                                             let path = this.remote_project_input.read(cx).text();
@@ -3590,7 +3987,7 @@ impl LmuxApp {
             .items_start()
             .justify_center()
             .pt(px(90.))
-            .bg(rgba(0x00000033))
+            .bg(rgba(theme.overlay()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _ev, _window, cx| {
@@ -3678,7 +4075,7 @@ impl LmuxApp {
                                     .py_1()
                                     .rounded_sm()
                                     .bg(rgba(theme.accent))
-                                    .text_color(rgba(0xffffffff))
+                                    .text_color(rgba(theme.on_accent))
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         let path = this.project_input.read(cx).text();
                                         this.add_local_project(path, cx);
@@ -3862,20 +4259,7 @@ impl LmuxApp {
                         let pane = self.active_pane.clone();
                         self.close_split_pane(&pane, window, cx);
                     }
-                    "cmd-connect" => {
-                        self.connect_dialog = true;
-                        self.connect_focus_index = 0;
-                        self.project_dialog = false;
-                        self.dialog_error = None;
-                        self.connect_input.update(cx, |input, cx| input.reset(cx));
-                        self.connect_username
-                            .update(cx, |input, cx| input.reset(cx));
-                        self.connect_password
-                            .update(cx, |input, cx| input.reset(cx));
-                        self.connect_key_path
-                            .update(cx, |input, cx| input.reset(cx));
-                        self.connect_input.focus_handle(cx).focus(window, cx);
-                    }
+                    "cmd-connect" => self.open_connect_dialog(window, cx),
                     "cmd-toggle-theme" => {
                         self.toggle_theme(cx);
                     }
@@ -4087,7 +4471,7 @@ impl LmuxApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x00000044))
+            .bg(rgba(theme.overlay()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _ev, window, cx| {
@@ -4393,7 +4777,7 @@ impl LmuxApp {
                         })
                         .border_r_1()
                         .border_color(rgba(theme.line))
-                        .hover(|s| s.bg(rgba(theme.bg2)))
+                        .when(!is_active, |el| el.hover(|s| s.bg(rgba(theme.bg2))))
                         .on_click(cx.listener({
                             let id = tab_id.clone();
                             let pane = pane_for_tab.clone();
@@ -4597,7 +4981,7 @@ impl LmuxApp {
                 let target_pane = pane_id.clone();
                 let pane_click_id = pane_id.clone();
                 let pane_click_active = active_id.clone();
-                let pane_drop_bg = (theme.accent & 0xffffff00) | 0x1a;
+                let pane_drop_bg = Theme::with_alpha(theme.accent, 0x1a);
                 let mut pane = div()
                     .id(gpui::ElementId::Name(
                         format!("pane-container-{}", pane_id).into(),
@@ -4662,6 +5046,41 @@ fn futures_lite_block(
 }
 type MutexGuardMap<'a> = tokio::sync::MutexGuard<'a, HashMap<AgentId, Arc<lmux_term::PtySession>>>;
 
+fn format_relative_time(then: u64, lang: Language) -> String {
+    let now = lmux_core::model::now_secs();
+    let diff = now.saturating_sub(then);
+    if diff < 10 {
+        i18n::text(lang, "刚刚", "just now").to_string()
+    } else if diff < 60 {
+        if lang == Language::English {
+            format!("{diff}s ago")
+        } else {
+            format!("{diff}秒前")
+        }
+    } else if diff < 3600 {
+        let m = diff / 60;
+        if lang == Language::English {
+            format!("{m}m ago")
+        } else {
+            format!("{m}分钟前")
+        }
+    } else if diff < 86400 {
+        let h = diff / 3600;
+        if lang == Language::English {
+            format!("{h}h ago")
+        } else {
+            format!("{h}小时前")
+        }
+    } else {
+        let d = diff / 86400;
+        if lang == Language::English {
+            format!("{d}d ago")
+        } else {
+            format!("{d}天前")
+        }
+    }
+}
+
 impl Render for LmuxApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_mode(self.theme_mode);
@@ -4685,7 +5104,31 @@ impl Render for LmuxApp {
                 .text_size(px(10.))
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(rgba(theme.fg1))
-                .child("MACHINES"),
+                .child("MACHINES")
+                .child(
+                    div()
+                        .id("connect-machine")
+                        .ml_auto()
+                        .w(px(20.))
+                        .h(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_color(rgba(theme.fg1))
+                        .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
+                        .active(|s| s.bg(rgba(theme.bg3)))
+                        .tooltip(hover_tip(i18n::text(
+                            self.language,
+                            "连接远程机器",
+                            "Connect remote machine",
+                        )))
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.open_connect_dialog(window, cx);
+                        }))
+                        .child(panel_icon(PLUS_ICON, theme.fg1)),
+                ),
         );
         tree = tree.child(
             div()
@@ -5580,7 +6023,14 @@ impl Render for LmuxApp {
                 this.toggle_theme(cx);
             }))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                if this.settings_open {
+                if this.notifications_open {
+                    if ev.keystroke.key.as_str() == "escape" {
+                        this.notifications_open = false;
+                        this.focus.focus(window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                } else if this.settings_open {
                     if ev.keystroke.key.as_str() == "escape" {
                         this.settings_open = false;
                         this.focus.focus(window, cx);
@@ -5643,74 +6093,126 @@ impl Render for LmuxApp {
                     )
                     .child(
                         div()
-                            .h(px(32.))
+                            .h(px(40.))
+                            .px_2()
                             .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_1()
                             .border_t_1()
                             .border_color(rgba(theme.line))
-                            .child(
+                            .child({
+                                let has_blocked = self.notifications.iter().any(|n| {
+                                    n.unread && n.to == lmux_core::model::AgentStatus::Blocked
+                                });
+                                let pulse = (1.0
+                                    - (self.pulse_phase as f32 * std::f32::consts::TAU / 36.0)
+                                        .cos())
+                                    * 0.5;
+                                let badge_color = if has_blocked {
+                                    theme.yellow
+                                } else if unread_count > 0 {
+                                    theme.accent
+                                } else {
+                                    theme.fg2
+                                };
+                                let badge_glow = if unread_count > 0 {
+                                    let glow_alpha = (0x30 as f32 + pulse * 0x60 as f32) as u32;
+                                    Some(Theme::with_alpha(badge_color, glow_alpha as u8))
+                                } else {
+                                    None
+                                };
+
                                 div()
-                                    .id("connect-machine")
-                                    .flex_1()
+                                    .id("sidebar-notification-button")
+                                    .relative()
+                                    .w(px(32.))
                                     .h(px(32.))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(11.))
-                                    .text_color(rgba(theme.fg1))
-                                    .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                                    .on_click(cx.listener(|this, _ev, window, cx| {
-                                        this.connect_dialog = true;
-                                        this.connect_focus_index = 0;
-                                        this.project_dialog = false;
-                                        this.dialog_error = None;
-                                        this.connect_input.update(cx, |input, cx| input.reset(cx));
-                                        this.connect_username
-                                            .update(cx, |input, cx| input.reset(cx));
-                                        this.connect_password
-                                            .update(cx, |input, cx| input.reset(cx));
-                                        this.connect_key_path
-                                            .update(cx, |input, cx| input.reset(cx));
-                                        this.connect_input.focus_handle(cx).focus(window, cx);
-                                        cx.notify();
-                                    }))
-                                    .child(i18n::text(self.language, "连接", "Connect")),
-                            )
-                            .child(
-                                div()
-                                    .id("sidebar-notification-count")
-                                    .h(px(32.))
-                                    .px_2()
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_size(px(10.))
-                                    .text_color(rgba(theme.fg2))
-                                    .when(unread_count > 0, |el| el.text_color(rgba(theme.accent)))
-                                    .child(if unread_count > 0 {
-                                        format!("● {unread_count}")
-                                    } else {
-                                        String::new()
-                                    }),
-                            )
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .active(|s| s.bg(rgba(theme.bg3)))
+                                    .tooltip(hover_tip(i18n::text(
+                                        self.language,
+                                        "通知",
+                                        "Notifications",
+                                    )))
+                                    .when(unread_count > 0, |el| {
+                                        el.bg(rgba(Theme::with_alpha(badge_color, 0x18)))
+                                    })
+                                    .when(self.notifications_open, |el| el.bg(rgba(theme.bg2)))
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        this.notifications_open = !this.notifications_open;
+                                        cx.notify();
+                                    }))
+                                    .child(panel_icon(
+                                        NOTIFICATION_ICON,
+                                        if self.notifications_open || unread_count > 0 {
+                                            badge_color
+                                        } else {
+                                            theme.fg1
+                                        },
+                                    ))
+                                    .when(unread_count > 0, |el| {
+                                        el.child(
+                                            div()
+                                                .absolute()
+                                                .top(px(2.))
+                                                .right(px(2.))
+                                                .min_w(px(14.))
+                                                .h(px(14.))
+                                                .px(px(3.))
+                                                .rounded_full()
+                                                .bg(rgba(badge_color))
+                                                .when_some(badge_glow, |b, glow| {
+                                                    b.border_1().border_color(rgba(glow))
+                                                })
+                                                .text_size(px(9.))
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .text_color(rgba(theme.on_accent))
+                                                .child(if unread_count > 99 {
+                                                    "99+".to_string()
+                                                } else {
+                                                    format!("{unread_count}")
+                                                }),
+                                        )
+                                    })
+                            })
                             .child(
                                 div()
                                     .id("open-settings")
-                                    .flex_1()
+                                    .w(px(32.))
                                     .h(px(32.))
-                                    .px_2()
                                     .flex()
                                     .items_center()
-                                    .text_size(px(11.))
-                                    .text_color(rgba(theme.fg1))
-                                    .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .active(|s| s.bg(rgba(theme.bg3)))
+                                    .when(self.settings_open, |el| el.bg(rgba(theme.bg2)))
+                                    .tooltip(hover_tip(i18n::text(
+                                        self.language,
+                                        "设置",
+                                        "Settings",
+                                    )))
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.settings_open = true;
                                         this.palette_open = false;
                                         this.focus.focus(window, cx);
                                         cx.notify();
                                     }))
-                                    .child(panel_icon(SETTINGS_ICON, theme.fg1))
-                                    .child(i18n::text(self.language, "设置", "Settings")),
+                                    .child(panel_icon(
+                                        SETTINGS_ICON,
+                                        if self.settings_open {
+                                            theme.fg0
+                                        } else {
+                                            theme.fg1
+                                        },
+                                    )),
                             ),
                     ),
             )
@@ -5908,6 +6410,9 @@ impl Render for LmuxApp {
         if self.bootstrap_confirm.is_some() {
             root = root.child(self.render_bootstrap_confirm(cx));
         }
+        if self.notifications_open {
+            root = root.child(self.render_notifications_popover(theme, cx));
+        }
         if self.settings_open {
             root = root.child(self.render_settings(cx));
         }
@@ -5932,7 +6437,7 @@ fn render_pi_loading_spinner(frame: usize, theme: Theme) -> gpui::Div {
                     .rounded_full()
                     .when(is_filled, |el| el.bg(rgba(theme.accent)))
                     .when(!is_filled, |el| {
-                        el.bg(rgba((theme.accent & 0xffffff00) | 0x25))
+                        el.bg(rgba(Theme::with_alpha(theme.accent, 0x25)))
                     }),
             );
         }
@@ -5974,17 +6479,17 @@ fn compute_attention_style(
     pulse_phase: usize,
     theme: Theme,
 ) -> AttentionStyle {
-    // 72 步采样的高分辨率平滑余弦缓动 (Smooth Cosine Ease-In-Out)
-    let pulse = (1.0 - (pulse_phase as f32 * std::f32::consts::TAU / 72.0).cos()) * 0.5;
+    // 36 步采样的平滑余弦缓动（10 FPS，3.6 秒一周期）。
+    let pulse = (1.0 - (pulse_phase as f32 * std::f32::consts::TAU / 36.0).cos()) * 0.5;
     match status {
         lmux_core::model::AgentStatus::Blocked => {
             let base_color = theme.yellow;
             let alpha = (0x0e as f32 + pulse * 0x28 as f32) as u32;
             let border_alpha = (0x40 as f32 + pulse * 0x80 as f32) as u32;
             AttentionStyle {
-                bg_color: Some((base_color & 0xffffff00) | alpha),
+                bg_color: Some(Theme::with_alpha(base_color, alpha as u8)),
                 text_color: Some(base_color),
-                border_color: Some((base_color & 0xffffff00) | border_alpha),
+                border_color: Some(Theme::with_alpha(base_color, border_alpha as u8)),
                 is_alerting: true,
             }
         }
@@ -5993,9 +6498,9 @@ fn compute_attention_style(
             let alpha = (0x0c as f32 + pulse * 0x24 as f32) as u32;
             let border_alpha = (0x35 as f32 + pulse * 0x75 as f32) as u32;
             AttentionStyle {
-                bg_color: Some((base_color & 0xffffff00) | alpha),
+                bg_color: Some(Theme::with_alpha(base_color, alpha as u8)),
                 text_color: Some(base_color),
-                border_color: Some((base_color & 0xffffff00) | border_alpha),
+                border_color: Some(Theme::with_alpha(base_color, border_alpha as u8)),
                 is_alerting: true,
             }
         }

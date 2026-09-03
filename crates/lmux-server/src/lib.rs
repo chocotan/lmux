@@ -11,7 +11,6 @@ use lmux_core::protocol::{
     TermSubscribeResult,
 };
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::net::{UnixListener, UnixStream};
@@ -175,7 +174,11 @@ impl LmuxServer {
             let _ = std::fs::remove_file(&self.socket_path);
         }
         let listener = UnixListener::bind(&self.socket_path)?;
-        std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))?;
+        }
         tracing::info!(path = %self.socket_path.display(), "lmux server listening");
 
         // 订阅流泵：把 broadcast 字节流转成 TermData EventMsg 分发给订阅者

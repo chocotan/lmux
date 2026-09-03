@@ -19,6 +19,12 @@ fi
 [[ -f "$DESKTOP" ]] || { echo "desktop file not found: $DESKTOP" >&2; exit 1; }
 install -Dm755 "$BIN" "$PREFIX/bin/lmux"
 install -Dm644 "$DESKTOP" "$PREFIX/share/applications/lmux.desktop"
+if [[ -f "$HERE/lmux.svg" ]]; then
+  install -Dm644 "$HERE/lmux.svg" "$PREFIX/share/icons/hicolor/scalable/apps/lmux.svg"
+elif [[ -f "$REPO_ROOT/packaging/lmux.svg" ]]; then
+  install -Dm644 "$REPO_ROOT/packaging/lmux.svg" "$PREFIX/share/icons/hicolor/scalable/apps/lmux.svg"
+fi
 command -v update-desktop-database >/dev/null && update-desktop-database "$PREFIX/share/applications" >/dev/null 2>&1 || true
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" >/dev/null 2>&1 || true
 echo "installed: $PREFIX/bin/lmux"
 echo "ensure $PREFIX/bin is in PATH"

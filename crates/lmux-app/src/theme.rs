@@ -89,6 +89,7 @@ pub struct Theme {
     pub fg1: u32,
     pub fg2: u32,
     pub accent: u32,
+    pub on_accent: u32,
     pub green: u32,
     pub yellow: u32,
     pub red: u32,
@@ -96,6 +97,30 @@ pub struct Theme {
 }
 
 impl Theme {
+    pub fn with_alpha(color: u32, alpha: u8) -> u32 {
+        (color & 0xffffff00) | u32::from(alpha)
+    }
+
+    pub fn overlay(self) -> u32 {
+        Self::with_alpha(0x00000000, 0x44)
+    }
+
+    pub fn selection(self) -> u32 {
+        Self::with_alpha(self.accent, 0x55)
+    }
+
+    pub fn cursor(self) -> u32 {
+        Self::with_alpha(self.accent, 0xc0)
+    }
+
+    pub fn scrollbar_track(self) -> u32 {
+        Self::with_alpha(self.bg3, 0x4d)
+    }
+
+    pub fn scrollbar_thumb(self) -> u32 {
+        Self::with_alpha(self.fg1, 0xaa)
+    }
+
     pub fn for_mode(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Light => Self {
@@ -106,9 +131,10 @@ impl Theme {
                 bg3: 0xd0ccc3ff,
                 line: 0xd0ccc3ff,
                 fg0: 0x242831ff,
-                fg1: 0x727783ff,
-                fg2: 0x5c6370ff,
+                fg1: 0x5c6370ff,
+                fg2: 0x8a909cff,
                 accent: 0x3d6cd8ff,
+                on_accent: 0xffffffff,
                 green: 0x529633ff,
                 yellow: 0xb88226ff,
                 red: 0xd13e50ff,
@@ -125,6 +151,7 @@ impl Theme {
                 fg1: 0x786858ff,
                 fg2: 0x9d8a77ff,
                 accent: 0xb35f2aff,
+                on_accent: 0xffffffff,
                 green: 0x4e8c62ff,
                 yellow: 0xb8872eff,
                 red: 0xc94b4bff,
@@ -141,6 +168,7 @@ impl Theme {
                 fg1: 0x64748bff,
                 fg2: 0x94a3b8ff,
                 accent: 0x2563ebff,
+                on_accent: 0xffffffff,
                 green: 0x16805cff,
                 yellow: 0xb7791fff,
                 red: 0xdc3f51ff,
@@ -157,6 +185,7 @@ impl Theme {
                 fg1: 0x5f7869ff,
                 fg2: 0x8aa394ff,
                 accent: 0x059669ff,
+                on_accent: 0xffffffff,
                 green: 0x2f855aff,
                 yellow: 0xb7791fff,
                 red: 0xc94b4bff,
@@ -173,6 +202,7 @@ impl Theme {
                 fg1: 0x855568ff,
                 fg2: 0xb18798ff,
                 accent: 0xe11d48ff,
+                on_accent: 0xffffffff,
                 green: 0x378557ff,
                 yellow: 0xb7791fff,
                 red: 0xc2415aff,
@@ -189,6 +219,7 @@ impl Theme {
                 fg1: 0x828997ff,
                 fg2: 0x5c6370ff,
                 accent: 0x528bffff,
+                on_accent: 0x0f1419ff,
                 green: 0x98c379ff,
                 yellow: 0xe5c07bff,
                 red: 0xe06c75ff,
@@ -205,6 +236,7 @@ impl Theme {
                 fg1: 0xc6a9d8ff,
                 fg2: 0x9875adff,
                 accent: 0xe879f9ff,
+                on_accent: 0x1b1029ff,
                 green: 0x7ee2b8ff,
                 yellow: 0xf5ca7aff,
                 red: 0xfb7185ff,
@@ -221,6 +253,7 @@ impl Theme {
                 fg1: 0x7f848eff,
                 fg2: 0x5c6370ff,
                 accent: 0x61afefff,
+                on_accent: 0x0f1419ff,
                 green: 0x98c379ff,
                 yellow: 0xe5c07bff,
                 red: 0xe06c75ff,
@@ -247,5 +280,26 @@ mod tests {
         assert!(ThemeMode::Dark.is_dark());
         assert!(ThemeMode::Synthwave.is_dark());
         assert!(!ThemeMode::Paper.is_dark());
+    }
+
+    fn luminance(color: u32) -> u32 {
+        let r = (color >> 24) & 0xff;
+        let g = (color >> 16) & 0xff;
+        let b = (color >> 8) & 0xff;
+        r + g + b
+    }
+
+    #[test]
+    fn light_secondary_text_is_lighter_than_primary_muted() {
+        let theme = Theme::for_mode(ThemeMode::Light);
+        assert!(luminance(theme.fg2) > luminance(theme.fg1));
+        assert!(luminance(theme.fg1) > luminance(theme.fg0));
+    }
+
+    #[test]
+    fn synthwave_on_accent_is_not_white() {
+        let theme = Theme::for_mode(ThemeMode::Synthwave);
+        assert_ne!(theme.on_accent, 0xffffffff);
+        assert_eq!(Theme::with_alpha(theme.accent, 0x44) & 0xff, 0x44);
     }
 }

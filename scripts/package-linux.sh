@@ -12,6 +12,7 @@ cargo build -p lmux-app --release
 install -Dm755 "$ROOT/target/release/lmux" "$DIST/lmux"
 cp "$ROOT/README.md" "$DIST/README.md"
 cp "$ROOT/packaging/lmux.desktop" "$DIST/lmux.desktop"
+cp "$ROOT/packaging/lmux.svg" "$DIST/lmux.svg"
 cp "$ROOT/packaging/install.sh" "$DIST/install.sh"
 tar -C "$ROOT/dist" -czf "$ROOT/dist/$NAME.tar.gz" "$NAME"
 sha256sum "$ROOT/dist/$NAME.tar.gz" > "$ROOT/dist/$NAME.tar.gz.sha256"

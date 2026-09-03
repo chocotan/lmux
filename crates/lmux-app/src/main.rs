@@ -40,6 +40,18 @@ fn data_dir() -> PathBuf {
 }
 
 fn hostname() -> String {
+    if let Ok(name) = std::env::var("COMPUTERNAME") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(name) = std::env::var("HOSTNAME") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
     std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|s| s.trim().to_string())
@@ -111,7 +123,7 @@ fn main() {
         machine_id,
         name: hostname(),
         os: std::env::consts::OS.into(),
-        version: "0.1.0".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
     });
     initial_state.projects = persisted.projects.clone();
     for project in &mut initial_state.projects {

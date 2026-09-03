@@ -1,0 +1,221 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag (e.g. v0.0.1)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare-release:
+    name: Prepare GitHub Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.get_version.outputs.tag }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve Release Tag & Version
+        id: get_version
+        shell: bash
+        run: |
+          RAW_TAG="${{ inputs.tag_name || github.ref_name }}"
+          if [[ -z "$RAW_TAG" ]]; then
+            RAW_TAG="v0.0.1"
+          fi
+          # Strip 'v' prefix if present for version string
+          VERSION="${RAW_TAG#v}"
+          echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building Release for Tag: $RAW_TAG, Version: $VERSION"
+
+      - name: Create or Verify Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.get_version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "lmux $TAG" \
+              --generate-notes
+          fi
+
+  build-linux:
+    name: Build Linux (tar.gz & AppImage)
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libasound2-dev \
+            libwayland-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build lmux-app (Release)
+        run: cargo build -p lmux-app --release
+
+      - name: Package Linux tar.gz
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          ARCH="$(uname -m)"
+          NAME="lmux-${VERSION}-linux-${ARCH}"
+          DIST="dist/$NAME"
+          mkdir -p "$DIST"
+          install -Dm755 target/release/lmux "$DIST/lmux"
+          cp README.md "$DIST/README.md"
+          cp packaging/lmux.desktop "$DIST/lmux.desktop"
+          cp packaging/lmux.svg "$DIST/lmux.svg"
+          cp packaging/install.sh "$DIST/install.sh"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          sha256sum "dist/$NAME.tar.gz" > "dist/$NAME.tar.gz.sha256"
+
+      - name: Package Linux AppImage
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          bash scripts/package-appimage.sh "$VERSION"
+
+      - name: Upload Linux Artifacts to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: |
+          gh release upload "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 dist/*.AppImage dist/*.AppImage.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+
+  build-macos:
+    name: Build macOS (${{ matrix.target }})
+    needs: prepare-release
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build lmux-app (Release)
+        run: cargo build -p lmux-app --release --target ${{ matrix.target }}
+
+      - name: Package macOS tar.gz & zip
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          NAME="lmux-${VERSION}-macos-${ARCH}"
+          DIST="dist/$NAME"
+          mkdir -p "$DIST"
+          install -m 755 "target/${TARGET}/release/lmux" "$DIST/lmux"
+          cp README.md "$DIST/README.md"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          sha256sum "dist/$NAME.tar.gz" > "dist/$NAME.tar.gz.sha256"
+          (cd dist && zip -r "$NAME.zip" "$NAME")
+          sha256sum "dist/$NAME.zip" > "dist/$NAME.zip.sha256"
+
+      - name: Upload macOS Artifacts to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: |
+          gh release upload "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 dist/*.zip dist/*.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+
+  build-windows:
+    name: Build Windows (x86_64)
+    needs: prepare-release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build lmux-app (Release)
+        shell: bash
+        run: cargo build -p lmux-app --release --target x86_64-pc-windows-msvc
+
+      - name: Package Windows zip
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          NAME="lmux-${VERSION}-windows-x86_64"
+          DIST="dist/$NAME"
+          mkdir -p "$DIST"
+          cp target/x86_64-pc-windows-msvc/release/lmux.exe "$DIST/lmux.exe"
+          cp README.md "$DIST/README.md"
+          (cd dist && 7z a "$NAME.zip" "$NAME")
+          sha256sum "dist/$NAME.zip" > "dist/$NAME.zip.sha256"
+
+      - name: Upload Windows Artifacts to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: |
+          gh release upload "$TAG" dist/*.zip dist/*.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"

@@ -110,7 +110,7 @@ impl ServerState {
                 .filter(|ch| !ch.is_control())
                 .take(80)
                 .collect();
-            if title.is_empty() {
+            if title.is_empty() || looks_like_tmux_copy_title(&title) {
                 return false;
             }
             let Some(instance) = self.agents.iter_mut().find(|item| &item.id == agent) else {
@@ -266,6 +266,14 @@ impl ServerState {
     }
 }
 
+fn looks_like_tmux_copy_title(title: &str) -> bool {
+    let t = title.trim();
+    t.contains("[tmux]")
+        || t.contains("copy-mode")
+        || t.contains("Copy mode")
+        || (t.starts_with('[') && t.contains("tmux"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +362,16 @@ mod tests {
             },
         );
         assert!(!title_events.is_empty());
+        assert_eq!(st.agents[0].title, "π - lmux repo");
+
+        let ignored = st.observe_screen(
+            &"a1".into(),
+            &lmux_core::detect::ScreenInput {
+                osc_title: Some("[tmux] 0:zsh  Copy mode".into()),
+                ..Default::default()
+            },
+        );
+        assert!(ignored.is_empty());
         assert_eq!(st.agents[0].title, "π - lmux repo");
     }
 

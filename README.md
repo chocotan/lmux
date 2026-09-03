@@ -1,95 +1,157 @@
 # lmux
 
-原生 Rust + GPUI 多 Agent 终端客户端。每台机器的 lmux 同时是客户端和服务端；连接远端实例后自动看到该机器上所有项目和会话。
+> **原生 Rust + GPUI 多 Agent 工作台与高性能终端客户端**
+> 专为 AI Coding Agent、多项目协同、分布式远程机器管理而生。每台机器既是轻量客户端也是高内聚服务端；一次连接，自动发现远端实例上的所有机器、项目与常驻会话。
 
-## 当前能力
+---
 
-- GPUI 原生亮色界面：机器/项目/会话树 + 通知中心 + 贴边终端区
-- 真终端：`portable-pty` + `alacritty_terminal`
-  - `$SHELL`/zsh 正确启动
-  - `TERM=xterm-256color`、`COLORTERM=truecolor`
-  - ANSI 256 色/truecolor、背景色、bold/italic/underline、可见光标
-  - 低延迟同步输入；GPUI InputHandler 支持 Fcitx/IME 中文提交
-  - lmux 专用 tmux 开启 mouse/copy-mode 滚动，隐藏 tmux status
-  - 真实字体 metrics + force-width shaping；CJK 宽字符、combining marks、行末 cell 与光标对齐
-  - 4px terminal viewport 内边距；同一 metrics 驱动 cols/rows、光标、IME bounds 和滚轮坐标
-  - 本地 alacritty scrollback；mouse-reporting/alternate-screen 按终端 mode 路由
-- 递归 PaneTree：pane 内 tabs；tab 右侧 `＋` 或 Ctrl+Shift+T 创建普通 Shell tab；显式操作才分屏；最大化；tab 拖动重排/跨 pane
-- split 支持关闭/递归折叠和拖动 2px 分隔线调整比例，布局与比例重启保留
-- 本地会话运行在 lmux 专用 tmux server 中；关闭 GUI 只 detach，重开自动恢复进度
-- 侧栏显示 machine/project/session 清晰树线层级和实时 OSC 标题；项目/远程机器提供确认式删除菜单
-- 删除项目会销毁该项目 lmux tmux；删除远程机器只忘记本地连接，绝不删除目标机器 session
-- 会话右键删除菜单；本地删除会 kill tmux session，远端删除走 `agent.delete`
-- 本地 Unix socket API：`state.list`、`term.subscribe`、`events.subscribe`、`agent.report`、`agent.delete`
-- SSH 认证支持 SSH config、指定公钥、用户名密码；密码仅驻留当前进程的一次性 askpass secret
-- 远端探测区分认证失败/未安装/未启动/离线；确认后可自动上传并启动 `lmux --headless`
-- Hook/plugin 权威事件：Claude/Codex/OpenCode/Pi；提取最终 assistant 正文显示在固定通知中心和桌面通知
+![lmux Workbench Split View](docs/images/workbench-split.png)
 
-## 构建运行
+---
+
+## ✨ 核心特性
+
+### 1. 现代工作台设计与极致视觉体验
+- **原生 GPUI 驱动**：毫秒级响应，告别 Electron 臃肿内存开销，提供极度顺滑的 60/120 FPS 交互动画。
+- **直观层级侧边树**：机器（Machine）→ 项目（Project）→ 会话（Session）清晰拓扑结构展示，支持项目多选展开折叠与会话实时 OSC 动态标题。
+- **灵动胶囊通知浮岛（Dynamic Capsule Popover）**：
+  - 侧栏底部轻盈的通知入口，实时呈现未读计数与呼吸微光状态（Working 脉冲 / Blocked 高警示微光）；
+  - 浮层式通知中心，记录各 Agent 任务流转（执行中、等待输入、任务完成）与相对时间，支持一键点击直达对应终端窗格。
+- **命令面板（Command Palette）**：全局 `Ctrl+K` 极速唤起，秒级检索并启动预设 Agent（Claude Code、Codex、Pi、Agy、OpenCode、Qwen 等）或快速分屏。
+
+| 全局命令面板 (Ctrl+K) | 会话交互与菜单管理 |
+|:---:|:---:|
+| ![Command Palette](docs/images/command-palette.png) | ![Session Menu](docs/images/session-menu.png) |
+
+---
+
+### 2. 纯粹、可靠的硬核终端引擎
+- **真终端架构**：底层由 `portable-pty` 与 `alacritty_terminal` 协同驱动：
+  - **原生终端体验**：支持 `$SHELL` / `zsh`、`TERM=xterm-256color`、`COLORTERM=truecolor`，完美呈现 ANSI 256 色与 TrueColor 真彩色高亮。
+  - **精确排版与输入法兼容**：真实字体度量（Font Metrics）+ Force-width Shaping；精确对齐 CJK 双宽字符与结合符（Combining Marks），完美支持 Fcitx5 / IBus 等 Linux 桌面中文 IME 提交。
+  - **优雅的屏幕状态自适应（Main Screen vs Alt Screen）**：
+    - **普通 Shell**：50,000 行平滑本地历史视口滚动（Scrollback），鼠标左键划词即选、松开即复制；
+    - **全屏 TUI 应用（Vim / Htop / Codex / Pi）**：进入独立的备用屏模式（Alt Screen），鼠标滚轮与点击直接透传给应用（浏览对话、光标点选、列表滚动）；窗口尺寸改变（Resize）时原位重绘，从根本上解决旧终端画布撕裂与历史重影。
+
+![Terminal Rendering and Font Metrics](docs/images/terminal-core.png)
+
+---
+
+### 3. 灵活递归窗格布局（Recursive PaneTree）
+- **显式控制，告别意外分屏**：标签栏右侧 `＋` 或快捷键 `Ctrl+Shift+T` 直接创建同 Pane 的 Shell 选项卡；只有用户显式分屏时才拆分 Pane。
+- **递归分屏与自适应比例**：
+  - 支持水平（Horizontal）与垂直（Vertical）任意层级嵌套分屏；
+  - 2px 精密分割线拖拽实时调整比例，自适应视口尺寸，窗格关闭后自动向内折叠父级，布局比例重启持久化保留；
+  - 支持单窗格一键全屏聚焦（Maximize）与还原。
+
+---
+
+### 4. 会话持久化与零阻断重连
+- **无感常驻后台**：本地所有会话运行在隔离的 lmux 专属 tmux server 中。关闭桌面 GUI 仅仅是 Detach 客户端，后台编译、开发测试或 Agent 任务永不中断。
+- **冷启动与重连历史自动回填**：创建窗口或断线重连时，通过 `capture-pane` 机制秒级回填完整的历史上下文缓冲区，告别重连后终端白板。
+
+---
+
+### 5. 分布式多机器互联与远程 Agent
+- **零配置穿透连接**：支持通过 `~/.ssh/config` 别名、指定公钥或标准账号直连远程机器。
+- **智能远程服务纳管**：
+  - 自动探测远程机器环境（支持区分离线、未启动、未安装等细粒度状态）；
+  - 支持一键将本地 `lmux --headless` 上传并静默拉起远程守护服务；
+  - 远程连接断开后仅清除本地缓存视图，绝对安全，绝不误杀远端运行中的任务会话。
+- **标准化 Hook 链路**：深度集成 Claude / Codex / OpenCode / Pi 等 Agent 的状态汇报机制，精准抓取 Assistant 任务结果并推送全局桌面提醒。
+
+---
+
+## 🚀 快速开始
+
+### 依赖环境
+- Linux (X11 / Wayland)
+- Rust 1.80+ (推荐最新 stable)
+- tmux 3.2+
+- 系统字体与渲染依赖：`fontconfig`, `freetype`, `libxkbcommon`, `wayland` / `xcb` 相关开发包
+
+### 构建与本地运行
 
 ```bash
-cargo build -p lmux-app
+# 调试运行
 cargo run -p lmux-app
-```
 
-使用特定 shell：
-
-```bash
+# 使用指定 Shell 启动
 LMUX_SHELL=/usr/bin/zsh cargo run -p lmux-app
+
+# 编译优化发布版本
+cargo build --release -p lmux-app
+./target/release/lmux
 ```
 
-headless 服务端：
+### 运行 Headless 服务端
+
+在无桌面界面的云服务器或远程工作站上直接运行：
 
 ```bash
-cargo run -p lmux-app -- --headless
+lmux --headless
 ```
 
-连接远端：
+### 连接远程机器
+
+通过命令行快速附加：
 
 ```bash
-cargo run -p lmux-app -- --connect nuc
-cargo run -p lmux-app -- --connect user@192.168.1.20
+lmux --connect my-dev-server
+lmux --connect user@192.168.1.100
 ```
 
-UI 内也可点左下角“连接远程机器”，输入 SSH host 或 `~/.ssh/config` 别名。lmux 自动发现远端 `${XDG_DATA_HOME:-$HOME/.local/share}/lmux/lmux.sock`；直接 socket 路径只作为高级用法保留。
+或直接在桌面界面中点击左下角 **「连接」** 按钮，根据弹窗输入 SSH 主机名与端口即可直观管理。
 
-## 打包安装
+---
+
+## 📦 打包与安装
 
 ```bash
+# 制作 Linux 独立分发归档
 scripts/package-linux.sh
-# 产物：dist/lmux-0.1.0-linux-x86_64.tar.gz + .sha256
+# 产物输出至：dist/lmux-0.1.0-linux-x86_64.tar.gz
 
+# 安装到本地用户环境 (~/.local/bin)
 PREFIX="$HOME/.local" packaging/install.sh target/release/lmux
 ```
 
-当前 release 验收：二进制约 22 MB、压缩包约 8.7 MB；headless `state.list`、desktop entry、安装路径、socket/secret `0600` 均已验证。
+---
 
-## 验证
+## 🧪 质量保障与自动化测试
+
+本项目拥有严苛的自动化测试套件与全工作区流水线验证：
 
 ```bash
+# 代码风格格式化校验
 cargo fmt --all -- --check
+
+# 全仓 Clippy 静态代码检查
 cargo clippy --workspace --all-targets -- -D warnings
+
+# 全工作区单元与集成测试（覆盖 core / term / client / server / store / app）
 cargo test --workspace
+
+# 运行独立桌面端无损 UI 端到端 Smoke 自动化验证
 scripts/ui-smoke.sh
 ```
 
-UI smoke 在独立桌面执行，不占用当前工作区，覆盖：
+---
 
-1. zsh + 真彩色 + 光标 + Fcitx 中文输入
-2. UI 键盘输入 → InputHandler → PTY → 协议 replay 的端到端验证
-3. Ctrl+K 命令面板
-4. 会话右键菜单
-5. 项目 `＋` 创建会话
-6. hook working spinner、done 通知中心
-7. 显式分屏、新 panel 为 Shell
-8. 关闭 tab/split 只折叠布局但不杀会话、最大化
+## ⌨️ 常用快捷键
 
-分隔比例的拖动算法、归一化和非法值由 PaneTree 单测覆盖；UI smoke 不执行鼠标扫描或缓慢拖动。
+| 快捷键 | 功能描述 |
+| :--- | :--- |
+| `Ctrl + K` | 唤起全局命令面板（启动 Agent / 分屏命令） |
+| `Ctrl + Shift + T` | 在当前窗格新建 Shell 标签页 |
+| `Ctrl + C` (选区存在时) | 复制选中文本到系统剪贴板 |
+| `Ctrl + C` (无选区时) | 向终端进程发送原生中断信号 (`SIGINT`) |
+| `Ctrl + V` | 将剪贴板内容安全粘贴至当前终端（带 Bracketed Paste 保护） |
+| `Shift + 鼠标左键拖拽` | 强制使用本地终端文本划词，松开自动复制（即使在 Vim/Htop 等应用内） |
+| `Esc` | 快速退出通知中心浮层、下拉菜单或弹出层 |
 
-截图在 [`artifacts/ui-smoke/`](./artifacts/ui-smoke/)。
+---
 
-## 设计文档
+## 📄 开源许可
 
-- [`../PLAN.md`](../PLAN.md)
-- [`../TECH_DESIGN.md`](../TECH_DESIGN.md)
-- [`../prototype.html`](../prototype.html)
+本项目遵循 MIT 开源许可证。欢迎提 Issue 与 PR 共同演进！

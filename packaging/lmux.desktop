@@ -3,6 +3,7 @@ Type=Application
 Name=lmux
 Comment=Native multi-agent terminal client
 Exec=lmux
+Icon=lmux
 Terminal=false
 Categories=Development;TerminalEmulator;
 StartupNotify=true

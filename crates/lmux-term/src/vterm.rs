@@ -1,5 +1,5 @@
 //! VTerm：alacritty_terminal 真彩色网格（本地/镜像共用）
-use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
@@ -7,6 +7,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct VTerm {
@@ -16,10 +17,25 @@ pub struct VTerm {
 }
 
 struct VTermInner {
-    term: Term<VoidListener>,
+    term: Term<ClipboardBridge>,
     parser: Processor,
     cached: Option<RenderSnapshot>,
     damage: ContentDamage,
+}
+
+#[derive(Clone)]
+struct ClipboardBridge {
+    tx: mpsc::UnboundedSender<String>,
+}
+
+impl EventListener for ClipboardBridge {
+    fn send_event(&self, event: Event) {
+        if let Event::ClipboardStore(_, text) = event {
+            if !text.is_empty() {
+                let _ = self.tx.send(text);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -78,10 +94,15 @@ pub struct RenderSnapshot {
     pub lines: usize,
 }
 
+/// 每个会话的回滚行数（与 remote-agent/xterm.js 的 5000 一致）
+const SCROLLBACK_LINES: usize = 5000;
+
 #[derive(Clone, Copy)]
 struct TermDim {
     columns: usize,
     lines: usize,
+    /// 回滚容量（screen 之外的行数）。total_lines = screen_lines + scrollback。
+    scrollback: usize,
 }
 impl Dimensions for TermDim {
     fn columns(&self) -> usize {
@@ -91,27 +112,36 @@ impl Dimensions for TermDim {
         self.lines
     }
     fn total_lines(&self) -> usize {
-        self.lines
+        self.lines + self.scrollback
     }
 }
 
 impl VTerm {
     pub fn new(cols: u16, rows: u16) -> Self {
+        Self::new_with_clipboard(cols, rows).0
+    }
+
+    pub fn new_with_clipboard(cols: u16, rows: u16) -> (Self, mpsc::UnboundedReceiver<String>) {
         let size = TermDim {
             columns: cols as usize,
             lines: rows as usize,
+            scrollback: SCROLLBACK_LINES,
         };
-        let term = Term::new(Default::default(), &size, VoidListener);
-        VTerm {
-            inner: Arc::new(Mutex::new(VTermInner {
-                term,
-                parser: Processor::new(),
-                cached: None,
-                damage: ContentDamage::Full,
-            })),
-            cols,
-            rows,
-        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let term = Term::new(Default::default(), &size, ClipboardBridge { tx });
+        (
+            VTerm {
+                inner: Arc::new(Mutex::new(VTermInner {
+                    term,
+                    parser: Processor::new(),
+                    cached: None,
+                    damage: ContentDamage::Full,
+                })),
+                cols,
+                rows,
+            },
+            rx,
+        )
     }
 
     pub fn feed(&self, data: &[u8]) {
@@ -317,6 +347,7 @@ impl VTerm {
             guard.term.resize(TermDim {
                 columns: cols as usize,
                 lines: rows as usize,
+                scrollback: SCROLLBACK_LINES,
             });
             guard.cached = None;
             guard.damage = ContentDamage::Full;
@@ -394,7 +425,7 @@ fn merge_damage(a: ContentDamage, b: ContentDamage) -> ContentDamage {
     }
 }
 
-fn build_snapshot(term: &Term<VoidListener>) -> RenderSnapshot {
+fn build_snapshot(term: &Term<ClipboardBridge>) -> RenderSnapshot {
     let rows = (0..term.screen_lines())
         .map(|r| build_row(term, r))
         .collect();
@@ -407,7 +438,7 @@ fn build_snapshot(term: &Term<VoidListener>) -> RenderSnapshot {
     }
 }
 
-fn cursor_of(term: &Term<VoidListener>) -> Option<RenderCursor> {
+fn cursor_of(term: &Term<ClipboardBridge>) -> Option<RenderCursor> {
     if !term.mode().contains(TermMode::SHOW_CURSOR) {
         return None;
     }
@@ -419,7 +450,7 @@ fn cursor_of(term: &Term<VoidListener>) -> Option<RenderCursor> {
     })
 }
 
-fn logical_cursor_of(term: &Term<VoidListener>) -> Option<RenderCursor> {
+fn logical_cursor_of(term: &Term<ClipboardBridge>) -> Option<RenderCursor> {
     let grid = term.grid();
     let p = grid.cursor.point;
     let visual = p.line.0 + grid.display_offset() as i32;
@@ -430,7 +461,7 @@ fn logical_cursor_of(term: &Term<VoidListener>) -> Option<RenderCursor> {
     })
 }
 
-fn build_row(term: &Term<VoidListener>, visual: usize) -> RenderRow {
+fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
     let grid = term.grid();
     let columns = grid.columns();
     let buffer_line = visual as i32 - grid.display_offset() as i32;
@@ -558,5 +589,68 @@ fn indexed_color(i: u8) -> u32 {
             let v = 8 + (i - 232) * 10;
             rgba_u32(v, v, v)
         }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn osc52_clipboard_store_is_emitted() {
+        let (vterm, mut rx) = VTerm::new_with_clipboard(80, 24);
+        let payload = crate::b64_encode(b"copied-from-tmux");
+        vterm.feed(format!("\x1b]52;c;{payload}\x07").as_bytes());
+        let text = rx.try_recv().expect("osc52 clipboard event");
+        assert_eq!(text, "copied-from-tmux");
+    }
+
+    #[test]
+    fn drag_selection_roundtrip() {
+        let vterm = VTerm::new(80, 24);
+        vterm.feed(b"HELLO-SELECTION-WORLD\r\nSECOND LINE\r\n");
+        vterm.begin_selection(0, 0, false);
+        // Side::Right 使终点列包含进选区：0..=20 共 21 列
+        vterm.update_selection(0, 20, true);
+        let text = vterm.selection_to_string().unwrap_or_default();
+        assert_eq!(text, "HELLO-SELECTION-WORLD");
+    }
+}
+
+#[cfg(test)]
+mod alt_screen_tests {
+    use super::*;
+
+    #[test]
+    fn feed_tracks_alt_screen_mode_transitions() {
+        let vterm = VTerm::new(80, 24);
+        assert!(!vterm.modes().alt_screen);
+        vterm.feed(b"\x1b[?1049h");
+        assert!(vterm.modes().alt_screen);
+        vterm.feed(b"\x1b[?1049l");
+        assert!(!vterm.modes().alt_screen);
+
+        let vterm2 = VTerm::new(80, 24);
+        vterm2.feed(b"\x1b[31mred\x1b[0m");
+        assert!(vterm2.line_text(0).unwrap().contains("red"));
+    }
+}
+
+#[cfg(test)]
+mod scrollback_tests {
+    use super::*;
+
+    #[test]
+    fn scrolling_output_accumulates_history() {
+        let vterm = VTerm::new(80, 24);
+        for i in 0..200 {
+            vterm.feed(format!("line-{i}\r\n").as_bytes());
+        }
+        let (history, _offset) = vterm.scroll_metrics();
+        assert!(history > 0, "history should accumulate, got {history}");
+        assert!(
+            vterm.scroll_display(3),
+            "scroll_display should move viewport"
+        );
     }
 }

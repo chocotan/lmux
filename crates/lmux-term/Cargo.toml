@@ -13,7 +13,6 @@ base64.workspace = true
 tracing.workspace = true
 bytes = "1"
 
-[target.'cfg(unix)'.dependencies]
 portable-pty = "0.9"
 alacritty_terminal = "0.26"
 vte = { version = "0.13", features = ["ansi"] }
