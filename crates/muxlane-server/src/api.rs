@@ -231,68 +231,6 @@ impl MuxlaneServer {
         self.dirty.bump();
     }
 
-    pub async fn maintain_sessions(&self) {
-        let mut exited = Vec::new();
-        let mut screens = Vec::new();
-        {
-            let sessions = self.sessions.lock().await;
-            for (id, session) in sessions.iter() {
-                if session.try_take_exit().is_some() {
-                    exited.push(id.clone());
-                    continue;
-                }
-                let replay = session.replay_snapshot();
-                let tail = &replay[replay.len().saturating_sub(64 * 1024)..];
-                let mut lines = muxlane_core::protocol::strip_ansi(tail);
-                if lines.len() > 8 {
-                    lines = lines.split_off(lines.len() - 8);
-                }
-                screens.push((
-                    id.clone(),
-                    muxlane_core::detect::ScreenInput {
-                        bottom_lines: lines,
-                        osc_title: muxlane_core::protocol::extract_osc_title(tail),
-                        secs_since_output: None,
-                        bell: tail.last() == Some(&0x07),
-                    },
-                ));
-            }
-        }
-        if !exited.is_empty() {
-            let mut sessions = self.sessions.lock().await;
-            for id in &exited {
-                sessions.remove(id);
-            }
-            drop(sessions);
-            let mut subs = self.subs.lock().await;
-            for id in &exited {
-                subs.mark_agent_exit(id);
-            }
-            drop(subs);
-            let mut state = self.state.write().await;
-            for id in &exited {
-                for event in state.agent_exit(id) {
-                    let _ = self.events.send(event);
-                }
-            }
-            drop(state);
-            self.dirty.bump();
-        }
-        if !screens.is_empty() {
-            let mut state = self.state.write().await;
-            let mut changed = false;
-            for (id, screen) in &screens {
-                if !state.observe_screen(id, screen).is_empty() {
-                    changed = true;
-                }
-            }
-            drop(state);
-            if changed {
-                self.dirty.bump();
-            }
-        }
-    }
-
     async fn destroy_sessions(&self, agents: &[AgentId]) -> (Vec<AgentId>, Vec<AgentId>) {
         let sessions: HashMap<_, _> = {
             let mut live = self.sessions.lock().await;

@@ -5,15 +5,17 @@ use crate::term_view::TermView;
 use crate::text_field::TextField;
 use crate::theme::{Theme, ThemeMode};
 use gpui::{
-    canvas, deferred, div, prelude::*, px, relative, rgba, svg, Context, Entity, FocusHandle,
-    Focusable, MouseButton, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString,
-    Styled, Svg, Window,
+    canvas, deferred, div, prelude::*, px, relative, rgba, size, svg, App, AssetSource, Bounds,
+    Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton, ParentElement, Pixels, Point,
+    Render, ScrollHandle, SharedString, Styled, Svg, Window, WindowBounds, WindowOptions,
 };
 use muxlane_core::model::{AgentId, Snapshot};
 use muxlane_core::{PaneId, PaneNode, SplitAxis};
 use muxlane_server::MuxlaneServer;
 use muxlane_term::VTerm;
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 gpui::actions!(
@@ -67,6 +69,68 @@ const FONT_FAMILIES: &[&str] = &[
     "Liberation Mono",
 ];
 const DEFAULT_FONT_FAMILY: &str = "Noto Sans Mono";
+
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        Ok(svg_asset(path).map(Cow::Borrowed))
+    }
+
+    fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(Vec::new())
+    }
+}
+
+pub fn launch(
+    server: Arc<MuxlaneServer>,
+    initial_snapshot: Snapshot,
+    connect_to: Vec<String>,
+    persisted: muxlane_store::PersistedApp,
+    store_path: PathBuf,
+) {
+    gpui_platform::application()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-k", TogglePalette, None),
+                KeyBinding::new("ctrl-w", CloseTab, None),
+                KeyBinding::new("ctrl-shift-t", NewShellTab, None),
+                KeyBinding::new("ctrl-tab", NextTab, None),
+                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+                KeyBinding::new("alt-1", SelectTab1, None),
+                KeyBinding::new("alt-2", SelectTab2, None),
+                KeyBinding::new("alt-3", SelectTab3, None),
+                KeyBinding::new("alt-4", SelectTab4, None),
+                KeyBinding::new("alt-5", SelectTab5, None),
+                KeyBinding::new("alt-6", SelectTab6, None),
+                KeyBinding::new("alt-7", SelectTab7, None),
+                KeyBinding::new("alt-8", SelectTab8, None),
+                KeyBinding::new("alt-9", SelectTab9, None),
+            ]);
+            let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+            let _ = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    window.set_window_title("Muxlane");
+                    cx.new(|cx| {
+                        MuxlaneApp::new(
+                            cx,
+                            Arc::clone(&server),
+                            initial_snapshot.clone(),
+                            connect_to.clone(),
+                            persisted.clone(),
+                            store_path.clone(),
+                        )
+                    })
+                },
+            );
+            cx.activate(true);
+        });
+}
 
 pub(crate) fn svg_asset(path: &str) -> Option<&'static [u8]> {
     SVG_ASSETS
@@ -769,10 +833,6 @@ impl MuxlaneApp {
     }
 
     fn persist(&self) {
-        let mut projects = self.last_snapshot.projects.clone();
-        for p in &mut projects {
-            p.agents.clear();
-        }
         let remote_configs: Vec<muxlane_store::PersistedRemote> = self
             .remotes
             .iter()
@@ -809,40 +869,19 @@ impl MuxlaneApp {
                 muxlane_store::PersistedRemote { target, auth }
             })
             .collect();
-        let app = muxlane_store::PersistedApp {
-            version: muxlane_store::STORE_VERSION,
-            initialized: true,
-            projects,
-            remotes: remote_configs
-                .iter()
-                .map(|remote| remote.target.clone())
-                .collect(),
-            remote_configs,
-            sessions: self
-                .last_snapshot
-                .agents
-                .iter()
-                .filter_map(|a| {
-                    Some(muxlane_store::PersistedSession {
-                        agent_id: a.id.clone(),
-                        project_id: a.project.clone(),
-                        agent_type: a.agent_type,
-                        title: a.title.clone(),
-                        tmux_session: a.tmux_session.clone()?,
-                    })
-                })
-                .collect(),
-            pane_tree: self.pane_tree.clone(),
-            active_pane: Some(self.active_pane.clone()),
-            // maximized_pane 是 transient，不持久化
-            maximized_pane: None,
-            window: None,
-            dark_mode: Some(self.theme_mode.is_dark()),
-            theme: Some(self.theme_mode.id().into()),
-            font_family: Some(self.font_family.clone()),
-            sound_enabled: Some(self.sound_enabled),
-            language: Some(self.language.id().into()),
-        };
+        let mut app = muxlane_store::PersistedApp::from_snapshot(&self.last_snapshot);
+        app.remotes = remote_configs
+            .iter()
+            .map(|remote| remote.target.clone())
+            .collect();
+        app.remote_configs = remote_configs;
+        app.pane_tree = self.pane_tree.clone();
+        app.active_pane = Some(self.active_pane.clone());
+        app.dark_mode = Some(self.theme_mode.is_dark());
+        app.theme = Some(self.theme_mode.id().into());
+        app.font_family = Some(self.font_family.clone());
+        app.sound_enabled = Some(self.sound_enabled);
+        app.language = Some(self.language.id().into());
         if let Err(e) = muxlane_store::save(&self.store_path, &app) {
             tracing::warn!(error = %e, "persist state failed");
         }

@@ -1,5 +1,6 @@
 //! muxlane GPUI 主程序：三区极简 UI（侧栏机器树 / 贴边终端网格 / 浮层）
 mod app;
+mod bootstrap;
 mod i18n;
 mod sound;
 mod term_view;
@@ -7,28 +8,10 @@ mod terminal_keys;
 mod text_field;
 mod theme;
 
-use gpui::{
-    px, size, App, AppContext as _, AssetSource, Bounds, KeyBinding, SharedString, WindowBounds,
-    WindowOptions,
-};
 use muxlane_core::model::MachineInfo;
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
-use std::borrow::Cow;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-struct Assets;
-
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        Ok(app::svg_asset(path).map(Cow::Borrowed))
-    }
-
-    fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(Vec::new())
-    }
-}
 
 fn hostname() -> String {
     if let Ok(name) = std::env::var("HOSTNAME") {
@@ -131,209 +114,20 @@ fn main() {
         let srv = Arc::clone(&server);
         rt.spawn(async move { srv.serve().await.expect("server died") });
     }
-    {
-        let server = Arc::clone(&server);
-        rt.spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                server.maintain_sessions().await;
-            }
-        });
-    }
+    server.start_supervisor();
 
-    // ── Hook 注入（P3）：落盘脚本 + 注入 agent 配置（MUXLANE_HOOKS=off 可关闭）
-    if std::env::var("MUXLANE_HOOKS").as_deref() != Ok("off") {
-        let scripts_dir = muxlane_core::hook::hook_scripts_dir(&dir);
-        std::fs::create_dir_all(&scripts_dir).ok();
-        let report_js = scripts_dir.join("report.mjs");
-        std::fs::write(&report_js, muxlane_core::hook::REPORT_SCRIPT).ok();
-        let socket_path = dir.join("muxlane.sock");
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-
-        // claude: settings.json hooks（UserPromptSubmit/PreToolUse→working / Stop→done / Notification→blocked）
-        let claude_dir = PathBuf::from(&home).join(".claude");
-        let _ = std::fs::create_dir_all(&claude_dir);
-        let claude_settings = claude_dir.join("settings.json");
-        let hooks =
-            muxlane_core::hook::claude_hooks_value(&scripts_dir, "claude-hook", &socket_path);
-        if let Err(e) = muxlane_core::hook::inject_claude_hooks(&claude_settings, hooks) {
-            tracing::warn!(error = %e, "claude hooks 注入失败");
-        }
-        // codex: config.toml notify
-        let codex_dir = PathBuf::from(&home).join(".codex");
-        let _ = std::fs::create_dir_all(&codex_dir);
-        let codex_config = codex_dir.join("config.toml");
-        if let Err(e) =
-            muxlane_core::hook::inject_codex_notify(&codex_config, &scripts_dir, &socket_path)
-        {
-            tracing::warn!(error = %e, "codex notify 注入失败");
-        }
-        if let Err(e) = muxlane_core::hook::install_agent_plugins(std::path::Path::new(&home)) {
-            tracing::warn!(error = %e, "OpenCode/Pi plugins 安装失败");
-        }
-        tracing::info!("hook/plugin 注入完成（Claude/Codex/OpenCode/Pi）");
-    }
-
-    // 恢复持久 tmux 会话；GUI 关闭只 detach，进程继续运行。
-    {
-        for saved in &persisted.sessions {
-            let alive = std::process::Command::new("tmux")
-                .args(["-L", "muxlane", "has-session", "-t", &saved.tmux_session])
-                .status()
-                .is_ok_and(|s| s.success());
-            if !alive {
-                continue;
-            }
-            let Some(project) = persisted
-                .projects
-                .iter()
-                .find(|p| p.id == saved.project_id)
-                .cloned()
-            else {
-                continue;
-            };
-            let cfg = muxlane_term::LaunchCfg {
-                agent: saved.agent_id.clone(),
-                agent_type: saved.agent_type,
-                cwd: project.path.clone(),
-                env: vec![
-                    ("MUXLANE_AGENT_ID".into(), saved.agent_id.clone()),
-                    (
-                        "MUXLANE_SOCKET".into(),
-                        server.socket_path().display().to_string(),
-                    ),
-                    (
-                        "MUXLANE_HOOK_TOKEN".into(),
-                        server.hook_token(&saved.agent_id),
-                    ),
-                ],
-                program_override: None,
-                args: vec![],
-                cols: 120,
-                rows: 32,
-                tmux_session: Some(saved.tmux_session.clone()),
-            };
-            if let Ok(session) = muxlane_term::PtySession::spawn(cfg) {
-                let instance = muxlane_core::model::AgentInstance {
-                    id: saved.agent_id.clone(),
-                    project: saved.project_id.clone(),
-                    agent_type: saved.agent_type,
-                    title: saved.title.clone(),
-                    status: muxlane_core::model::AgentStatus::Idle,
-                    status_since: muxlane_core::model::now_secs(),
-                    seen: true,
-                    tmux_session: Some(saved.tmux_session.clone()),
-                };
-                rt.block_on(server.restore_agent(project, instance, session));
-            }
-        }
-
-        // 不自动创建启动目录项目；用户从左侧“添加项目”显式添加。
-    }
+    bootstrap::install(&dir);
+    rt.block_on(server.restore_sessions(&persisted));
     let initial_snapshot = rt.block_on(server.snapshot());
-    // 立即落盘当前可恢复会话，避免用户未点开 tab 就关闭导致元数据丢失。
-    {
-        persisted.projects = initial_snapshot.projects.clone();
-        persisted.initialized = true;
-        for project in &mut persisted.projects {
-            project.agents.clear();
-        }
-        persisted.sessions = initial_snapshot
-            .agents
-            .iter()
-            .filter_map(|a| {
-                Some(muxlane_store::PersistedSession {
-                    agent_id: a.id.clone(),
-                    project_id: a.project.clone(),
-                    agent_type: a.agent_type,
-                    title: a.title.clone(),
-                    tmux_session: a.tmux_session.clone()?,
-                })
-            })
-            .collect();
-        persisted.maximized_pane = None;
-        let _ = muxlane_store::save(&store_path, &persisted);
-    }
+    persisted = muxlane_store::PersistedApp::from_snapshot(&initial_snapshot)
+        .with_ui_prefs_from(&persisted);
+    let _ = muxlane_store::save(&store_path, &persisted);
 
     if headless {
         // 纯服务端：持续落盘 authoritative state，远端删除后不会在重启时复活。
         tracing::info!("muxlane headless server running");
-        let server = Arc::clone(&server);
-        let mut headless_persisted = persisted.clone();
-        let headless_store_path = store_path.clone();
-        rt.block_on(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let snap = server.snapshot().await;
-                headless_persisted.projects = snap.projects.clone();
-                for project in &mut headless_persisted.projects {
-                    project.agents.clear();
-                }
-                headless_persisted.sessions = snap
-                    .agents
-                    .iter()
-                    .filter_map(|agent| {
-                        Some(muxlane_store::PersistedSession {
-                            agent_id: agent.id.clone(),
-                            project_id: agent.project.clone(),
-                            agent_type: agent.agent_type,
-                            title: agent.title.clone(),
-                            tmux_session: agent.tmux_session.clone()?,
-                        })
-                    })
-                    .collect();
-                headless_persisted.maximized_pane = None;
-                if let Err(error) = muxlane_store::save(&headless_store_path, &headless_persisted) {
-                    tracing::warn!(%error, "persist headless state failed");
-                }
-            }
-        });
+        rt.block_on(server.run_headless_persistence(store_path.clone(), persisted.clone()));
     }
 
-    let server_for_app = Arc::clone(&server);
-    let connect_for_app = connect_to.clone();
-    let persisted_for_app = persisted.clone();
-    let initial_snapshot_for_app = initial_snapshot.clone();
-    let store_for_app = store_path.clone();
-    gpui_platform::application()
-        .with_assets(Assets)
-        .run(move |cx: &mut App| {
-            cx.bind_keys([
-                KeyBinding::new("ctrl-k", app::TogglePalette, None),
-                KeyBinding::new("ctrl-w", app::CloseTab, None),
-                KeyBinding::new("ctrl-shift-t", app::NewShellTab, None),
-                KeyBinding::new("ctrl-tab", app::NextTab, None),
-                KeyBinding::new("ctrl-shift-tab", app::PrevTab, None),
-                KeyBinding::new("alt-1", app::SelectTab1, None),
-                KeyBinding::new("alt-2", app::SelectTab2, None),
-                KeyBinding::new("alt-3", app::SelectTab3, None),
-                KeyBinding::new("alt-4", app::SelectTab4, None),
-                KeyBinding::new("alt-5", app::SelectTab5, None),
-                KeyBinding::new("alt-6", app::SelectTab6, None),
-                KeyBinding::new("alt-7", app::SelectTab7, None),
-                KeyBinding::new("alt-8", app::SelectTab8, None),
-                KeyBinding::new("alt-9", app::SelectTab9, None),
-            ]);
-            let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
-            let _ = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    window.set_window_title("Muxlane");
-                    cx.new(|cx| {
-                        app::MuxlaneApp::new(
-                            cx,
-                            Arc::clone(&server_for_app),
-                            initial_snapshot_for_app.clone(),
-                            connect_for_app.clone(),
-                            persisted_for_app.clone(),
-                            store_for_app.clone(),
-                        )
-                    })
-                },
-            );
-            cx.activate(true);
-        });
+    app::launch(server, initial_snapshot, connect_to, persisted, store_path);
 }

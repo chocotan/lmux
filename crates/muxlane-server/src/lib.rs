@@ -2,6 +2,7 @@
 mod api;
 mod state;
 mod subs;
+mod supervisor;
 
 pub use state::ServerState;
 pub use subs::SubRegistry;
@@ -131,26 +132,9 @@ impl MuxlaneServer {
             .and_then(|path| path.clone());
         let Some(path) = path else { return Ok(()) };
         let snapshot = self.state.read().await.snapshot();
-        let mut persisted = muxlane_store::load(&path).unwrap_or_default();
-        persisted.initialized = true;
-        persisted.projects = snapshot.projects.clone();
-        for project in &mut persisted.projects {
-            project.agents.clear();
-        }
-        persisted.sessions = snapshot
-            .agents
-            .iter()
-            .filter_map(|agent| {
-                Some(muxlane_store::PersistedSession {
-                    agent_id: agent.id.clone(),
-                    project_id: agent.project.clone(),
-                    agent_type: agent.agent_type,
-                    title: agent.title.clone(),
-                    tmux_session: agent.tmux_session.clone()?,
-                })
-            })
-            .collect();
-        persisted.maximized_pane = None;
+        let previous = muxlane_store::load(&path).unwrap_or_default();
+        let persisted =
+            muxlane_store::PersistedApp::from_snapshot(&snapshot).with_ui_prefs_from(&previous);
         muxlane_store::save(&path, &persisted)
     }
 

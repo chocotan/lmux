@@ -1,5 +1,5 @@
 //! muxlane 持久化：原子写 + 版本字段 + 安全默认值。
-use muxlane_core::model::{AgentId, AgentType, Project, ProjectId};
+use muxlane_core::model::{AgentId, AgentType, Project, ProjectId, Snapshot};
 use muxlane_core::{PaneId, PaneNode};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,47 @@ pub struct PersistedApp {
     pub sound_enabled: Option<bool>,
     #[serde(default)]
     pub language: Option<String>,
+}
+
+impl PersistedApp {
+    pub fn from_snapshot(snapshot: &Snapshot) -> Self {
+        let mut projects = snapshot.projects.clone();
+        for project in &mut projects {
+            project.agents.clear();
+        }
+        Self {
+            initialized: true,
+            projects,
+            sessions: snapshot
+                .agents
+                .iter()
+                .filter_map(|agent| {
+                    Some(PersistedSession {
+                        agent_id: agent.id.clone(),
+                        project_id: agent.project.clone(),
+                        agent_type: agent.agent_type,
+                        title: agent.title.clone(),
+                        tmux_session: agent.tmux_session.clone()?,
+                    })
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_ui_prefs_from(mut self, previous: &Self) -> Self {
+        self.remotes = previous.remotes.clone();
+        self.remote_configs = previous.remote_configs.clone();
+        self.pane_tree = previous.pane_tree.clone();
+        self.active_pane = previous.active_pane.clone();
+        self.window = previous.window;
+        self.dark_mode = previous.dark_mode;
+        self.theme = previous.theme.clone();
+        self.font_family = previous.font_family.clone();
+        self.sound_enabled = previous.sound_enabled;
+        self.language = previous.language.clone();
+        self
+    }
 }
 
 impl Default for PersistedApp {
@@ -208,6 +249,74 @@ pub fn default_path(data_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn from_snapshot_keeps_only_persistable_runtime_state() {
+        let snapshot = Snapshot {
+            machine: None,
+            projects: vec![Project {
+                id: "p".into(),
+                name: "repo".into(),
+                path: "/tmp/repo".into(),
+                branch: Some("main".into()),
+                agents: vec!["tmux-agent".into(), "plain-agent".into()],
+            }],
+            agents: vec![
+                muxlane_core::model::AgentInstance {
+                    id: "tmux-agent".into(),
+                    project: "p".into(),
+                    agent_type: AgentType::Claude,
+                    title: "work".into(),
+                    status: muxlane_core::model::AgentStatus::Working,
+                    status_since: 1,
+                    seen: false,
+                    tmux_session: Some("muxlane-tmux-agent".into()),
+                },
+                muxlane_core::model::AgentInstance {
+                    id: "plain-agent".into(),
+                    project: "p".into(),
+                    agent_type: AgentType::Shell,
+                    title: "shell".into(),
+                    status: muxlane_core::model::AgentStatus::Idle,
+                    status_since: 2,
+                    seen: true,
+                    tmux_session: None,
+                },
+            ],
+        };
+
+        let mut previous = PersistedApp::default();
+        let pane = previous.pane_tree.first_pane_id();
+        previous.pane_tree.open_tab(&pane, "tmux-agent".into());
+        previous.theme = Some("nord".into());
+        previous.maximized_pane = Some(pane);
+        let app = PersistedApp::from_snapshot(&snapshot).with_ui_prefs_from(&previous);
+
+        assert!(app.initialized);
+        assert!(app.projects[0].agents.is_empty());
+        assert_eq!(app.projects[0].branch.as_deref(), Some("main"));
+        assert_eq!(
+            app.sessions,
+            vec![PersistedSession {
+                agent_id: "tmux-agent".into(),
+                project_id: "p".into(),
+                agent_type: AgentType::Claude,
+                title: "work".into(),
+                tmux_session: "muxlane-tmux-agent".into(),
+            }]
+        );
+        assert_eq!(app.theme.as_deref(), Some("nord"));
+        assert_eq!(app.pane_tree, previous.pane_tree);
+        assert!(app.maximized_pane.is_none());
+    }
+
+    #[test]
+    fn from_empty_snapshot_has_empty_projects_and_sessions() {
+        let app = PersistedApp::from_snapshot(&Snapshot::default());
+        assert!(app.initialized);
+        assert!(app.projects.is_empty());
+        assert!(app.sessions.is_empty());
+    }
+
     #[test]
     fn concurrent_saves_leave_valid_state() {
         let dir = tempfile::tempdir().unwrap();
