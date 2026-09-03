@@ -2,11 +2,13 @@
 mod app;
 mod bootstrap;
 mod i18n;
+mod icons;
 mod sound;
 mod term_view;
 mod terminal_keys;
 mod text_field;
 mod theme;
+mod widgets;
 
 use muxlane_core::model::MachineInfo;
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};

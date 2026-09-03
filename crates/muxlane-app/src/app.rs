@@ -1,13 +1,15 @@
 //! MuxlaneApp：根组件。侧栏（机器树+通知）+ 贴边终端网格。
 use crate::i18n::{self, Language};
+use crate::icons::*;
 use crate::sound::{self, SoundKind};
 use crate::term_view::TermView;
 use crate::text_field::TextField;
 use crate::theme::{Theme, ThemeMode};
+use crate::widgets::*;
 use gpui::{
-    canvas, deferred, div, prelude::*, px, relative, rgba, size, svg, App, AssetSource, Bounds,
-    Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton, ParentElement, Pixels, Point,
-    Render, ScrollHandle, SharedString, Styled, Svg, Window, WindowBounds, WindowOptions,
+    canvas, deferred, div, prelude::*, px, relative, rgba, size, App, AssetSource, Bounds, Context,
+    Entity, FocusHandle, Focusable, KeyBinding, MouseButton, ParentElement, Pixels, Point, Render,
+    ScrollHandle, SharedString, Styled, Window, WindowBounds, WindowOptions,
 };
 use muxlane_core::model::{AgentId, Snapshot};
 use muxlane_core::{PaneId, PaneNode, SplitAxis};
@@ -39,28 +41,6 @@ gpui::actions!(
     ]
 );
 
-const SPLIT_HORIZONTAL_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='2'/><path d='M12 4v16'/></svg>"#;
-const SPLIT_VERTICAL_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='2'/><path d='M3 12h18'/></svg>"#;
-const MAXIMIZE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5'/></svg>"#;
-const RESTORE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='7' y='7' width='13' height='13' rx='1'/><path d='M17 7V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h3'/></svg>"#;
-const CLOSE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round'><path d='M6 6l12 12M18 6L6 18'/></svg>"#;
-const CONNECT_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M7 7h10v10H7z'/><path d='M4 4h10M4 4v10M20 20H10M20 20V10'/></svg>"#;
-const THEME_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M20 15.5A8.5 8.5 0 1 1 8.5 4 6.5 6.5 0 0 0 20 15.5z'/></svg>"#;
-const NOTIFICATION_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9'/><path d='M10 21h4'/></svg>"#;
-const PLUS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round'><path d='M12 5v14M5 12h14'/></svg>"#;
-const SETTINGS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.7' stroke-linejoin='round'><path d='M9.38 5.67L10.72 3.04H13.28L14.62 5.67L17.43 4.76L19.24 6.57L18.33 9.38L20.96 10.72V13.28L18.33 14.62L19.24 17.43L17.43 19.24L14.62 18.33L13.28 20.96H10.72L9.38 18.33L6.57 19.24L4.76 17.43L5.67 14.62L3.04 13.28V10.72L5.67 9.38L4.76 6.57L6.57 4.76Z'/><circle cx='12' cy='12' r='3'/></svg>"#;
-const SVG_ASSETS: &[(&str, &[u8])] = &[
-    ("icons/split-horizontal.svg", SPLIT_HORIZONTAL_ICON),
-    ("icons/split-vertical.svg", SPLIT_VERTICAL_ICON),
-    ("icons/maximize.svg", MAXIMIZE_ICON),
-    ("icons/restore.svg", RESTORE_ICON),
-    ("icons/close.svg", CLOSE_ICON),
-    ("icons/connect.svg", CONNECT_ICON),
-    ("icons/theme.svg", THEME_ICON),
-    ("icons/notification.svg", NOTIFICATION_ICON),
-    ("icons/plus.svg", PLUS_ICON),
-    ("icons/settings.svg", SETTINGS_ICON),
-];
 const FONT_FAMILIES: &[&str] = &[
     "Noto Sans Mono",
     "JetBrains Mono",
@@ -132,20 +112,6 @@ pub fn launch(
         });
 }
 
-pub(crate) fn svg_asset(path: &str) -> Option<&'static [u8]> {
-    SVG_ASSETS
-        .iter()
-        .find_map(|(asset_path, data)| (*asset_path == path).then_some(*data))
-}
-
-fn panel_icon(data: &[u8], color: u32) -> Svg {
-    let path = SVG_ASSETS
-        .iter()
-        .find_map(|(path, bytes)| (*bytes == data).then_some(*path))
-        .expect("panel icon must be registered");
-    svg().path(path).size(px(15.)).text_color(rgba(color))
-}
-
 struct HoverTip {
     text: SharedString,
 }
@@ -177,40 +143,8 @@ struct DragTab {
     from_pane: PaneId,
 }
 
-struct DragGhost {
-    label: SharedString,
-    offset: Point<Pixels>,
-    theme: Theme,
-}
-impl Render for DragGhost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .pl(self.offset.x.max(px(0.0)))
-            .pt(self.offset.y.max(px(0.0)))
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .bg(rgba(self.theme.bg2))
-                    .border_1()
-                    .border_color(rgba(self.theme.line))
-                    .text_size(px(11.))
-                    .text_color(rgba(self.theme.fg0))
-                    .child(self.label.clone()),
-            )
-    }
-}
-
 #[derive(Clone)]
 struct DividerDrag;
-
-struct DividerDragGhost;
-
-impl Render for DividerDragGhost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(1.)).h(px(1.))
-    }
-}
 
 #[derive(Clone)]
 struct SplitDrag {
@@ -5344,41 +5278,6 @@ impl MuxlaneApp {
     }
 }
 
-fn format_relative_time(then: u64, lang: Language) -> String {
-    let now = muxlane_core::model::now_secs();
-    let diff = now.saturating_sub(then);
-    if diff < 10 {
-        i18n::text(lang, "刚刚", "just now").to_string()
-    } else if diff < 60 {
-        if lang == Language::English {
-            format!("{diff}s ago")
-        } else {
-            format!("{diff}秒前")
-        }
-    } else if diff < 3600 {
-        let m = diff / 60;
-        if lang == Language::English {
-            format!("{m}m ago")
-        } else {
-            format!("{m}分钟前")
-        }
-    } else if diff < 86400 {
-        let h = diff / 3600;
-        if lang == Language::English {
-            format!("{h}h ago")
-        } else {
-            format!("{h}小时前")
-        }
-    } else {
-        let d = diff / 86400;
-        if lang == Language::English {
-            format!("{d}d ago")
-        } else {
-            format!("{d}天前")
-        }
-    }
-}
-
 impl Render for MuxlaneApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_mode(self.theme_mode);
@@ -6334,175 +6233,6 @@ impl Render for MuxlaneApp {
     }
 }
 
-fn render_pi_loading_spinner(frame: usize, theme: Theme) -> gpui::Div {
-    let empty_index = frame % 8;
-    // 顺时针 8 点阵索引：左列 [0, 7, 6, 5]，右列 [1, 2, 3, 4]
-    let left_indices = [0, 7, 6, 5];
-    let right_indices = [1, 2, 3, 4];
-
-    let render_col = |indices: [usize; 4]| {
-        let mut col = div().flex().flex_col().gap(px(1.5));
-        for idx in indices {
-            let is_filled = idx != empty_index;
-            col = col.child(
-                div()
-                    .w(px(2.5))
-                    .h(px(2.5))
-                    .rounded_full()
-                    .when(is_filled, |el| el.bg(rgba(theme.accent)))
-                    .when(!is_filled, |el| {
-                        el.bg(rgba(Theme::with_alpha(theme.accent, 0x25)))
-                    }),
-            );
-        }
-        col
-    };
-
-    div()
-        .w(px(14.))
-        .h(px(14.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(2.5))
-                .items_center()
-                .justify_center()
-                .child(render_col(left_indices))
-                .child(render_col(right_indices)),
-        )
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct AttentionStyle {
-    bg_color: Option<u32>,
-    text_color: Option<u32>,
-    border_color: Option<u32>,
-    is_alerting: bool,
-}
-
-fn compute_attention_style(
-    status: muxlane_core::model::AgentStatus,
-    seen: bool,
-    is_error: bool,
-    pulse_phase: usize,
-    theme: Theme,
-) -> AttentionStyle {
-    // 36 步采样的平滑余弦缓动（10 FPS，3.6 秒一周期）。
-    let pulse = (1.0 - (pulse_phase as f32 * std::f32::consts::TAU / 36.0).cos()) * 0.5;
-    match status {
-        muxlane_core::model::AgentStatus::Blocked => {
-            let base_color = theme.yellow;
-            let alpha = (0x0e as f32 + pulse * 0x28 as f32) as u32;
-            let border_alpha = (0x40 as f32 + pulse * 0x80 as f32) as u32;
-            AttentionStyle {
-                bg_color: Some(Theme::with_alpha(base_color, alpha as u8)),
-                text_color: Some(base_color),
-                border_color: Some(Theme::with_alpha(base_color, border_alpha as u8)),
-                is_alerting: true,
-            }
-        }
-        muxlane_core::model::AgentStatus::Done if !seen => {
-            let base_color = if is_error { theme.red } else { theme.green };
-            let alpha = (0x0c as f32 + pulse * 0x24 as f32) as u32;
-            let border_alpha = (0x35 as f32 + pulse * 0x75 as f32) as u32;
-            AttentionStyle {
-                bg_color: Some(Theme::with_alpha(base_color, alpha as u8)),
-                text_color: Some(base_color),
-                border_color: Some(Theme::with_alpha(base_color, border_alpha as u8)),
-                is_alerting: true,
-            }
-        }
-        _ => AttentionStyle::default(),
-    }
-}
-
-fn render_status_indicator(
-    status: muxlane_core::model::AgentStatus,
-    is_error: bool,
-    spinner_frame: usize,
-    theme: Theme,
-) -> gpui::Div {
-    let container = div()
-        .w(px(14.))
-        .h(px(14.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center();
-
-    match status {
-        muxlane_core::model::AgentStatus::Working => {
-            render_pi_loading_spinner(spinner_frame, theme)
-        }
-        muxlane_core::model::AgentStatus::Blocked => container.child(
-            div()
-                .w(px(6.))
-                .h(px(6.))
-                .rounded_full()
-                .bg(rgba(theme.yellow)),
-        ),
-        muxlane_core::model::AgentStatus::Done if is_error => {
-            container.child(div().w(px(6.)).h(px(6.)).rounded_full().bg(rgba(theme.red)))
-        }
-        muxlane_core::model::AgentStatus::Done => container.child(
-            div()
-                .w(px(6.))
-                .h(px(6.))
-                .rounded_full()
-                .bg(rgba(theme.green)),
-        ),
-        muxlane_core::model::AgentStatus::Idle | muxlane_core::model::AgentStatus::Unknown => {
-            container.child(div().w(px(5.)).h(px(5.)).rounded_full().bg(rgba(theme.fg2)))
-        }
-    }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() > n {
-        let t: String = s.chars().take(n).collect();
-        format!("{t}…")
-    } else {
-        s.to_string()
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-/// 上传阶段进度文本：如「上传二进制 12.3 MB / 45.6 MB (27%)」；
-/// 无字节数时退化为「上传二进制 27%」/「上传二进制…」
-fn format_upload_phase(progress: &muxlane_client::BootstrapProgress) -> String {
-    let label = progress.phase.label();
-    match (progress.done_bytes, progress.total_bytes, progress.percent) {
-        (Some(done), Some(total), Some(percent)) if total > 0 => {
-            format!(
-                "{label} {} / {} ({percent}%)",
-                format_bytes(done),
-                format_bytes(total)
-            )
-        }
-        (_, _, Some(percent)) => format!("{label} {percent}%"),
-        _ => format!("{label}…"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6524,37 +6254,6 @@ mod tests {
             effective_notification_body(muxlane_core::model::AgentStatus::Blocked, None),
             "等待输入"
         );
-    }
-
-    #[test]
-    fn upload_progress_text_shows_bytes_and_percent() {
-        use muxlane_client::BootstrapPhase;
-        let progress = muxlane_client::BootstrapProgress {
-            phase: BootstrapPhase::Upload,
-            percent: Some(27),
-            done_bytes: Some(12 * 1024 * 1024 + 300 * 1024),
-            total_bytes: Some(45 * 1024 * 1024),
-        };
-        let text = format_upload_phase(&progress);
-        assert!(text.contains("12.3 MB"), "{text}");
-        assert!(text.contains("45.0 MB"), "{text}");
-        assert!(text.contains("27%"), "{text}");
-        // 无字节数时退化为纯百分比
-        let text = format_upload_phase(&muxlane_client::BootstrapProgress {
-            phase: BootstrapPhase::Install,
-            percent: Some(50),
-            done_bytes: None,
-            total_bytes: None,
-        });
-        assert_eq!(text, "安装 50%");
-        // 无细分进度
-        let text = format_upload_phase(&muxlane_client::BootstrapProgress {
-            phase: BootstrapPhase::Restart,
-            percent: None,
-            done_bytes: None,
-            total_bytes: None,
-        });
-        assert_eq!(text, "重启服务…");
     }
 
     #[test]
