@@ -1,0 +1,4 @@
+# The zed git dependency (gpui) is huge; CLI git handles it far more reliably
+# than cargo's built-in libgit2 fetch.
+[net]
+git-fetch-with-cli = true
