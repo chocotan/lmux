@@ -5,7 +5,7 @@ use anyhow::{Context as _, Result};
 use lmux_core::model::{AgentId, AgentType};
 use portable_pty::{native_pty_system, CommandBuilder};
 use std::io::{BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -129,12 +129,17 @@ pub struct PtySession {
     reader_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     last_input_ms: AtomicU64,
     focused: AtomicBool,
+    tmux_server_name: Option<String>,
     tmux_session_name: Option<String>,
 }
 
 impl PtySession {
     /// 启动 PTY 子进程；读线程自动开始泵数据到 tap/replay
     pub fn spawn(cfg: LaunchCfg) -> Result<Arc<PtySession>> {
+        Self::spawn_with_tmux_socket(cfg, "lmux")
+    }
+
+    fn spawn_with_tmux_socket(cfg: LaunchCfg, tmux_server_name: &str) -> Result<Arc<PtySession>> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(portable_pty::PtySize {
@@ -151,13 +156,14 @@ impl PtySession {
             (t, None) => (t.program().to_string(), cfg.args.clone()),
         };
         let mut cmd = if let Some(session) = &cfg.tmux_session {
-            configure_tmux_server();
-            update_tmux_environment(session, &cfg.env);
+            let tmux_config = tmux_config_path();
+            configure_tmux_server(tmux_server_name, &tmux_config);
+            update_tmux_environment(tmux_server_name, session, &cfg.env);
             let mut c = CommandBuilder::new("tmux");
             c.arg("-L");
-            c.arg("lmux");
+            c.arg(tmux_server_name);
             c.arg("-f");
-            c.arg(tmux_config_path());
+            c.arg(tmux_config);
             c.arg("new-session");
             c.arg("-A");
             c.arg("-s");
@@ -235,6 +241,10 @@ impl PtySession {
             shared: Arc::clone(&shared),
             last_input_ms: AtomicU64::new(0),
             focused: AtomicBool::new(false),
+            tmux_server_name: cfg
+                .tmux_session
+                .as_ref()
+                .map(|_| tmux_server_name.to_string()),
             tmux_session_name: cfg.tmux_session.clone(),
         });
 
@@ -375,20 +385,21 @@ impl PtySession {
 
     pub fn kill_persistent(&self) -> bool {
         // 先杀 tmux server-side session，再终止本地 attach client。
-        let destroyed = if let Some(name) = &self.tmux_session_name {
-            let target = format!("={name}");
-            let _ = std::process::Command::new("tmux")
-                .args(["-L", "lmux", "kill-session", "-t"])
-                .arg(&target)
-                .status();
-            std::process::Command::new("tmux")
-                .args(["-L", "lmux", "has-session", "-t"])
-                .arg(&target)
-                .status()
-                .is_ok_and(|status| !status.success())
-        } else {
-            true
-        };
+        let destroyed =
+            if let (Some(server), Some(name)) = (&self.tmux_server_name, &self.tmux_session_name) {
+                let target = format!("={name}");
+                let _ = std::process::Command::new("tmux")
+                    .args(["-L", server, "kill-session", "-t"])
+                    .arg(&target)
+                    .status();
+                std::process::Command::new("tmux")
+                    .args(["-L", server, "has-session", "-t"])
+                    .arg(&target)
+                    .status()
+                    .is_ok_and(|status| !status.success())
+            } else {
+                true
+            };
         self.kill();
         destroyed
     }
@@ -402,11 +413,12 @@ impl PtySession {
     /// 从后台 tmux 会话捕获历史缓冲区（解决首次/重连 attach 时历史缺失）。
     pub fn capture_history(&self) -> Option<Vec<u8>> {
         let name = self.tmux_session_name.as_deref()?;
+        let server = self.tmux_server_name.as_deref()?;
         let target = format!("={name}");
         let output = std::process::Command::new("tmux")
             .args([
                 "-L",
-                "lmux",
+                server,
                 "capture-pane",
                 "-p",
                 "-e",
@@ -425,17 +437,17 @@ impl PtySession {
     }
 }
 
-fn update_tmux_environment(session: &str, env: &[(String, String)]) {
+fn update_tmux_environment(server: &str, session: &str, env: &[(String, String)]) {
     for (key, value) in env {
         let _ = std::process::Command::new("tmux")
-            .args(["-L", "lmux", "set-environment", "-t", session, key, value])
+            .args(["-L", server, "set-environment", "-t", session, key, value])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
     }
 }
 
-fn configure_tmux_server() {
+fn configure_tmux_server(server: &str, config_path: &Path) {
     // 完全采用 remote-agent 方案：
     // mouse on：tmux 原生全面接管鼠标（滚轮向上自动进入 copy-mode 浏览历史，滚轮向下到底自动退出，
     // 在全屏/AltScreen 应用如 vim/codex/pi 中自动透传滚轮），
@@ -450,11 +462,19 @@ fn configure_tmux_server() {
         ("set-titles", "off"),
     ] {
         let _ = std::process::Command::new("tmux")
-            .args(["-L", "lmux", "set-option", "-g", option, value])
+            .args(["-L", server, "set-option", "-g", option, value])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
     }
+
+    // `-f` 只在 server 首次启动时读取；常驻 server 需要主动刷新按键绑定。
+    let _ = std::process::Command::new("tmux")
+        .args(["-L", server, "source-file"])
+        .arg(config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 fn tmux_config_path() -> PathBuf {
@@ -474,6 +494,7 @@ set-option -g status off
 set-option -g set-titles off
 set-option -g default-terminal \"xterm-256color\"
 set-option -g terminal-overrides \",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB\"
+set-option -gu terminal-features
 set-option -ga terminal-features \",xterm-256color:RGB:clipboard,tmux-256color:RGB:clipboard,*-256color:RGB:clipboard,*:clipboard\"
 set-option -g xterm-keys on
 set-option -g history-limit 50000
@@ -499,6 +520,8 @@ bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-and-cance
 bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-selection-and-cancel
 bind-key -T copy-mode-vi MouseUp1Pane send-keys -X copy-selection-and-cancel
 bind-key -T copy-mode MouseUp1Pane send-keys -X copy-selection-and-cancel
+bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 5 scroll-down-and-cancel
+bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 5 scroll-down-and-cancel
 bind-key -T copy-mode-vi DoubleClick1Pane send-keys -X select-word \\; send-keys -X copy-pipe
 bind-key -n DoubleClick1Pane copy-mode -H \\; send-keys -X select-word \\; send-keys -X copy-pipe
 bind-key -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X copy-pipe
@@ -540,13 +563,30 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    struct TmuxCleanup(String);
+    struct TmuxServerCleanup {
+        name: String,
+        socket_path: PathBuf,
+    }
 
-    impl Drop for TmuxCleanup {
+    impl TmuxServerCleanup {
+        fn new(name: String) -> Self {
+            let socket_path = std::env::var_os("TMUX_TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(format!("tmux-{}", unsafe { libc_getuid() }))
+                .join(&name);
+            Self { name, socket_path }
+        }
+    }
+
+    impl Drop for TmuxServerCleanup {
         fn drop(&mut self) {
             let _ = std::process::Command::new("tmux")
-                .args(["-L", "lmux", "kill-session", "-t", &self.0])
+                .args(["-L", &self.name, "kill-server"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status();
+            let _ = std::fs::remove_file(&self.socket_path);
         }
     }
 
@@ -559,8 +599,153 @@ mod tests {
         assert!(config.contains("set-option -g xterm-keys on"));
         assert!(config.contains("set-option -g history-limit 50000"));
         assert!(config.contains("copy-mode -M"));
+        assert!(config.contains("bind-key -T copy-mode-vi WheelDownPane"));
+        assert!(config.contains("bind-key -T copy-mode WheelDownPane"));
+        assert_eq!(config.matches("scroll-down-and-cancel").count(), 2);
         assert!(config.contains("MouseDragEnd1Pane"));
         assert!(config.contains("MouseUp1Pane"));
+    }
+
+    #[test]
+    fn tmux_config_reloads_idempotently_and_copy_mode_exits_at_bottom() {
+        let socket = format!("lmux-config-test-{}-{}", std::process::id(), now_millis());
+        let config = tmux_config_path();
+        let pane = "probe:0.0";
+
+        let started = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                &socket,
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "-s",
+                "probe",
+                "bash --noprofile --norc",
+            ])
+            .status()
+            .unwrap();
+        assert!(started.success());
+        let _cleanup = TmuxServerCleanup::new(socket.clone());
+
+        for _ in 0..2 {
+            configure_tmux_server(&socket, &config);
+        }
+
+        for table in ["copy-mode-vi", "copy-mode"] {
+            let output = std::process::Command::new("tmux")
+                .args(["-L", &socket, "list-keys", "-T", table])
+                .output()
+                .unwrap();
+            let bindings = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                bindings.lines().any(|line| line.contains("WheelDownPane")
+                    && line.contains("scroll-down-and-cancel")),
+                "missing WheelDownPane cancel binding in {table}: {bindings}"
+            );
+        }
+
+        let output = std::process::Command::new("tmux")
+            .args(["-L", &socket, "show-options", "-gqv", "terminal-features"])
+            .output()
+            .unwrap();
+        let features = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            features.matches("xterm-256color:RGB:clipboard").count(),
+            1,
+            "terminal-features should stay idempotent: {features}"
+        );
+
+        std::process::Command::new("tmux")
+            .args(["-L", &socket, "send-keys", "-t", pane, "seq 1 200", "Enter"])
+            .status()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let output = std::process::Command::new("tmux")
+                .args([
+                    "-L",
+                    &socket,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    pane,
+                    "#{history_size}",
+                ])
+                .output()
+                .unwrap();
+            let history_size = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<usize>()
+                .unwrap_or(0);
+            if history_size >= 10 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for tmux history, size={history_size}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(std::process::Command::new("tmux")
+            .args(["-L", &socket, "copy-mode", "-t", pane, "-H"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("tmux")
+            .args([
+                "-L",
+                &socket,
+                "send-keys",
+                "-t",
+                pane,
+                "-X",
+                "-N",
+                "10",
+                "scroll-up",
+            ])
+            .status()
+            .unwrap()
+            .success());
+
+        for expected_mode in ["1", "0"] {
+            assert!(std::process::Command::new("tmux")
+                .args([
+                    "-L",
+                    &socket,
+                    "send-keys",
+                    "-t",
+                    pane,
+                    "-X",
+                    "-N",
+                    "5",
+                    "scroll-down-and-cancel",
+                ])
+                .status()
+                .unwrap()
+                .success());
+            let output = std::process::Command::new("tmux")
+                .args([
+                    "-L",
+                    &socket,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    pane,
+                    "#{pane_in_mode}",
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                expected_mode
+            );
+        }
     }
 
     #[tokio::test]
@@ -707,8 +892,8 @@ mod tests {
     }
     #[test]
     fn tmux_session_survives_client_detach_and_reattaches() {
-        let name = format!("lmux-test-persist-{}", std::process::id());
-        let _cleanup = TmuxCleanup(name.clone());
+        let socket = format!("lmux-persist-test-{}-{}", std::process::id(), now_millis());
+        let name = "persist".to_string();
         let cfg = LaunchCfg {
             agent: "persist-a".into(),
             agent_type: AgentType::Shell,
@@ -723,18 +908,19 @@ mod tests {
             rows: 24,
             tmux_session: Some(name.clone()),
         };
-        let first = PtySession::spawn(cfg.clone()).unwrap();
+        let first = PtySession::spawn_with_tmux_socket(cfg.clone(), &socket).unwrap();
+        let _cleanup = TmuxServerCleanup::new(socket.clone());
         std::thread::sleep(Duration::from_millis(180));
         assert!(String::from_utf8_lossy(&first.replay_snapshot()).contains("phase-one"));
         first.kill();
         std::thread::sleep(Duration::from_millis(500));
         assert!(std::process::Command::new("tmux")
-            .args(["-L", "lmux", "has-session", "-t", &name])
+            .args(["-L", &socket, "has-session", "-t", &name])
             .status()
             .unwrap()
             .success());
 
-        let second = PtySession::spawn(cfg).unwrap();
+        let second = PtySession::spawn_with_tmux_socket(cfg, &socket).unwrap();
         std::thread::sleep(Duration::from_millis(180));
         let replay = String::from_utf8_lossy(&second.replay_snapshot()).into_owned();
         second.kill_persistent();
