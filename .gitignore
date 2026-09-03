@@ -3,3 +3,9 @@
 /artifacts
 *.log
 .DS_Store
+.jet
+.jez
+.pi
+/docs
+example
+prototype.html
