@@ -308,7 +308,7 @@ impl MuxlaneServer {
                                                 let sess_opt = self.sessions.lock().await.get(&params.agent).cloned();
                                                 sess_opt.map(|sess| {
                                                     let (snap, rx) = sess.subscribe();
-                                                    (muxlane_core::model::new_id("sub"), muxlane_term::b64_encode(&snap), rx, sess)
+                                                    (muxlane_core::model::new_id("sub"), muxlane_core::protocol::b64_encode(&snap), rx, sess)
                                                 })
                                             };
                                             match prepared {
@@ -337,7 +337,7 @@ impl MuxlaneServer {
                                             let session = self.sessions.lock().await.get(&params.agent).cloned();
                                             match session {
                                                 Some(session) => {
-                                                    let data = muxlane_term::b64_decode(&params.data_b64)?;
+                                                    let data = muxlane_core::protocol::b64_decode(&params.data_b64)?;
                                                     session.write_input(&data);
                                                     // 提交型输入（含换行）→ working；命令结束后
                                                     // 屏幕检测（提示符规则）自动 Working→Idle。

@@ -91,7 +91,7 @@ async fn remote_term_input_reaches_pty_and_project_add_validates_path() {
             method: methods::TERM_INPUT.into(),
             params: serde_json::to_value(muxlane_core::protocol::TermInputParams {
                 agent: agent.clone(),
-                data_b64: muxlane_term::b64_encode(b"hello\n"),
+                data_b64: muxlane_core::protocol::b64_encode(b"hello\n"),
             })
             .unwrap(),
         },
@@ -210,7 +210,7 @@ async fn term_subscribe_replay_and_incremental() {
     let resp: Response = serde_json::from_value(read_frame(&mut conn).await.unwrap()).unwrap();
     let result: muxlane_core::protocol::TermSubscribeResult =
         serde_json::from_value(resp.result.unwrap()).unwrap();
-    let replay = muxlane_term::b64_decode(&result.replay_b64).unwrap();
+    let replay = muxlane_core::protocol::b64_decode(&result.replay_b64).unwrap();
     assert!(
         replay.windows(9).any(|w| w == b"first-out"),
         "replay covers history"
@@ -226,8 +226,10 @@ async fn term_subscribe_replay_and_incremental() {
         match frame {
             Ok(Ok(v)) => {
                 if v["event"] == events::TERM_DATA {
-                    let data = muxlane_term::b64_decode(v["params"]["data_b64"].as_str().unwrap())
-                        .unwrap();
+                    let data = muxlane_core::protocol::b64_decode(
+                        v["params"]["data_b64"].as_str().unwrap(),
+                    )
+                    .unwrap();
                     if data.windows(10).any(|w| w == b"second-out") {
                         got_incremental = true;
                         break;

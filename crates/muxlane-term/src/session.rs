@@ -1,8 +1,8 @@
 //! PtySession：本地 PTY 包装，唯一输出分叉点（tap broadcast + replay 环形缓冲）
-use crate::b64_encode;
 use crate::ReplayBuffer;
 use anyhow::{Context as _, Result};
 use muxlane_core::model::{AgentId, AgentType};
+use muxlane_core::protocol::b64_encode;
 use portable_pty::{native_pty_system, CommandBuilder};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};

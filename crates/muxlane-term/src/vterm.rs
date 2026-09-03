@@ -599,7 +599,7 @@ mod selection_tests {
     #[test]
     fn osc52_clipboard_store_is_emitted() {
         let (vterm, mut rx) = VTerm::new_with_clipboard(80, 24);
-        let payload = crate::b64_encode(b"copied-from-tmux");
+        let payload = muxlane_core::protocol::b64_encode(b"copied-from-tmux");
         vterm.feed(format!("\x1b]52;c;{payload}\x07").as_bytes());
         let text = rx.try_recv().expect("osc52 clipboard event");
         assert_eq!(text, "copied-from-tmux");

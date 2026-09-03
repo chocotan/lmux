@@ -14,7 +14,8 @@ pub async fn release_remote_tunnel(host: &str) {
 use anyhow::Result;
 use muxlane_core::model::Snapshot;
 use muxlane_core::protocol::{
-    read_frame, write_frame, EventMsg, Request, Response, TermSubscribeParams, TermSubscribeResult,
+    b64_decode, b64_encode, read_frame, write_frame, EventMsg, Request, Response,
+    TermSubscribeParams, TermSubscribeResult,
 };
 use tokio::net::UnixStream;
 
@@ -149,9 +150,7 @@ pub async fn stream_term(
         )
         .await?,
     )?;
-    on_update(TermUpdate::Resync(muxlane_term::b64_decode(
-        &result.replay_b64,
-    )?));
+    on_update(TermUpdate::Resync(b64_decode(&result.replay_b64)?));
     let sub_id = result.sub_id;
     let (mut writer, mut reader) = conn.into_split();
     let outcome = loop {
@@ -159,13 +158,13 @@ pub async fn stream_term(
             Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_DATA => {
                 let d: muxlane_core::protocol::TermDataEvent = serde_json::from_value(ev.params)?;
                 if d.agent == *agent {
-                    on_update(TermUpdate::Data(muxlane_term::b64_decode(&d.data_b64)?));
+                    on_update(TermUpdate::Data(b64_decode(&d.data_b64)?));
                 }
             }
             Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_RESYNC => {
                 let d: muxlane_core::protocol::TermResyncEvent = serde_json::from_value(ev.params)?;
                 if d.agent == *agent {
-                    on_update(TermUpdate::Resync(muxlane_term::b64_decode(&d.replay_b64)?));
+                    on_update(TermUpdate::Resync(b64_decode(&d.replay_b64)?));
                 }
             }
             Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_EXIT => {
@@ -252,7 +251,7 @@ pub async fn send_term_input(
         muxlane_core::protocol::methods::TERM_INPUT,
         serde_json::to_value(muxlane_core::protocol::TermInputParams {
             agent: agent.clone(),
-            data_b64: muxlane_term::b64_encode(data),
+            data_b64: b64_encode(data),
         })?,
     )
     .await?;

@@ -1,4 +1,5 @@
 use muxlane_client::{stream_term, TermUpdate};
+use muxlane_core::protocol::b64_encode;
 use muxlane_core::protocol::{
     read_frame, write_frame, EventMsg, Request, Response, TermSubscribeResult,
 };
@@ -15,7 +16,7 @@ async fn stream_term_handles_replay_resync_and_exit() {
         let (r, mut w) = stream.into_split();
         let mut r = tokio::io::BufReader::new(r);
         let req: Request = serde_json::from_value(read_frame(&mut r).await.unwrap()).unwrap();
-        let first = muxlane_term::b64_encode(b"FIRST");
+        let first = b64_encode(b"FIRST");
         write_frame(
             &mut w,
             &Response::ok(
@@ -29,7 +30,7 @@ async fn stream_term_handles_replay_resync_and_exit() {
         )
         .await
         .unwrap();
-        let second = muxlane_term::b64_encode(b"SECOND");
+        let second = b64_encode(b"SECOND");
         write_frame(
             &mut w,
             &EventMsg::new(

@@ -23,7 +23,7 @@ pub enum TunnelError {
 }
 
 fn askpass_script() -> PathBuf {
-    let path = data_dir().join("ssh/muxlane-askpass.sh");
+    let path = muxlane_core::paths::data_dir().join("ssh/muxlane-askpass.sh");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -131,7 +131,7 @@ fn ssh_command(auth: &SshAuth) -> Command {
 /// 注意：隧道进程（start_tunnel）不能用这个 socket——`-L` 转发只在 master
 /// 连接上生效，复用已有 master 时转发会被静默丢弃。
 fn shared_ctl(destination: &str) -> PathBuf {
-    let dir = data_dir().join("ssh");
+    let dir = muxlane_core::paths::data_dir().join("ssh");
     std::fs::create_dir_all(&dir).ok();
     dir.join(format!("cm-{}.ctl", sanitize(destination)))
 }
@@ -198,16 +198,6 @@ pub async fn release_tunnel(host: &str) {
             .await;
         let _ = std::fs::remove_file(shared);
     }
-}
-
-pub fn data_dir() -> PathBuf {
-    std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".local/share")
-        })
-        .join("muxlane")
 }
 
 /// 确保到 host 的隧道，返回本地可连的 unix socket 路径。
@@ -537,7 +527,7 @@ async fn start_tunnel(
     remote_socket: &str,
     auth: &SshAuth,
 ) -> Result<TunnelEntry, TunnelError> {
-    let dir = data_dir();
+    let dir = muxlane_core::paths::data_dir();
     std::fs::create_dir_all(dir.join("ssh")).ok();
     let id = muxlane_core::model::new_id("tunnel");
     let ctl = dir.join("ssh").join(format!("{id}.ctl"));

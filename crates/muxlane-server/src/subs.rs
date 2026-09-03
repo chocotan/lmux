@@ -88,7 +88,7 @@ impl SubRegistry {
                 if entry.pending_resync.is_none() {
                     let (snapshot, rx) = entry.session.subscribe();
                     entry.pending_resync = Some(PendingResync {
-                        replay_b64: muxlane_term::b64_encode(&snapshot),
+                        replay_b64: muxlane_core::protocol::b64_encode(&snapshot),
                         rx,
                     });
                 }
@@ -121,7 +121,7 @@ impl SubRegistry {
                         muxlane_core::protocol::events::TERM_DATA,
                         serde_json::to_value(TermDataEvent {
                             agent: entry.agent.clone(),
-                            data_b64: muxlane_term::b64_encode(&bytes),
+                            data_b64: muxlane_core::protocol::b64_encode(&bytes),
                         })
                         .unwrap_or_default(),
                     );
@@ -186,7 +186,7 @@ mod tests {
             .unwrap();
         assert_eq!(msg.event, muxlane_core::protocol::events::TERM_RESYNC);
         let event: TermResyncEvent = serde_json::from_value(msg.params).unwrap();
-        let replay = muxlane_term::b64_decode(&event.replay_b64).unwrap();
+        let replay = muxlane_core::protocol::b64_decode(&event.replay_b64).unwrap();
         assert!(replay.windows(11).any(|w| w == b"RESYNC-MARK"));
         session.kill();
     }

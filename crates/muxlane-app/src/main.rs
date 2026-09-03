@@ -12,6 +12,7 @@ use gpui::{
     WindowOptions,
 };
 use muxlane_core::model::MachineInfo;
+use muxlane_core::protocol::{extract_osc_title, strip_ansi};
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -28,16 +29,6 @@ impl AssetSource for Assets {
     fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
         Ok(Vec::new())
     }
-}
-
-fn data_dir() -> PathBuf {
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".local/share")
-        });
-    base.join("muxlane")
 }
 
 fn hostname() -> String {
@@ -75,7 +66,7 @@ fn main() {
         .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
 
-    let dir = data_dir();
+    let dir = muxlane_core::paths::data_dir();
     std::fs::create_dir_all(&dir).ok();
     let store_path = muxlane_store::default_path(&dir);
     let mut persisted = match muxlane_store::load(&store_path) {
@@ -164,7 +155,7 @@ fn main() {
                         let replay = sess.replay_snapshot();
                         let start = replay.len().saturating_sub(64 * 1024);
                         let tail = &replay[start..];
-                        let mut lines = muxlane_term::strip_ansi(tail);
+                        let mut lines = strip_ansi(tail);
                         if lines.len() > 8 {
                             lines = lines.split_off(lines.len() - 8);
                         }
@@ -172,7 +163,7 @@ fn main() {
                             id.clone(),
                             muxlane_core::detect::ScreenInput {
                                 bottom_lines: lines,
-                                osc_title: muxlane_term::extract_osc_title(tail),
+                                osc_title: extract_osc_title(tail),
                                 secs_since_output: None,
                                 bell: tail.last() == Some(&0x07),
                             },

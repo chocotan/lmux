@@ -12,10 +12,9 @@ serde_json.workspace = true
 ulid.workspace = true
 tracing.workspace = true
 serde.workspace = true
-muxlane-term = { path = "../muxlane-term" }
-muxlane-server = { path = "../muxlane-server" }
 flate2 = "1.0"
 tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+muxlane-server = { path = "../muxlane-server" }

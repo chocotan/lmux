@@ -5,6 +5,7 @@ mod error;
 pub mod hook;
 pub mod model;
 pub mod pane;
+pub mod paths;
 pub mod preset;
 pub mod protocol;
 
