@@ -1,0 +1,436 @@
+//! Command palette item discovery, keyboard handling, execution, and rendering.
+use crate::app::MuxlaneApp;
+use crate::icons::*;
+use crate::theme::Theme;
+use gpui::{
+    div, prelude::*, px, relative, rgba, Context, MouseButton, ParentElement, Styled, Window,
+};
+use muxlane_core::SplitAxis;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum NewSessionTarget {
+    Local(muxlane_core::model::ProjectId),
+    Remote {
+        host: String,
+        project: muxlane_core::model::ProjectId,
+    },
+}
+
+#[derive(Clone)]
+enum PaletteItem {
+    Preset {
+        preset: muxlane_core::AgentPreset,
+    },
+    Action {
+        id: &'static str,
+        label: &'static str,
+        shortcut: Option<&'static str>,
+        icon: &'static [u8],
+    },
+}
+
+impl MuxlaneApp {
+    fn palette_project_path(&self) -> Option<std::path::PathBuf> {
+        match &self.new_session_target {
+            Some(NewSessionTarget::Local(id)) => {
+                self.last_snapshot.project(id).map(|p| p.path.clone())
+            }
+            Some(NewSessionTarget::Remote { host, project }) => self
+                .remote_snaps
+                .get(host)
+                .and_then(|s| s.project(project))
+                .map(|p| p.path.clone()),
+            None => self
+                .active
+                .as_ref()
+                .and_then(|id| self.find_agent(id))
+                .and_then(|a| {
+                    self.last_snapshot
+                        .project(&a.project)
+                        .map(|p| p.path.clone())
+                        .or_else(|| {
+                            for snap in self.remote_snaps.values() {
+                                if let Some(p) = snap.project(&a.project) {
+                                    return Some(p.path.clone());
+                                }
+                            }
+                            None
+                        })
+                })
+                .or_else(|| {
+                    self.last_snapshot
+                        .projects
+                        .first()
+                        .map(|project| project.path.clone())
+                }),
+        }
+    }
+
+    fn compute_palette_items(&self, cx: &Context<Self>) -> Vec<PaletteItem> {
+        let query = self.palette_input.read(cx).text().trim().to_lowercase();
+        let mut items = Vec::new();
+
+        if let Some(target) = &self.new_session_target {
+            // 新增 Agent 会话模式：仅列出预设 Agent，不混入已有会话跳转与全局操作指令
+            match target {
+                NewSessionTarget::Local(_) => {
+                    let project_path = self.palette_project_path();
+                    for preset in self.presets.clone().into_iter().filter(|p| {
+                        project_path
+                            .as_deref()
+                            .map_or_else(|| p.installed(), |path| p.installed_in(path))
+                    }) {
+                        items.push(PaletteItem::Preset { preset });
+                    }
+                }
+                NewSessionTarget::Remote { .. } => {
+                    // 远端预设不做本机 PATH 过滤：program 绝对路径跨机无意义，
+                    // 远端是否可用由远端 spawn 结果反馈（spawn_failed）。
+                    for preset in self.presets.clone() {
+                        items.push(PaletteItem::Preset { preset });
+                    }
+                }
+            }
+        } else {
+            // 全局命令面板 (Ctrl+K)：预设 + 操作，不含会话列表。
+            let project_path = self.palette_project_path();
+            for preset in self.presets.clone().into_iter().filter(|p| {
+                project_path
+                    .as_deref()
+                    .map_or_else(|| p.installed(), |path| p.installed_in(path))
+            }) {
+                items.push(PaletteItem::Preset { preset });
+            }
+
+            // 3. 操作指令
+            items.push(PaletteItem::Action {
+                id: "cmd-split-h",
+                label: "水平分屏",
+                shortcut: Some("h"),
+                icon: SPLIT_HORIZONTAL_ICON,
+            });
+            items.push(PaletteItem::Action {
+                id: "cmd-split-v",
+                label: "垂直分屏",
+                shortcut: Some("v"),
+                icon: SPLIT_VERTICAL_ICON,
+            });
+            items.push(PaletteItem::Action {
+                id: "cmd-max",
+                label: "最大化 / 还原当前面板",
+                shortcut: Some("m"),
+                icon: MAXIMIZE_ICON,
+            });
+            if self.pane_tree.leaf_count() > 1 {
+                items.push(PaletteItem::Action {
+                    id: "cmd-close-pane",
+                    label: "关闭当前分屏",
+                    shortcut: Some("x"),
+                    icon: CLOSE_ICON,
+                });
+            }
+            items.push(PaletteItem::Action {
+                id: "cmd-connect",
+                label: "连接远程开发机…",
+                shortcut: None,
+                icon: CONNECT_ICON,
+            });
+            items.push(PaletteItem::Action {
+                id: "cmd-toggle-theme",
+                label: if self.theme_mode.is_dark() {
+                    "切换为浅色模式"
+                } else {
+                    "切换为深色模式"
+                },
+                shortcut: None,
+                icon: THEME_ICON,
+            });
+            items.push(PaletteItem::Action {
+                id: "cmd-clear-notifs",
+                label: "清空所有通知",
+                shortcut: None,
+                icon: NOTIFICATION_ICON,
+            });
+        }
+
+        if query.is_empty() {
+            items
+        } else {
+            items
+                .into_iter()
+                .filter(|item| match item {
+                    PaletteItem::Preset { preset } => {
+                        let text =
+                            format!("新建 {} {}", preset.label, preset.program).to_lowercase();
+                        text.contains(&query)
+                    }
+                    PaletteItem::Action { label, .. } => label.to_lowercase().contains(&query),
+                })
+                .collect()
+        }
+    }
+
+    fn execute_palette_item(
+        &mut self,
+        item: PaletteItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette_open = false;
+        // 注意：new_session_target 由消费方（spawn_preset 的远程/本地分支）
+        // 自行读取并清除，此处不能提前清空，否则远程会话会回退到本地项目。
+        match item {
+            PaletteItem::Preset { preset } => {
+                self.spawn_preset(&preset, window, cx);
+            }
+            PaletteItem::Action { id, .. } => {
+                self.new_session_target = None;
+                match id {
+                    "cmd-split-h" => {
+                        let pane = self.active_pane.clone();
+                        self.split_pane(&pane, SplitAxis::Horizontal, window, cx);
+                    }
+                    "cmd-split-v" => {
+                        let pane = self.active_pane.clone();
+                        self.split_pane(&pane, SplitAxis::Vertical, window, cx);
+                    }
+                    "cmd-max" => {
+                        let pane = self.active_pane.clone();
+                        self.toggle_maximize(&pane, cx);
+                    }
+                    "cmd-close-pane" => {
+                        let pane = self.active_pane.clone();
+                        self.close_split_pane(&pane, window, cx);
+                    }
+                    "cmd-connect" => self.open_connect_dialog(window, cx),
+                    "cmd-toggle-theme" => {
+                        self.toggle_theme(cx);
+                    }
+                    "cmd-clear-notifs" => {
+                        self.notifications.update(cx, |center, cx| center.clear(cx));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 返回是否消费了该按键（消费才 stop_propagation）
+    pub(super) fn handle_palette_key(
+        &mut self,
+        ks: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // 有输入框时不抢编辑键：输入框的 bubble listener 先处理编辑/自插字符；
+        // 导航/确认键仍由 palette 统一处理（Enter/上下/Escape 在 TextField 中
+        // 本就不消费，会冒泡到这里）。
+        let items = self.compute_palette_items(cx);
+        // 无查询时支持 Action 快捷键（与列表里展示的 [h]/[v]/[x]/[m] 一致）
+        let query = self.palette_input.read(cx).text().trim().to_lowercase();
+        if query.is_empty() {
+            let pane = self.active_pane.clone();
+            match ks.key.as_str() {
+                "h" => {
+                    self.palette_open = false;
+                    self.split_pane(&pane, SplitAxis::Horizontal, window, cx);
+                    return true;
+                }
+                "v" => {
+                    self.palette_open = false;
+                    self.split_pane(&pane, SplitAxis::Vertical, window, cx);
+                    return true;
+                }
+                "x" => {
+                    self.palette_open = false;
+                    self.close_split_pane(&pane, window, cx);
+                    return true;
+                }
+                "m" => {
+                    self.palette_open = false;
+                    self.toggle_maximize(&pane, cx);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        match ks.key.as_str() {
+            "up" => {
+                self.palette_index = self.palette_index.saturating_sub(1);
+                self.palette_scroll.scroll_to_item(self.palette_index);
+                cx.notify();
+                true
+            }
+            "down" => {
+                if !items.is_empty() {
+                    self.palette_index = (self.palette_index + 1).min(items.len() - 1);
+                    self.palette_scroll.scroll_to_item(self.palette_index);
+                    cx.notify();
+                }
+                true
+            }
+            "enter" => {
+                if let Some(item) = items.get(self.palette_index).cloned() {
+                    self.execute_palette_item(item, window, cx);
+                    return true;
+                }
+                false
+            }
+            "escape" => {
+                self.palette_open = false;
+                self.new_session_target = None;
+                if let Some(active) = self.active.clone() {
+                    self.focus_agent(&active, window, cx);
+                }
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn render_palette(
+        &mut self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let items = self.compute_palette_items(cx);
+        let current_index = self.palette_index;
+        let mut list_container = div()
+            .id("palette-items-scroll")
+            .flex()
+            .flex_col()
+            .max_h(px(324.))
+            .overflow_y_scroll()
+            .track_scroll(&self.palette_scroll);
+
+        if items.is_empty() {
+            list_container = list_container.child(
+                div()
+                    .px_4()
+                    .py_6()
+                    .text_size(px(12.))
+                    .text_color(rgba(theme.fg2))
+                    .child("无匹配结果"),
+            );
+        } else {
+            for (index, item) in items.into_iter().enumerate() {
+                let is_selected = index == current_index;
+                let item_for_click = item.clone();
+                let row = match item {
+                    PaletteItem::Preset { preset } => div()
+                        .id(gpui::ElementId::Name(
+                            format!("pal-preset-{}", preset.id).into(),
+                        ))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .text_size(px(12.))
+                        .text_color(rgba(theme.fg0))
+                        .when(is_selected, |el| el.bg(rgba(theme.bg2)))
+                        .hover(|s| s.bg(rgba(theme.bg2)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.execute_palette_item(item_for_click.clone(), window, cx);
+                        }))
+                        .child(panel_icon(PLUS_ICON, theme.accent))
+                        .child(format!("新建 {}", preset.label))
+                        .child(
+                            div()
+                                .ml_auto()
+                                .text_size(px(10.))
+                                .text_color(rgba(theme.fg2))
+                                .child(preset.program),
+                        ),
+                    PaletteItem::Action {
+                        label,
+                        shortcut,
+                        icon,
+                        ..
+                    } => div()
+                        .id(gpui::ElementId::Name(format!("pal-action-{index}").into()))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .text_size(px(12.))
+                        .text_color(rgba(theme.fg0))
+                        .when(is_selected, |el| el.bg(rgba(theme.bg2)))
+                        .hover(|s| s.bg(rgba(theme.bg2)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.execute_palette_item(item_for_click.clone(), window, cx);
+                        }))
+                        .child(panel_icon(icon, theme.accent))
+                        .child(label)
+                        .when_some(shortcut, |row, sc| {
+                            row.child(
+                                div()
+                                    .ml_auto()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_xs()
+                                    .border_1()
+                                    .border_color(rgba(theme.line))
+                                    .text_size(px(9.5))
+                                    .text_color(rgba(theme.fg2))
+                                    .child(format!("[{sc}]")),
+                            )
+                        }),
+                };
+                list_container = list_container.child(row);
+            }
+        }
+
+        let panel = div()
+            .occlude()
+            .w(px(560.))
+            .max_w(relative(0.92))
+            .max_h(relative(0.75))
+            .overflow_hidden()
+            .bg(rgba(theme.bg1))
+            .border_1()
+            .border_color(rgba(theme.line))
+            .shadow_xl()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(rgba(theme.line))
+                    .child(self.palette_input.clone()),
+            )
+            .child(list_container);
+
+        div()
+            .id("palette-backdrop")
+            .absolute()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(theme.overlay()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    this.palette_open = false;
+                    this.new_session_target = None;
+                    if let Some(active) = this.active.clone() {
+                        this.focus_agent(&active, window, cx);
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(panel)
+            .into_any_element()
+    }
+}
