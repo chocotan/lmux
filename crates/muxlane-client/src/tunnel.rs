@@ -1,4 +1,4 @@
-//! SSH 隧道：复用 ControlMaster，把远端 muxlane.sock 转发到本地（P1 收尾接入 RemoteHost）
+//! SSH 隧道：复用 ControlMaster，把远端 muxlane.sock 转发到本地。
 use crate::host::SshAuth;
 use crate::UploadProgress;
 use std::path::PathBuf;

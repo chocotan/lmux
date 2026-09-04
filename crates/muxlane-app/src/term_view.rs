@@ -1,5 +1,5 @@
 //! 终端视图：真彩色 cell renderer + 光标 + 低延迟 PTY 输入。
-//! 架构直接遵循 muxel：TermView 在 GPUI task 内 drain PTY 输出，chunk 到达即 process + notify。
+//! TermView 在 GPUI task 内 drain PTY 输出，chunk 到达即 process + notify。
 use crate::theme::Theme;
 use gpui::{
     canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, ClipboardItem, Context,
@@ -350,7 +350,7 @@ impl TermView {
                     }
                     Err(_) => break,
                 };
-                // 参考 muxel paint scheduler：交互 8ms / 聚焦 stream 33ms / 后台 100ms。
+                // 输出调度：交互 8ms / 聚焦 stream 33ms / 后台 100ms。
                 let delay = if session_for_task.interaction_recent() {
                     std::time::Duration::from_millis(8)
                 } else if session_for_task.is_focused() {

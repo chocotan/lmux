@@ -1,4 +1,4 @@
-//! manifest：TOML 屏幕规则 → 编译后的匹配器（借鉴 herdr 的规则形态，精简）
+//! manifest：TOML 屏幕规则 → 编译后的匹配器。
 use super::ScreenInput;
 use crate::model::AgentStatus;
 use crate::{Error, Result};

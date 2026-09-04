@@ -1,4 +1,4 @@
-//! PaneTree：递归 split + 每 pane TabGroup（参考 muxel panes/tabs，纯模型可单测）
+//! PaneTree：递归 split + 每 pane TabGroup，纯模型可单测。
 use crate::model::{new_id, AgentId};
 use serde::{Deserialize, Serialize};
 
@@ -302,7 +302,7 @@ impl PaneNode {
         }
     }
 
-    /// 删除 pane 并递归折叠只剩一个 child 的 split（参考 remote-agent removePanel）。
+    /// 删除 pane，并递归折叠只剩一个 child 的 split。
     pub fn without_pane(&self, pane: &PaneId) -> Option<PaneNode> {
         match self {
             PaneNode::Leaf { group } => (group.id != *pane).then(|| self.clone()),

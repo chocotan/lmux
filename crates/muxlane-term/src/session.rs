@@ -15,10 +15,9 @@ const REPLAY_CAP: usize = 512 * 1024;
 /// broadcast channel 容量（慢订阅者丢最旧帧）
 const BROADCAST_CAP: usize = 256;
 
-/// 解析用户 shell：优先 $SHELL（继承启动环境），无效则查 /etc/passwd 登录 shell，最后 /bin/bash
-/// （参考 herdr `pane_shell_from` / muxel `CommandSpec::shell`）
+/// 解析用户 shell：优先显式配置，再尝试常用 shell、$SHELL 和登录 shell。
 pub fn default_shell_program() -> String {
-    // 显式配置优先（对应 herdr configured_shell / muxel Shell preset）
+    // 显式配置优先。
     if let Ok(s) = std::env::var("MUXLANE_SHELL") {
         let s = s.trim();
         if !s.is_empty() && std::path::Path::new(s).exists() {
@@ -181,7 +180,6 @@ impl PtySession {
             c
         };
         cmd.cwd(&cfg.cwd);
-        // 参考muxel session.rs / herdr pane.rs:56-80：
         // portable-pty 默认环境近乎为空，必须显式补齐终端基础环境，否则无颜色
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -314,8 +312,8 @@ impl PtySession {
         b64_encode(&snap)
     }
 
-    /// 低延迟同步写输入（参考 muxel TerminalSession::write_input）：
-    /// 一个 mutex 临界区完成 write+flush，不为每个按键创建异步任务。
+    /// 低延迟同步写输入：一个 mutex 临界区完成 write+flush，
+    /// 不为每个按键创建异步任务。
     pub fn write_input(&self, input: &[u8]) {
         if input.is_empty() {
             return;
@@ -436,10 +434,8 @@ fn update_tmux_environment(server: &str, session: &str, env: &[(String, String)]
 }
 
 fn configure_tmux_server(server: &str, config_path: &Path) {
-    // 完全采用 remote-agent 方案：
-    // mouse on：tmux 原生全面接管鼠标（滚轮向上自动进入 copy-mode 浏览历史，滚轮向下到底自动退出，
-    // 在全屏/AltScreen 应用如 vim/codex/pi 中自动透传滚轮），
-    // 选区按住 Shift 则仍可在前端直接划词复制。
+    // tmux 接管鼠标：滚轮可浏览历史，并在全屏应用中透传；
+    // 按住 Shift 时仍可在前端直接划词复制。
     for (option, value) in [
         ("status", "off"),
         ("mouse", "on"),

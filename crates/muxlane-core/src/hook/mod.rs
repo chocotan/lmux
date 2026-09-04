@@ -1,4 +1,4 @@
-//! HookInjector：启动 agent 时注入 hook 配置（幂等 + 旧值备份，pocket-studio 模式）
+//! HookInjector：启动 agent 时幂等注入 hook 配置并备份旧值。
 use crate::{Error, Result};
 use std::path::{Path, PathBuf};
 

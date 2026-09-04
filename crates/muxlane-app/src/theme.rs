@@ -1,4 +1,4 @@
-//! muxlane 主题系统：参考 pocket-studio 的浅色、暖色与深色主题。
+//! muxlane 主题系统：内置浅色、暖色与深色主题。
 
 use crate::i18n::{self, Language};
 use serde::{Deserialize, Serialize};

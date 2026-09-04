@@ -94,7 +94,7 @@ pub struct RenderSnapshot {
     pub lines: usize,
 }
 
-/// 每个会话的回滚行数（与 remote-agent/xterm.js 的 5000 一致）
+/// 每个终端保留 5000 行回滚。
 const SCROLLBACK_LINES: usize = 5000;
 
 #[derive(Clone, Copy)]

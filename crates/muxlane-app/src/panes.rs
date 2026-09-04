@@ -52,7 +52,7 @@ impl MuxlaneApp {
                 a.status = muxlane_core::model::AgentStatus::Idle;
             }
         }
-        // 本地 Done 会话查看后回到 Idle（herdr seen 语义）。
+        // 查看本地 Done agent 后回到 Idle。
         if self.last_snapshot.agent(agent).is_some() {
             let server = Arc::clone(&self.server);
             let agent = agent.clone();

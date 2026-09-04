@@ -1,4 +1,4 @@
-//! Agent Presets：参考 muxel 的 Agent preset 模型，保持最小而可扩展。
+//! Agent preset 模型，保持最小而可扩展。
 use crate::model::AgentType;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
