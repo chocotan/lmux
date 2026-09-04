@@ -121,7 +121,7 @@ pub struct MuxlaneApp {
     pub(crate) remote_event_tx: tokio::sync::mpsc::Sender<muxlane_client::ClientEvent>,
 
     // Pane/Tab 布局
-    /// 递归 pane tree；每个 Leaf 内是 TabGroup（参考 muxel）
+    /// 递归 pane tree；每个叶节点持有一个 TabGroup
     pub(crate) pane_tree: PaneNode,
     pub(crate) active_pane: PaneId,
     pub(crate) maximized_pane: Option<PaneId>,
@@ -239,21 +239,25 @@ impl MuxlaneApp {
         })
         .detach();
 
-        // 每 1s 拉一次快照（P0 轮询；P1 换事件驱动）
-        let server_for_poll = Arc::clone(&server);
-        cx.spawn(async move |this, cx| loop {
-            let server = Arc::clone(&server_for_poll);
-            let snap = cx
-                .background_spawn(async move { server.snapshot().await })
-                .await;
-            this.update(cx, |this, cx| {
-                this.last_snapshot = snap;
-                cx.notify();
-            })
-            .ok();
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(1))
-                .await;
+        // 本地状态变更时重拉快照；终端内容由 TermView 独立通知。
+        let mut local_dirty = server.subscribe_dirty();
+        let server_for_snapshot = Arc::clone(&server);
+        cx.spawn(async move |this, cx| {
+            while local_dirty.changed().await.is_ok() {
+                let server = Arc::clone(&server_for_snapshot);
+                let snap = cx
+                    .background_spawn(async move { server.snapshot().await })
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        this.last_snapshot = snap;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
         })
         .detach();
 
@@ -442,7 +446,7 @@ impl MuxlaneApp {
             server,
             pane_tree: restored_tree,
             active_pane: restored_active,
-            // 最大化是 transient 状态（muxel 同款）：不跨重启保留
+            // 最大化是瞬时 UI 状态，不跨重启保留
             maximized_pane: None,
             terms: HashMap::new(),
             mirror_cancel: HashMap::new(),

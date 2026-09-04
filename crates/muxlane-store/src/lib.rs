@@ -62,7 +62,7 @@ pub struct PersistedApp {
     #[serde(default)]
     pub remote_configs: Vec<PersistedRemote>,
     #[serde(default)]
-    pub sessions: Vec<PersistedSession>,
+    pub sessions: Vec<PersistedAgent>,
     #[serde(default = "PaneNode::empty")]
     pub pane_tree: PaneNode,
     #[serde(default)]
@@ -98,7 +98,7 @@ impl PersistedApp {
                 .agents
                 .iter()
                 .filter_map(|agent| {
-                    Some(PersistedSession {
+                    Some(PersistedAgent {
                         agent_id: agent.id.clone(),
                         project_id: agent.project.clone(),
                         agent_type: agent.agent_type,
@@ -175,7 +175,7 @@ pub struct PersistedRemote {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PersistedSession {
+pub struct PersistedAgent {
     pub agent_id: AgentId,
     pub project_id: ProjectId,
     pub agent_type: AgentType,
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(app.projects[0].branch.as_deref(), Some("main"));
         assert_eq!(
             app.sessions,
-            vec![PersistedSession {
+            vec![PersistedAgent {
                 agent_id: "tmux-agent".into(),
                 project_id: "p".into(),
                 agent_type: AgentType::Claude,
@@ -445,7 +445,7 @@ mod tests {
             target: "user@nuc:/tmp/muxlane.sock".into(),
             auth: PersistedRemoteAuth::SshConfig,
         });
-        app.sessions.push(PersistedSession {
+        app.sessions.push(PersistedAgent {
             agent_id: "a".into(),
             project_id: "p".into(),
             agent_type: AgentType::Shell,
@@ -474,6 +474,8 @@ mod tests {
             agents: vec![],
         });
         save(&p, &app).unwrap();
+        let json = std::fs::read_to_string(&p).unwrap();
+        assert!(json.contains("\"sessions\""));
         let back = load(&p).unwrap();
         assert_eq!(back, app);
         assert!(std::fs::read_dir(dir.path())

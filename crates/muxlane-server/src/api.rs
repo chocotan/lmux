@@ -15,6 +15,10 @@ impl MuxlaneServer {
         self.events.subscribe()
     }
 
+    pub fn subscribe_dirty(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.dirty.subscribe()
+    }
+
     pub async fn snapshot(&self) -> Snapshot {
         self.state.read().await.snapshot()
     }

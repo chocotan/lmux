@@ -112,6 +112,20 @@ async fn launch_agent(
 }
 
 #[tokio::test]
+async fn local_state_changes_wake_dirty_subscribers() {
+    let (server, _sock, state, _dirty, _dir) = spawn_server().await;
+    let mut changes = server.subscribe_dirty();
+
+    launch_agent(&server, &state, "sleep 5").await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), changes.changed())
+        .await
+        .expect("state change notification timed out")
+        .expect("state change channel closed");
+    assert_eq!(server.snapshot().await.agents.len(), 1);
+}
+
+#[tokio::test]
 async fn remote_term_input_reaches_pty_and_project_add_validates_path() {
     let (server, sock, state, _dirty, dir) = spawn_server().await;
     let agent = launch_agent(&server, &state, "read line; echo REMOTE:$line; sleep 5").await;

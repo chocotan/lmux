@@ -1,7 +1,7 @@
 //! 状态检测引擎：hook 权威上报 + manifest 屏幕规则兜底 + 防抖
 pub mod manifest;
 
-use crate::model::{AgentId, AgentStatus};
+use crate::model::{AgentId, AgentStatus, AgentType};
 use manifest::CompiledManifest;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -179,6 +179,7 @@ impl DetectionEngine {
     pub fn observe(
         &mut self,
         agent: &AgentId,
+        agent_type: AgentType,
         current: AgentStatus,
         input: &ScreenInput,
     ) -> Option<StatusUpdate> {
@@ -199,7 +200,7 @@ impl DetectionEngine {
         }
 
         // 2) 屏幕规则推导候选状态
-        let candidate = self.screen_candidate(agent, input);
+        let candidate = self.screen_candidate(agent_type, input);
         let need = self.debounce_ticks;
 
         let st = self.state_mut(agent, current);
@@ -236,10 +237,8 @@ impl DetectionEngine {
     }
 
     /// 屏幕规则 → AgentStatus
-    fn screen_candidate(&self, agent: &AgentId, input: &ScreenInput) -> Option<AgentStatus> {
-        // Agent IDs start with "<agent_type>_". Unknown types have no screen fallback.
-        let agent_type = agent_type_of(agent);
-        let m = self.manifests.get(agent_type)?;
+    fn screen_candidate(&self, agent_type: AgentType, input: &ScreenInput) -> Option<AgentStatus> {
+        let m = self.manifests.get(agent_type.as_str())?;
         m.evaluate(input)
     }
 }
@@ -248,11 +247,6 @@ impl Default for DetectionEngine {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// AgentId convention: "<agent_type>_<ulid>".
-fn agent_type_of(agent: &AgentId) -> &str {
-    agent.split('_').next().unwrap_or("")
 }
 
 /// 内置 manifest TOML（编译期嵌入）
@@ -303,14 +297,24 @@ mod tests {
     #[test]
     fn claude_blocked_by_permission_prompt() {
         let mut e = engine();
-        let a: AgentId = "claude_A01".into();
+        let a: AgentId = "opaque_A01".into();
         assert_eq!(
-            e.observe(&a, AgentStatus::Working, &input(["❯ do it"])),
+            e.observe(
+                &a,
+                AgentType::Claude,
+                AgentStatus::Working,
+                &input(["❯ do it"])
+            ),
             None
         ); // 第一次进 pending
         let lines = [" Do you want to proceed?", "❯ 1. Yes", "  2. No"];
-        assert_eq!(e.observe(&a, AgentStatus::Working, &input(lines)), None);
-        let upd = e.observe(&a, AgentStatus::Working, &input(lines)).unwrap();
+        assert_eq!(
+            e.observe(&a, AgentType::Claude, AgentStatus::Working, &input(lines)),
+            None
+        );
+        let upd = e
+            .observe(&a, AgentType::Claude, AgentStatus::Working, &input(lines))
+            .unwrap();
         assert_eq!(upd.to, AgentStatus::Blocked);
     }
 
@@ -320,9 +324,19 @@ mod tests {
         let a: AgentId = "claude_A01".into();
         // 单次出现 blocked 特征然后消失 → 不提交
         let lines = [" Do you want to proceed?"];
-        e.observe(&a, AgentStatus::Working, &input(lines));
-        e.observe(&a, AgentStatus::Working, &input(["working hard..."]));
-        let r = e.observe(&a, AgentStatus::Working, &input(["working hard..."]));
+        e.observe(&a, AgentType::Claude, AgentStatus::Working, &input(lines));
+        e.observe(
+            &a,
+            AgentType::Claude,
+            AgentStatus::Working,
+            &input(["working hard..."]),
+        );
+        let r = e.observe(
+            &a,
+            AgentType::Claude,
+            AgentStatus::Working,
+            &input(["working hard..."]),
+        );
         assert_eq!(r, None);
         assert!(!e.has_hook_authority(&a));
     }
@@ -334,7 +348,12 @@ mod tests {
         let upd = e.report(&a, AgentStatus::Working, HookEvent::Done).unwrap();
         assert_eq!(upd.to, AgentStatus::Done);
         // hook 窗口内屏幕规则不生效
-        let r = e.observe(&a, AgentStatus::Done, &input(["some output"]));
+        let r = e.observe(
+            &a,
+            AgentType::Claude,
+            AgentStatus::Done,
+            &input(["some output"]),
+        );
         assert_eq!(r, None);
     }
 
@@ -352,13 +371,21 @@ mod tests {
         let mut e = engine();
         let a: AgentId = "shell_S01".into();
         let prompt = input(["~/proj ❯"]);
-        assert_eq!(e.observe(&a, AgentStatus::Idle, &prompt), None);
+        assert_eq!(
+            e.observe(&a, AgentType::Shell, AgentStatus::Idle, &prompt),
+            None
+        );
         // 用户按 Enter，按键触发 working（无防抖，立即生效）
         let upd = e.mark_working(&a, AgentStatus::Idle).unwrap();
         assert_eq!(upd.to, AgentStatus::Working);
         // 命令执行完成，屏幕回到 prompt：防抖两拍后应提交 idle
-        assert_eq!(e.observe(&a, AgentStatus::Working, &prompt), None);
-        let upd = e.observe(&a, AgentStatus::Working, &prompt).unwrap();
+        assert_eq!(
+            e.observe(&a, AgentType::Shell, AgentStatus::Working, &prompt),
+            None
+        );
+        let upd = e
+            .observe(&a, AgentType::Shell, AgentStatus::Working, &prompt)
+            .unwrap();
         assert_eq!(upd.to, AgentStatus::Idle);
     }
 
@@ -416,10 +443,16 @@ mod tests {
     #[test]
     fn unknown_type_has_no_screen_fallback() {
         let mut e = engine();
-        let a: AgentId = "unknown_D04".into();
+        let a: AgentId = "claude_D04".into();
         let prompt = input(["$ "]);
-        assert_eq!(e.observe(&a, AgentStatus::Working, &prompt), None);
-        assert_eq!(e.observe(&a, AgentStatus::Working, &prompt), None);
+        assert_eq!(
+            e.observe(&a, AgentType::Unknown, AgentStatus::Working, &prompt),
+            None
+        );
+        assert_eq!(
+            e.observe(&a, AgentType::Unknown, AgentStatus::Working, &prompt),
+            None
+        );
     }
 
     #[test]
@@ -428,7 +461,7 @@ mod tests {
         let a: AgentId = "claude_E05".into();
         e.report(&a, AgentStatus::Working, HookEvent::Done);
         let lines = ["Do you want to proceed?"];
-        e.observe(&a, AgentStatus::Done, &input(lines)); // hook 权威窗口内，屏幕不生效
+        e.observe(&a, AgentType::Claude, AgentStatus::Done, &input(lines)); // hook 权威窗口内，屏幕不生效
         let s1 = e.report(&a, AgentStatus::Done, HookEvent::Working).unwrap();
         let s2 = e
             .report(&a, AgentStatus::Working, HookEvent::Blocked)

@@ -123,19 +123,20 @@ impl ServerState {
                 true
             }
         });
-        let Some(current) = self
+        let Some((current, agent_type)) = self
             .agents
             .iter()
             .find(|a| &a.id == agent)
-            .map(|a| a.status)
+            .map(|a| (a.status, a.agent_type))
         else {
             return vec![];
         };
-        let mut events = if let Some(update) = self.detector.observe(agent, current, input) {
-            self.apply_status(agent, update.to, None)
-        } else {
-            vec![]
-        };
+        let mut events =
+            if let Some(update) = self.detector.observe(agent, agent_type, current, input) {
+                self.apply_status(agent, update.to, None)
+            } else {
+                vec![]
+            };
         if title_changed && events.is_empty() {
             events.push(EventMsg::new(
                 muxlane_core::protocol::events::STATE_CHANGED,
@@ -145,7 +146,7 @@ impl ServerState {
         events
     }
 
-    /// 查看 Done 会话：seen=true，Done→Idle（herdr 语义）。
+    /// 查看 Done agent：seen=true，Done→Idle。
     pub fn mark_seen(&mut self, agent: &AgentId) -> Vec<EventMsg> {
         let Some(inst) = self.agents.iter_mut().find(|a| &a.id == agent) else {
             return vec![];
