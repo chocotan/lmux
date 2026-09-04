@@ -439,7 +439,10 @@ impl MuxlaneApp {
                     });
                     // 类型不匹配通常意味着远端仍在运行旧版 Muxlane，
                     // 直接切换到已有的更新引导状态。
-                    if text.contains("远端 Muxlane 版本过旧") {
+                    if matches!(
+                        error.downcast_ref::<muxlane_client::RemoteCompatError>(),
+                        Some(muxlane_client::RemoteCompatError::VersionSkew { .. })
+                    ) {
                         if let Some(remote) = this
                             .remotes
                             .iter()
@@ -498,9 +501,11 @@ impl MuxlaneApp {
                 }
                 Err(error) => {
                     let text = error.to_string();
-                    if text.contains("unknown_method")
-                        && text.contains(muxlane_core::protocol::features::PROJECT_ADD)
-                    {
+                    if matches!(
+                        error.downcast_ref::<muxlane_client::RemoteCompatError>(),
+                        Some(muxlane_client::RemoteCompatError::MethodUnsupported { method })
+                            if method == muxlane_core::protocol::features::PROJECT_ADD
+                    ) {
                         // 旧版远端没有 project.add：转入升级引导，而不是弹原始错误
                         this.remote_project_dialog = None;
                         this.dialog_error = None;

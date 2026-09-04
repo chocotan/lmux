@@ -6,7 +6,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -144,8 +144,18 @@ impl VTerm {
         )
     }
 
+    fn lock_inner(&self) -> Option<MutexGuard<'_, VTermInner>> {
+        match self.inner.lock() {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                tracing::error!(%error, "VTerm mutex poisoned");
+                None
+            }
+        }
+    }
+
     pub fn feed(&self, data: &[u8]) {
-        if let Ok(mut guard) = self.inner.lock() {
+        if let Some(mut guard) = self.lock_inner() {
             let VTermInner { term, parser, .. } = &mut *guard;
             parser.advance(term, data);
             let damage = match term.damage() {
@@ -185,9 +195,9 @@ impl VTerm {
 
     /// 真彩色渲染快照：相邻同样式 cell 合并为 run；光标独立返回。
     pub fn render_snapshot(&self) -> RenderSnapshot {
-        let mut guard = match self.inner.lock() {
-            Ok(g) => g,
-            Err(_) => {
+        let mut guard = match self.lock_inner() {
+            Some(guard) => guard,
+            None => {
                 return RenderSnapshot {
                     rows: vec![],
                     cursor: None,
@@ -223,7 +233,7 @@ impl VTerm {
     }
 
     pub fn begin_selection(&self, line: i32, col: usize, right: bool) {
-        if let Ok(mut guard) = self.inner.lock() {
+        if let Some(mut guard) = self.lock_inner() {
             guard.term.selection = Some(Selection::new(
                 SelectionType::Simple,
                 Point::new(Line(line), Column(col)),
@@ -235,7 +245,7 @@ impl VTerm {
     }
 
     pub fn update_selection(&self, line: i32, col: usize, right: bool) {
-        if let Ok(mut guard) = self.inner.lock() {
+        if let Some(mut guard) = self.lock_inner() {
             if let Some(selection) = guard.term.selection.as_mut() {
                 selection.update(
                     Point::new(Line(line), Column(col)),
@@ -248,7 +258,7 @@ impl VTerm {
     }
 
     pub fn stop_selection(&self) {
-        if let Ok(mut guard) = self.inner.lock() {
+        if let Some(mut guard) = self.lock_inner() {
             if guard.term.selection.is_some() {
                 guard.term.selection = None;
                 guard.cached = None;
@@ -258,19 +268,17 @@ impl VTerm {
     }
 
     pub fn selection_to_string(&self) -> Option<String> {
-        self.inner.lock().ok()?.term.selection_to_string()
+        self.lock_inner()?.term.selection_to_string()
     }
 
     pub fn selection_active(&self) -> bool {
-        self.inner
-            .lock()
+        self.lock_inner()
             .map(|guard| guard.term.selection.is_some())
             .unwrap_or(false)
     }
 
     pub fn mouse_motion_reporting(&self) -> bool {
-        self.inner
-            .lock()
+        self.lock_inner()
             .map(|guard| {
                 guard
                     .term
@@ -281,8 +289,7 @@ impl VTerm {
     }
 
     pub fn modes(&self) -> VTermModes {
-        self.inner
-            .lock()
+        self.lock_inner()
             .map(|guard| {
                 let mode = guard.term.mode();
                 VTermModes {
@@ -301,8 +308,7 @@ impl VTerm {
         if lines == 0 {
             return false;
         }
-        self.inner
-            .lock()
+        self.lock_inner()
             .map(|mut guard| {
                 let before = guard.term.grid().display_offset();
                 guard.term.scroll_display(Scroll::Delta(lines));
@@ -317,8 +323,7 @@ impl VTerm {
     }
 
     pub fn scroll_metrics(&self) -> (usize, usize) {
-        self.inner
-            .lock()
+        self.lock_inner()
             .map(|guard| {
                 (
                     guard.term.grid().history_size(),
@@ -329,21 +334,19 @@ impl VTerm {
     }
 
     pub fn mouse_reporting(&self) -> bool {
-        self.inner
-            .lock()
+        self.lock_inner()
             .map(|guard| guard.term.mode().intersects(TermMode::MOUSE_MODE))
             .unwrap_or(false)
     }
 
     pub fn sgr_mouse(&self) -> bool {
-        self.inner
-            .lock()
+        self.lock_inner()
             .map(|guard| guard.term.mode().contains(TermMode::SGR_MOUSE))
             .unwrap_or(false)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
-        if let Ok(mut guard) = self.inner.lock() {
+        if let Some(mut guard) = self.lock_inner() {
             guard.term.resize(TermDim {
                 columns: cols as usize,
                 lines: rows as usize,
@@ -355,7 +358,7 @@ impl VTerm {
     }
 
     pub fn line_text(&self, visual: usize) -> Option<String> {
-        let guard = self.inner.lock().ok()?;
+        let guard = self.lock_inner()?;
         let grid = guard.term.grid();
         if visual >= grid.screen_lines() {
             return None;

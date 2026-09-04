@@ -410,11 +410,7 @@ impl MuxlaneServer {
         request_id: u64,
         method: &str,
     ) -> anyhow::Result<Response> {
-        Ok(Response::err(
-            request_id,
-            "unknown_method",
-            format!("unknown method: {method}"),
-        ))
+        Ok(Response::method_not_found(request_id, method))
     }
 
     async fn handle_conn(self: Arc<Self>, stream: UnixStream) -> anyhow::Result<()> {

@@ -23,6 +23,16 @@ use tokio::sync::mpsc;
 
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+#[derive(Debug, thiserror::Error)]
+pub enum RemoteCompatError {
+    #[error(
+        "远端 Muxlane 版本过旧：请求创建 {expected}，远端实际创建了 {actual}，请先更新远端 Muxlane"
+    )]
+    VersionSkew { expected: String, actual: String },
+    #[error("{method} failed: unknown_method: unknown method: {method}")]
+    MethodUnsupported { method: String },
+}
+
 /// 到单个对端的连接抽象（newline-JSON RPC）
 pub struct Connection {
     reader: BufReader<ReadHalf<UnixStream>>,
@@ -99,7 +109,13 @@ impl Connection {
                         let err = resp.error.unwrap_or(muxlane_core::protocol::RpcError {
                             code: "unknown".into(),
                             message: "no error detail".into(),
+                            method: None,
                         });
+                        if err.code == "unknown_method" {
+                            if let Some(method) = err.method {
+                                return Err(RemoteCompatError::MethodUnsupported { method }.into());
+                            }
+                        }
                         anyhow::bail!("{} failed: {}: {}", method, err.code, err.message)
                     }
                 };
@@ -257,11 +273,11 @@ pub async fn spawn_agent(
             // 旧版远端会忽略 agent_type，表面返回成功但实际创建 Shell；
             // 清理误创建的会话，并把版本不兼容明确反馈给 UI。
             let _ = delete_agent(conn, &agent.id).await;
-            anyhow::bail!(
-                "远端 Muxlane 版本过旧：请求创建 {}，远端实际创建了 {}，请先更新远端 Muxlane",
-                expected.as_str(),
-                agent.agent_type.as_str()
-            );
+            return Err(RemoteCompatError::VersionSkew {
+                expected: expected.as_str().into(),
+                actual: agent.agent_type.as_str().into(),
+            }
+            .into());
         }
     }
     Ok(agent)
@@ -352,4 +368,80 @@ pub async fn delete_agent(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use muxlane_core::model::{AgentInstance, AgentStatus, AgentType};
+
+    #[tokio::test]
+    async fn compatibility_failures_are_typed() {
+        let (client, peer) = UnixStream::pair().unwrap();
+        let peer = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(peer);
+            let mut read = BufReader::new(read);
+
+            let request: Request = serde_json::from_value(read_frame(&mut read).await.unwrap())
+                .expect("unknown method request");
+            write_frame(
+                &mut write,
+                &Response::method_not_found(request.id, &request.method),
+            )
+            .await
+            .unwrap();
+
+            let request: Request = serde_json::from_value(read_frame(&mut read).await.unwrap())
+                .expect("spawn request");
+            let agent = AgentInstance {
+                id: "shell_old".into(),
+                project: "p1".into(),
+                agent_type: AgentType::Shell,
+                title: "old remote".into(),
+                status: AgentStatus::Idle,
+                status_since: 0,
+                seen: true,
+                tmux_session: None,
+            };
+            write_frame(
+                &mut write,
+                &Response::ok(request.id, serde_json::to_value(agent).unwrap()),
+            )
+            .await
+            .unwrap();
+
+            let request: Request = serde_json::from_value(read_frame(&mut read).await.unwrap())
+                .expect("cleanup request");
+            write_frame(
+                &mut write,
+                &Response::ok(request.id, serde_json::json!({"ok": true})),
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut connection = Connection::new(client);
+        let error = connection
+            .call("project.add", serde_json::Value::Null)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RemoteCompatError>(),
+            Some(RemoteCompatError::MethodUnsupported { method }) if method == "project.add"
+        ));
+
+        let preset = muxlane_core::builtin_presets("bash")
+            .into_iter()
+            .find(|preset| preset.agent_type == AgentType::Codex)
+            .unwrap();
+        let error = spawn_agent(&mut connection, &"p1".into(), Some(&preset))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RemoteCompatError>(),
+            Some(RemoteCompatError::VersionSkew { expected, actual })
+                if expected == "codex" && actual == "shell"
+        ));
+        peer.await.unwrap();
+    }
 }

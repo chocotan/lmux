@@ -132,6 +132,19 @@ impl Response {
             error: Some(RpcError {
                 code: code.into(),
                 message: message.into(),
+                method: None,
+            }),
+        }
+    }
+
+    pub fn method_not_found(id: u64, method: &str) -> Self {
+        Response {
+            id,
+            result: None,
+            error: Some(RpcError {
+                code: "unknown_method".into(),
+                message: format!("unknown method: {method}"),
+                method: Some(method.into()),
             }),
         }
     }
@@ -141,6 +154,8 @@ impl Response {
 pub struct RpcError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

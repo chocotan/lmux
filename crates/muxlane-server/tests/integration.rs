@@ -4,14 +4,37 @@ use muxlane_core::protocol::{
     events, methods, read_frame, write_frame, EventMsg, Request, Response,
 };
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
+
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct TestServer {
+    server: Arc<MuxlaneServer>,
+    _task: AbortOnDrop,
+}
+
+impl Deref for TestServer {
+    type Target = Arc<MuxlaneServer>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.server
+    }
+}
 
 async fn spawn_server() -> (
-    Arc<MuxlaneServer>,
+    TestServer,
     PathBuf,
     Arc<RwLock<ServerState>>,
     DirtyFlag,
@@ -28,12 +51,21 @@ async fn spawn_server() -> (
     let dirty = DirtyFlag::new();
     let server = MuxlaneServer::new(sock.clone(), Arc::clone(&state), dirty.clone());
     let srv = Arc::clone(&server);
-    tokio::spawn(async move { srv.serve().await.unwrap() });
+    let task = AbortOnDrop(tokio::spawn(async move { srv.serve().await.unwrap() }));
     // 等 socket 就绪
     for _ in 0..50 {
         if UnixStream::connect(&sock).await.is_ok() {
             // 占位连接已建立了一个（无害，server 支持多连接）
-            return (server, sock, state, dirty, dir);
+            return (
+                TestServer {
+                    server,
+                    _task: task,
+                },
+                sock,
+                state,
+                dirty,
+                dir,
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -459,7 +491,9 @@ async fn second_server_cannot_unlink_active_socket() {
         })))
     };
     let first = MuxlaneServer::new(sock.clone(), mk_state(), DirtyFlag::new());
-    let first_task = tokio::spawn(Arc::clone(&first).serve());
+    let _first_task = AbortOnDrop(tokio::spawn(async move {
+        let _ = first.serve().await;
+    }));
     for _ in 0..50 {
         if UnixStream::connect(&sock).await.is_ok() {
             break;
@@ -473,7 +507,6 @@ async fn second_server_cannot_unlink_active_socket() {
     assert!(result.is_err());
     // 第一台仍可连接。
     assert!(UnixStream::connect(&sock).await.is_ok());
-    first_task.abort();
 }
 
 #[tokio::test]
