@@ -552,28 +552,7 @@ impl MuxlaneApp {
                     }
                     muxlane_client::Target::Ssh { host, socket } => format!("{host}:{socket}"),
                 };
-                let auth = match &host.cfg.auth {
-                    muxlane_client::SshAuth::SshConfig => {
-                        muxlane_store::PersistedRemoteAuth::SshConfig
-                    }
-                    muxlane_client::SshAuth::PublicKey {
-                        username,
-                        identity_file,
-                    } => muxlane_store::PersistedRemoteAuth::PublicKey {
-                        username: username.clone(),
-                        identity_file: identity_file.clone(),
-                    },
-                    muxlane_client::SshAuth::Password { username, password } => {
-                        muxlane_store::PersistedRemoteAuth::Password {
-                            username: username.clone(),
-                            password: if password.is_empty() {
-                                None
-                            } else {
-                                Some(password.clone())
-                            },
-                        }
-                    }
-                };
+                let auth = host.cfg.auth.clone().into();
                 muxlane_store::PersistedRemote { target, auth }
             })
             .collect();

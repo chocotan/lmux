@@ -21,20 +21,11 @@ impl MuxlaneApp {
                 }
                 muxlane_client::Target::Ssh { host, .. } => host.clone(),
             };
-            let auth = match &saved.auth {
-                muxlane_store::PersistedRemoteAuth::SshConfig => muxlane_client::SshAuth::SshConfig,
-                muxlane_store::PersistedRemoteAuth::PublicKey {
-                    username,
-                    identity_file,
-                } => muxlane_client::SshAuth::PublicKey {
-                    username: username.clone(),
-                    identity_file: identity_file.clone(),
-                },
-                muxlane_store::PersistedRemoteAuth::Password { username, password } => {
-                    muxlane_client::SshAuth::Password {
-                        username: username.clone(),
-                        password: password.clone().unwrap_or_default(),
-                    }
+            let auth = match muxlane_client::SshAuth::try_from(saved.auth.clone()) {
+                Ok(auth) => auth,
+                Err(error) => {
+                    tracing::warn!(target = %saved.target, %error, "skip remote with missing auth secret");
+                    continue;
                 }
             };
             let remote = muxlane_client::RemoteHost::new(

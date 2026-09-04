@@ -3,8 +3,8 @@ mod host;
 mod tunnel;
 
 pub use host::{
-    parse_target, BootstrapPhase, BootstrapProgress, ClientEvent, HostCfg, RemoteHost, RemoteStage,
-    RemoteState, SshAuth, Target, UploadProgress,
+    parse_target, BootstrapPhase, BootstrapProgress, ClientEvent, HostCfg, MissingPassword,
+    RemoteHost, RemoteStage, RemoteState, SshAuth, Target, UploadProgress,
 };
 
 pub async fn release_remote_tunnel(host: &str) {

@@ -2,6 +2,7 @@
 use muxlane_core::model::{AgentId, AgentType, Project, ProjectId, Snapshot};
 use muxlane_core::{PaneId, PaneNode};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -40,6 +41,14 @@ fn cleanup_temporary_files(path: &Path) {
 }
 
 pub const STORE_VERSION: u32 = 1;
+const SECRETS_VERSION: u32 = 1;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedSecrets {
+    version: u32,
+    #[serde(default)]
+    remote_passwords: BTreeMap<String, String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedApp {
@@ -192,6 +201,24 @@ pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
         let bytes = std::fs::read(path)?;
         let mut app: PersistedApp = serde_json::from_slice(&bytes)?;
         migrate(&mut app)?;
+        let secrets_path = secrets_path(path);
+        let mut secrets = load_secrets(&secrets_path)?;
+        let mut migrated_passwords = false;
+        for remote in &mut app.remote_configs {
+            if let PersistedRemoteAuth::Password { password, .. } = &mut remote.auth {
+                if let Some(inline) = password.take() {
+                    secrets
+                        .remote_passwords
+                        .insert(remote.target.clone(), inline);
+                    migrated_passwords = true;
+                }
+            }
+        }
+        if migrated_passwords {
+            write_secrets(&secrets_path, &secrets)?;
+            write_state(path, &app)?;
+        }
+        restore_passwords(&mut app, &secrets);
         Ok(app)
     })();
     if result.is_err() {
@@ -201,20 +228,85 @@ pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
 }
 
 pub fn save(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
+    let mut state = app.clone();
+    let mut secrets = PersistedSecrets {
+        version: SECRETS_VERSION,
+        ..Default::default()
+    };
+    for remote in &mut state.remote_configs {
+        if let PersistedRemoteAuth::Password { password, .. } = &mut remote.auth {
+            if let Some(password) = password.take() {
+                secrets
+                    .remote_passwords
+                    .insert(remote.target.clone(), password);
+            }
+        }
+    }
+    write_secrets(&secrets_path(path), &secrets)?;
+    write_state(path, &state)
+}
+
+fn secrets_path(state_path: &Path) -> PathBuf {
+    state_path.with_file_name("secrets.json")
+}
+
+fn load_secrets(path: &Path) -> anyhow::Result<PersistedSecrets> {
+    if !path.exists() {
+        return Ok(PersistedSecrets {
+            version: SECRETS_VERSION,
+            ..Default::default()
+        });
+    }
+    let secrets: PersistedSecrets = serde_json::from_slice(&std::fs::read(path)?)?;
+    if secrets.version > SECRETS_VERSION {
+        anyhow::bail!(
+            "secrets version {} is newer than supported {}",
+            secrets.version,
+            SECRETS_VERSION
+        );
+    }
+    Ok(secrets)
+}
+
+fn restore_passwords(app: &mut PersistedApp, secrets: &PersistedSecrets) {
+    for remote in &mut app.remote_configs {
+        if let PersistedRemoteAuth::Password { password, .. } = &mut remote.auth {
+            *password = secrets.remote_passwords.get(&remote.target).cloned();
+        }
+    }
+}
+
+fn write_state(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
+    write_atomic(path, &serde_json::to_vec_pretty(app)?, None)
+}
+
+fn write_secrets(path: &Path, secrets: &PersistedSecrets) -> anyhow::Result<()> {
+    write_atomic(path, &serde_json::to_vec_pretty(secrets)?, Some(0o600))
+}
+
+fn write_atomic(path: &Path, data: &[u8], mode: Option<u32>) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = temporary_path(path);
     let result = (|| {
-        let data = serde_json::to_vec_pretty(app)?;
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        let mut file = options.open(&tmp)?;
         use std::io::Write;
-        file.write_all(&data)?;
+        file.write_all(data)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+        }
         Ok::<_, anyhow::Error>(())
     })();
     if result.is_err() {
@@ -389,6 +481,63 @@ mod tests {
             .flatten()
             .all(|entry| entry.file_name() != "state.json.tmp"));
     }
+
+    #[test]
+    fn passwords_are_stored_separately_and_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut app = PersistedApp::default();
+        app.remote_configs.push(PersistedRemote {
+            target: "alice@nuc".into(),
+            auth: PersistedRemoteAuth::Password {
+                username: "alice".into(),
+                password: Some("correct horse battery staple".into()),
+            },
+        });
+
+        save(&path, &app).unwrap();
+
+        let state = std::fs::read_to_string(&path).unwrap();
+        assert!(!state.contains("correct horse battery staple"));
+        assert_eq!(load(&path).unwrap(), app);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.path().join("secrets.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn inline_password_is_migrated_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"remote_configs":[{"target":"alice@nuc","auth":{"auth":"password","username":"alice","password":"legacy-secret"}}]}"#,
+        )
+        .unwrap();
+
+        let first = load(&path).unwrap();
+        let second = load(&path).unwrap();
+
+        assert_eq!(first, second);
+        assert!(matches!(
+            &first.remote_configs[0].auth,
+            PersistedRemoteAuth::Password { password: Some(password), .. }
+                if password == "legacy-secret"
+        ));
+        assert!(!std::fs::read_to_string(path)
+            .unwrap()
+            .contains("legacy-secret"));
+    }
+
     #[test]
     fn legacy_remote_targets_migrate_to_remote_configs() {
         let dir = tempfile::tempdir().unwrap();

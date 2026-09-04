@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 muxlane-core = { path = "../muxlane-core" }
+muxlane-store = { path = "../muxlane-store" }
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

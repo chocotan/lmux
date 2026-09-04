@@ -29,6 +29,52 @@ pub enum SshAuth {
     },
 }
 
+impl From<SshAuth> for muxlane_store::PersistedRemoteAuth {
+    fn from(auth: SshAuth) -> Self {
+        match auth {
+            SshAuth::SshConfig => Self::SshConfig,
+            SshAuth::PublicKey {
+                username,
+                identity_file,
+            } => Self::PublicKey {
+                username,
+                identity_file,
+            },
+            SshAuth::Password { username, password } => Self::Password {
+                username,
+                password: (!password.is_empty()).then_some(password),
+            },
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("password secret is missing")]
+pub struct MissingPassword;
+
+impl TryFrom<muxlane_store::PersistedRemoteAuth> for SshAuth {
+    type Error = MissingPassword;
+
+    fn try_from(auth: muxlane_store::PersistedRemoteAuth) -> Result<Self, Self::Error> {
+        match auth {
+            muxlane_store::PersistedRemoteAuth::SshConfig => Ok(Self::SshConfig),
+            muxlane_store::PersistedRemoteAuth::PublicKey {
+                username,
+                identity_file,
+            } => Ok(Self::PublicKey {
+                username,
+                identity_file,
+            }),
+            muxlane_store::PersistedRemoteAuth::Password { username, password } => {
+                Ok(Self::Password {
+                    username,
+                    password: password.ok_or(MissingPassword)?,
+                })
+            }
+        }
+    }
+}
+
 impl std::fmt::Debug for SshAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -128,6 +174,29 @@ mod target_tests {
             identity_file: Some("~/.ssh/id_ed25519".into()),
         };
         assert_eq!(key.destination("nuc"), "bob@nuc");
+    }
+
+    #[test]
+    fn ssh_auth_persistence_conversion_roundtrips() {
+        let auth = SshAuth::Password {
+            username: "alice".into(),
+            password: "secret".into(),
+        };
+        let persisted: muxlane_store::PersistedRemoteAuth = auth.into();
+        let restored = SshAuth::try_from(persisted).unwrap();
+
+        assert!(matches!(
+            restored,
+            SshAuth::Password { username, password }
+                if username == "alice" && password == "secret"
+        ));
+        assert!(matches!(
+            SshAuth::try_from(muxlane_store::PersistedRemoteAuth::Password {
+                username: "alice".into(),
+                password: None,
+            }),
+            Err(MissingPassword)
+        ));
     }
 
     #[test]
