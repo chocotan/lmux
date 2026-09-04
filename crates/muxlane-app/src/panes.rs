@@ -511,7 +511,7 @@ impl MuxlaneApp {
                 let mut tabs = div()
                     .flex()
                     .items_center()
-                    .h(px(34.))
+                    .h(px(28.))
                     .bg(rgba(theme.bg1))
                     .border_b_1()
                     .border_color(rgba(theme.line));
