@@ -31,6 +31,16 @@ pub enum RemoteCompatError {
     VersionSkew { expected: String, actual: String },
     #[error("{method} failed: unknown_method: unknown method: {method}")]
     MethodUnsupported { method: String },
+    #[error("remote does not support capability {feature}")]
+    FeatureUnsupported { feature: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{method} failed: {code}: {message}")]
+pub struct RpcCallError {
+    pub method: String,
+    pub code: String,
+    pub message: String,
 }
 
 /// 到单个对端的连接抽象（newline-JSON RPC）
@@ -116,7 +126,12 @@ impl Connection {
                                 return Err(RemoteCompatError::MethodUnsupported { method }.into());
                             }
                         }
-                        anyhow::bail!("{} failed: {}: {}", method, err.code, err.message)
+                        return Err(RpcCallError {
+                            method: method.to_string(),
+                            code: err.code,
+                            message: err.message,
+                        }
+                        .into());
                     }
                 };
             }
@@ -327,6 +342,7 @@ pub async fn resize_term(
 pub async fn add_project(
     conn: &mut Connection,
     path: &str,
+    create_if_missing: bool,
 ) -> anyhow::Result<muxlane_core::model::Project> {
     let value = conn
         .call(
@@ -334,6 +350,7 @@ pub async fn add_project(
             serde_json::to_value(muxlane_core::protocol::ProjectAddParams {
                 path: path.into(),
                 name: None,
+                create_if_missing,
             })?,
         )
         .await?;
@@ -374,6 +391,41 @@ pub async fn delete_agent(
 mod tests {
     use super::*;
     use muxlane_core::model::{AgentInstance, AgentStatus, AgentType};
+
+    #[tokio::test]
+    async fn rpc_failures_preserve_the_server_error_code() {
+        let (client, peer) = UnixStream::pair().unwrap();
+        let peer = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(peer);
+            let mut read = BufReader::new(read);
+            let request: Request =
+                serde_json::from_value(read_frame(&mut read).await.unwrap()).unwrap();
+            write_frame(
+                &mut write,
+                &Response::err(
+                    request.id,
+                    muxlane_core::protocol::error_codes::PATH_NOT_FOUND,
+                    "missing directory",
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut connection = Connection::new(client);
+        let error = connection
+            .call("project.add", serde_json::json!({"path": "/missing"}))
+            .await
+            .unwrap_err();
+        let error = error.downcast_ref::<RpcCallError>().unwrap();
+        assert_eq!(error.method, "project.add");
+        assert_eq!(
+            error.code,
+            muxlane_core::protocol::error_codes::PATH_NOT_FOUND
+        );
+        assert_eq!(error.message, "missing directory");
+        peer.await.unwrap();
+    }
 
     #[tokio::test]
     async fn compatibility_failures_are_typed() {

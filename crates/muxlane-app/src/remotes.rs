@@ -3,8 +3,25 @@ use crate::app::MuxlaneApp;
 use crate::dialogs::ConnectAuthMode;
 use crate::i18n;
 use crate::menus::{DeleteConfirm, DeleteTarget};
+use crate::workspace::ProjectKey;
 use gpui::{AppContext, Context, Window};
+use muxlane_core::{PaneId, SplitAxis};
 use std::sync::Arc;
+
+pub(crate) struct RemoteAgentSpawnRequest {
+    pub(crate) host: String,
+    pub(crate) project: String,
+    pub(crate) preset: Option<muxlane_core::AgentPreset>,
+    pub(crate) preferred_pane: Option<PaneId>,
+    pub(crate) split_axis: Option<SplitAxis>,
+}
+
+pub(crate) fn replaced_machine_id(
+    previous: Option<String>,
+    current: Option<&str>,
+) -> Option<String> {
+    previous.filter(|previous| current.is_some_and(|current| current != previous))
+}
 
 impl MuxlaneApp {
     pub(crate) fn restore_remotes(
@@ -38,6 +55,7 @@ impl MuxlaneApp {
                 },
                 tx.clone(),
             );
+            remote.restore_machine_id(saved.machine_id.clone());
             server.rt_spawn(Arc::clone(&remote).run_loop());
             remotes.push(remote);
         }
@@ -82,16 +100,21 @@ impl MuxlaneApp {
             }
             muxlane_client::Target::Ssh { host, .. } => host.clone(),
         };
-        if let Some(index) = self.remotes.iter().position(|host| host.cfg.name == name) {
-            self.remotes[index].stop();
-            let release_name = name.clone();
-            self.server.rt_spawn(async move {
-                muxlane_client::release_remote_tunnel(&release_name).await;
-            });
-            self.remotes.remove(index);
-            self.remote_snaps.remove(&name);
-            self.remote_states.remove(&name);
-        }
+        let inherited_machine_id =
+            if let Some(index) = self.remotes.iter().position(|host| host.cfg.name == name) {
+                let machine_id = self.remotes[index].machine_id();
+                self.remotes[index].stop();
+                let release_name = name.clone();
+                self.server.rt_spawn(async move {
+                    muxlane_client::release_remote_tunnel(&release_name).await;
+                });
+                self.remotes.remove(index);
+                self.remote_snaps.remove(&name);
+                self.remote_states.remove(&name);
+                machine_id
+            } else {
+                None
+            };
         let username = self.connect_username.read(cx).text();
         let auth = match self.connect_auth_mode {
             ConnectAuthMode::SshConfig => muxlane_client::SshAuth::SshConfig,
@@ -126,6 +149,7 @@ impl MuxlaneApp {
             },
             self.remote_event_tx.clone(),
         );
+        host.restore_machine_id(inherited_machine_id);
         self.server.rt_spawn(Arc::clone(&host).run_loop());
         self.remotes.push(host);
         self.persist();
@@ -190,6 +214,7 @@ impl MuxlaneApp {
                     .filter(|agent| agent.project == project)
                     .map(|agent| agent.id.clone())
                     .collect();
+                let project_key = ProjectKey::new(self.local_machine_id(), project.clone());
                 cx.spawn(async move |this, cx| {
                     let (result, snapshot) = cx
                         .background_spawn(async move {
@@ -204,6 +229,8 @@ impl MuxlaneApp {
                             Ok(result) => {
                                 this.cleanup_removed_agents(&result.destroyed_agents, cx);
                                 if result.failed_agents.is_empty() {
+                                    this.remove_project_workspace(&project_key);
+                                    this.ensure_active_terminal(cx);
                                     this.delete_confirm = None;
                                 } else {
                                     this.delete_error = Some(
@@ -247,6 +274,12 @@ impl MuxlaneApp {
                     return;
                 };
                 let project_for_rpc = project.clone();
+                let project_key = self.remote_snaps.get(&host).and_then(|snapshot| {
+                    snapshot
+                        .machine
+                        .as_ref()
+                        .map(|machine| ProjectKey::new(machine.machine_id.clone(), project.clone()))
+                });
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_spawn(
@@ -265,6 +298,10 @@ impl MuxlaneApp {
                             }
                             this.cleanup_removed_agents(&result.destroyed_agents, cx);
                             if result.failed_agents.is_empty() {
+                                if let Some(project_key) = project_key.as_ref() {
+                                    this.remove_project_workspace(project_key);
+                                    this.ensure_active_terminal(cx);
+                                }
                                 this.delete_confirm = None;
                             } else {
                                 this.delete_error = Some(
@@ -289,6 +326,17 @@ impl MuxlaneApp {
                 .detach();
             }
             DeleteTarget::RemoteMachine { host } => {
+                let machine_id = self
+                    .remotes
+                    .iter()
+                    .find(|remote| remote.cfg.name == host)
+                    .and_then(|remote| remote.machine_id())
+                    .or_else(|| {
+                        self.remote_snaps
+                            .get(&host)
+                            .and_then(|snapshot| snapshot.machine.as_ref())
+                            .map(|machine| machine.machine_id.clone())
+                    });
                 let removed_agents: Vec<_> = self
                     .remote_snaps
                     .get(&host)
@@ -316,6 +364,10 @@ impl MuxlaneApp {
                 self.remote_snaps.remove(&host);
                 self.remote_states.remove(&host);
                 self.cleanup_removed_agents(&removed_agents, cx);
+                if let Some(machine_id) = machine_id.as_deref() {
+                    self.remove_machine_workspaces(machine_id);
+                    self.ensure_active_terminal(cx);
+                }
                 self.delete_confirm = None;
                 self.delete_busy = false;
                 self.persist();
@@ -392,12 +444,17 @@ impl MuxlaneApp {
 
     pub(crate) fn spawn_remote_agent(
         &mut self,
-        host: String,
-        project: String,
-        preset: Option<muxlane_core::AgentPreset>,
+        request: RemoteAgentSpawnRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let RemoteAgentSpawnRequest {
+            host,
+            project,
+            preset,
+            preferred_pane,
+            split_axis,
+        } = request;
         let remote = self
             .remotes
             .iter()
@@ -406,6 +463,16 @@ impl MuxlaneApp {
         let Some(remote) = remote else {
             return;
         };
+        let machine_id = self
+            .remote_snaps
+            .get(&host)
+            .and_then(|snapshot| snapshot.machine.as_ref())
+            .map(|machine| machine.machine_id.clone());
+        let Some(machine_id) = machine_id else {
+            return;
+        };
+        let target_key = ProjectKey::new(machine_id, project.clone());
+        let pane = self.capture_spawn_target(&target_key, preferred_pane.as_ref());
         let target_project = project.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -430,10 +497,14 @@ impl MuxlaneApp {
                     this.collapsed_projects.remove(&remote_project_key);
                     let remote_machine_key = format!("machine:remote:{}", host);
                     this.collapsed_machines.remove(&remote_machine_key);
-                    this.open_remote_agent(&agent_id, cx);
-                    this.focus_agent(&agent_id, window, cx);
-                    this.persist();
-                    cx.notify();
+                    this.place_async_agent(
+                        &target_key,
+                        agent_id,
+                        Some(pane),
+                        split_axis,
+                        window,
+                        cx,
+                    );
                 }
                 Err(error) => {
                     let text = error.to_string();
@@ -469,12 +540,49 @@ impl MuxlaneApp {
         .detach();
     }
 
+    pub(crate) fn remote_ready_for_project_add(
+        state: Option<&muxlane_client::RemoteState>,
+        snapshot: Option<&muxlane_core::model::Snapshot>,
+    ) -> bool {
+        matches!(state, Some(muxlane_client::RemoteState::Online(_)))
+            && snapshot
+                .and_then(|snapshot| snapshot.machine.as_ref())
+                .is_some()
+    }
+
     pub(crate) fn submit_remote_project(
         &mut self,
         host: String,
         path: String,
         cx: &mut Context<Self>,
     ) {
+        self.submit_remote_project_with_create(host, path, false, cx);
+    }
+
+    pub(crate) fn submit_remote_project_with_create(
+        &mut self,
+        host: String,
+        path: String,
+        create_if_missing: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project_add_busy {
+            return;
+        }
+        if !Self::remote_ready_for_project_add(
+            self.remote_states.get(&host),
+            self.remote_snaps.get(&host),
+        ) {
+            self.project_add_busy = false;
+            let error = i18n::text(self.language, "error.remote_not_connected").into();
+            if let Some(pending) = self.pending_project_creation.as_mut() {
+                pending.error = Some(error);
+            } else {
+                self.dialog_error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
         let remote = self
             .remotes
             .iter()
@@ -486,57 +594,194 @@ impl MuxlaneApp {
             cx.notify();
             return;
         };
-        if path.trim().is_empty() {
+        let requested_path = path.trim().to_string();
+        if requested_path.is_empty() {
             self.dialog_error =
                 Some(i18n::text(self.language, "error.remote_project_required").into());
             cx.notify();
             return;
         }
+        self.project_add_busy = true;
+        let supports_create = remote.supports(muxlane_core::protocol::features::PROJECT_CREATE);
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { remote.add_project(path.trim()).await })
+                .background_spawn(async move {
+                    remote.add_project(&requested_path, create_if_missing).await
+                })
                 .await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(project) => {
-                    if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
-                        if !snapshot.projects.iter().any(|item| item.id == project.id) {
-                            snapshot.projects.push(project);
+            let _ = this.update(cx, |this, cx| {
+                this.project_add_busy = false;
+                match result {
+                    Ok(project) => {
+                        if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
+                            if !snapshot.projects.iter().any(|item| item.id == project.id) {
+                                snapshot.projects.push(project);
+                            }
                         }
-                    }
-                    this.remote_project_dialog = None;
-                    this.dialog_error = None;
-                    this.persist();
-                    cx.notify();
-                }
-                Err(error) => {
-                    let text = error.to_string();
-                    if matches!(
-                        error.downcast_ref::<muxlane_client::RemoteCompatError>(),
-                        Some(muxlane_client::RemoteCompatError::MethodUnsupported { method })
-                            if method == muxlane_core::protocol::features::PROJECT_ADD
-                    ) {
-                        // 旧版远端没有 project.add：转入升级引导，而不是弹原始错误
                         this.remote_project_dialog = None;
+                        this.pending_project_creation = None;
                         this.dialog_error = None;
-                        if let Some(remote) = this
-                            .remotes
-                            .iter()
-                            .find(|remote| remote.cfg.name == host)
-                            .cloned()
-                        {
-                            cx.spawn(async move |this, cx| {
-                                remote.mark_needs_upgrade().await;
-                                let _ = this.update(cx, |_, _| {});
-                            })
-                            .detach();
-                        }
-                    } else {
-                        this.dialog_error = Some(text);
+                        this.remote_project_input
+                            .update(cx, |input, cx| input.reset(cx));
+                        this.persist();
                     }
-                    cx.notify();
+                    Err(error) => {
+                        let text = error.to_string();
+                        let error_code = error
+                            .downcast_ref::<muxlane_client::RpcCallError>()
+                            .map(|error| error.code.as_str());
+                        let create_unsupported = matches!(
+                            error.downcast_ref::<muxlane_client::RemoteCompatError>(),
+                            Some(muxlane_client::RemoteCompatError::FeatureUnsupported { .. })
+                        );
+                        if crate::dialogs::should_prompt_project_creation(
+                            error_code,
+                            create_if_missing,
+                        ) {
+                            if supports_create {
+                                this.pending_project_creation =
+                                    Some(crate::menus::PendingProjectCreation {
+                                        target: crate::menus::ProjectCreationTarget::Remote {
+                                            host: host.clone(),
+                                            path: path.trim().to_string(),
+                                        },
+                                        error: None,
+                                    });
+                                this.dialog_error = None;
+                            } else {
+                                this.dialog_error = Some(
+                                    i18n::text(
+                                        this.language,
+                                        "error.remote_create_directory_unsupported",
+                                    )
+                                    .into(),
+                                );
+                            }
+                        } else if matches!(
+                            error.downcast_ref::<muxlane_client::RemoteCompatError>(),
+                            Some(muxlane_client::RemoteCompatError::MethodUnsupported { method })
+                                if method == muxlane_core::protocol::methods::PROJECT_ADD
+                        ) {
+                            // 旧版远端没有 project.add：转入升级引导，而不是弹原始错误
+                            this.remote_project_dialog = None;
+                            this.dialog_error = None;
+                            if let Some(remote) = this
+                                .remotes
+                                .iter()
+                                .find(|remote| remote.cfg.name == host)
+                                .cloned()
+                            {
+                                cx.spawn(async move |this, cx| {
+                                    remote.mark_needs_upgrade().await;
+                                    let _ = this.update(cx, |_, _| {});
+                                })
+                                .detach();
+                            }
+                        } else if let Some(pending) = this.pending_project_creation.as_mut() {
+                            pending.error = Some(if create_unsupported {
+                                i18n::text(
+                                    this.language,
+                                    "error.remote_create_directory_unsupported",
+                                )
+                                .into()
+                            } else {
+                                text
+                            });
+                        } else {
+                            this.dialog_error = Some(if create_unsupported {
+                                i18n::text(
+                                    this.language,
+                                    "error.remote_create_directory_unsupported",
+                                )
+                                .into()
+                            } else {
+                                text
+                            });
+                        }
+                    }
                 }
+                cx.notify();
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot_with_machine() -> muxlane_core::model::Snapshot {
+        muxlane_core::model::Snapshot {
+            machine: Some(muxlane_core::model::MachineInfo {
+                machine_id: "machine-remote".into(),
+                name: "remote".into(),
+                os: "linux".into(),
+                version: "test".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replacing_remote_preserves_old_identity_until_new_snapshot_arrives() {
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel(1);
+        let old = muxlane_client::RemoteHost::new(
+            muxlane_client::HostCfg {
+                name: "remote".into(),
+                target: muxlane_client::Target::Socket("/tmp/old.sock".into()),
+                auth: muxlane_client::SshAuth::default(),
+                retry_base_ms: 200,
+            },
+            events_tx.clone(),
+        );
+        old.restore_machine_id(Some("machine-a".into()));
+        let replacement = muxlane_client::RemoteHost::new(
+            muxlane_client::HostCfg {
+                name: "remote".into(),
+                target: muxlane_client::Target::Socket("/tmp/new.sock".into()),
+                auth: muxlane_client::SshAuth::default(),
+                retry_base_ms: 200,
+            },
+            events_tx,
+        );
+        replacement.restore_machine_id(old.machine_id());
+
+        let previous = replacement.machine_id();
+        assert_eq!(previous.as_deref(), Some("machine-a"));
+        assert!(replacement.cache_machine_id(Some("machine-b")));
+        assert_eq!(
+            replaced_machine_id(previous, replacement.machine_id().as_deref()),
+            Some("machine-a".into())
+        );
+        assert_eq!(
+            replaced_machine_id(Some("machine-a".into()), Some("machine-a")),
+            None
+        );
+        assert_eq!(replaced_machine_id(Some("machine-a".into()), None), None);
+    }
+
+    #[test]
+    fn remote_project_submission_requires_online_state_and_machine_snapshot() {
+        let snapshot = snapshot_with_machine();
+        let online = muxlane_client::RemoteState::Online(snapshot.clone());
+        assert!(MuxlaneApp::remote_ready_for_project_add(
+            Some(&online),
+            Some(&snapshot)
+        ));
+        assert!(!MuxlaneApp::remote_ready_for_project_add(
+            Some(&muxlane_client::RemoteState::Connecting(
+                muxlane_client::RemoteStage::Subscribe,
+            )),
+            Some(&snapshot)
+        ));
+        assert!(!MuxlaneApp::remote_ready_for_project_add(
+            Some(&online),
+            Some(&muxlane_core::model::Snapshot::default())
+        ));
+        assert!(!MuxlaneApp::remote_ready_for_project_add(
+            None,
+            Some(&snapshot)
+        ));
     }
 }

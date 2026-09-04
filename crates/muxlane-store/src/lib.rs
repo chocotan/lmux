@@ -40,8 +40,85 @@ fn cleanup_temporary_files(path: &Path) {
     }
 }
 
-pub const STORE_VERSION: u32 = 1;
+pub const STORE_VERSION: u32 = 2;
 const SECRETS_VERSION: u32 = 1;
+
+fn default_sidebar_visible() -> bool {
+    true
+}
+
+fn default_sidebar_width() -> f32 {
+    230.0
+}
+
+fn default_close_tab_shortcut() -> Option<String> {
+    Some("ctrl-w".into())
+}
+
+fn default_previous_workspace_shortcut() -> Option<String> {
+    Some("platform-up".into())
+}
+
+fn default_next_workspace_shortcut() -> Option<String> {
+    Some("platform-down".into())
+}
+
+fn default_previous_tab_shortcut() -> Option<String> {
+    Some("platform-left".into())
+}
+
+fn default_next_tab_shortcut() -> Option<String> {
+    Some("platform-right".into())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedShortcutBindings {
+    #[serde(default = "default_close_tab_shortcut")]
+    pub close_tab: Option<String>,
+    #[serde(default = "default_previous_workspace_shortcut")]
+    pub previous_workspace: Option<String>,
+    #[serde(default = "default_next_workspace_shortcut")]
+    pub next_workspace: Option<String>,
+    #[serde(default = "default_previous_tab_shortcut")]
+    pub previous_tab: Option<String>,
+    #[serde(default = "default_next_tab_shortcut")]
+    pub next_tab: Option<String>,
+}
+
+impl Default for PersistedShortcutBindings {
+    fn default() -> Self {
+        Self {
+            close_tab: default_close_tab_shortcut(),
+            previous_workspace: default_previous_workspace_shortcut(),
+            next_workspace: default_next_workspace_shortcut(),
+            previous_tab: default_previous_tab_shortcut(),
+            next_tab: default_next_tab_shortcut(),
+        }
+    }
+}
+
+impl PersistedShortcutBindings {
+    /// Migrate the old defaults written before the platform-key scheme.
+    /// User-defined shortcuts other than those exact legacy defaults are preserved.
+    fn migrate_legacy_defaults(&mut self) {
+        if self.previous_workspace.as_deref() == Some("platform-left")
+            || self.previous_workspace.as_deref() == Some("alt-left")
+        {
+            self.previous_workspace = default_previous_workspace_shortcut();
+        }
+        if self.next_workspace.as_deref() == Some("platform-right")
+            || self.next_workspace.as_deref() == Some("alt-right")
+        {
+            self.next_workspace = default_next_workspace_shortcut();
+        }
+        if self.previous_tab.as_deref() == Some("platform-up") {
+            self.previous_tab = default_previous_tab_shortcut();
+        }
+        if self.next_tab.as_deref() == Some("platform-down") {
+            self.next_tab = default_next_tab_shortcut();
+        }
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedSecrets {
@@ -83,6 +160,18 @@ pub struct PersistedApp {
     pub osc52_clipboard_enabled: Option<bool>,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub project_workspaces_enabled: bool,
+    #[serde(default)]
+    pub project_workspaces: Vec<PersistedWorkspace>,
+    #[serde(default)]
+    pub active_project_workspace: Option<PersistedProjectKey>,
+    #[serde(default = "default_sidebar_visible")]
+    pub sidebar_visible: bool,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    #[serde(default)]
+    pub shortcut_bindings: PersistedShortcutBindings,
 }
 
 impl PersistedApp {
@@ -123,6 +212,13 @@ impl PersistedApp {
         self.sound_enabled = previous.sound_enabled;
         self.osc52_clipboard_enabled = previous.osc52_clipboard_enabled;
         self.language = previous.language.clone();
+        self.project_workspaces_enabled = previous.project_workspaces_enabled;
+        self.project_workspaces = previous.project_workspaces.clone();
+        self.active_project_workspace = previous.active_project_workspace.clone();
+        self.sidebar_visible = previous.sidebar_visible;
+        self.sidebar_width = previous.sidebar_width;
+        self.shortcut_bindings = previous.shortcut_bindings.clone();
+        self.shortcut_bindings.migrate_legacy_defaults();
         self
     }
 }
@@ -146,8 +242,29 @@ impl Default for PersistedApp {
             sound_enabled: None,
             osc52_clipboard_enabled: None,
             language: None,
+            project_workspaces_enabled: false,
+            project_workspaces: vec![],
+            active_project_workspace: None,
+            sidebar_visible: default_sidebar_visible(),
+            sidebar_width: default_sidebar_width(),
+            shortcut_bindings: PersistedShortcutBindings::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PersistedProjectKey {
+    pub machine_id: String,
+    pub project_id: ProjectId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PersistedWorkspace {
+    pub key: PersistedProjectKey,
+    #[serde(default = "PaneNode::empty")]
+    pub pane_tree: PaneNode,
+    #[serde(default)]
+    pub active_pane: Option<PaneId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +289,8 @@ pub enum PersistedRemoteAuth {
 pub struct PersistedRemote {
     pub target: String,
     pub auth: PersistedRemoteAuth,
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,6 +320,7 @@ pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
         let bytes = std::fs::read(path)?;
         let mut app: PersistedApp = serde_json::from_slice(&bytes)?;
         migrate(&mut app)?;
+        app.shortcut_bindings.migrate_legacy_defaults();
         let secrets_path = secrets_path(path);
         let mut secrets = load_secrets(&secrets_path)?;
         let mut migrated_passwords = false;
@@ -323,7 +443,15 @@ fn migrate(app: &mut PersistedApp) -> anyhow::Result<()> {
             STORE_VERSION
         );
     }
-    // v1 是首版；后续在此逐版本迁移。
+    // v1 -> v2: legacy pane_tree/active_pane already represent the shared layout.
+    // New project workspaces and sidebar preferences use serde defaults.
+    if app.version < 2 {
+        // OSC52 clipboard used to default to off, which silently broke tmux
+        // mouse-selection copy. Flip it on once during the v1 -> v2 upgrade
+        // (this may override a legacy explicit `false` a single time); in v2
+        // users can still disable it and that choice is preserved.
+        app.osc52_clipboard_enabled = Some(true);
+    }
     if app.remote_configs.is_empty() && !app.remotes.is_empty() {
         app.remote_configs = app
             .remotes
@@ -331,6 +459,7 @@ fn migrate(app: &mut PersistedApp) -> anyhow::Result<()> {
             .map(|target| PersistedRemote {
                 target,
                 auth: PersistedRemoteAuth::SshConfig,
+                machine_id: None,
             })
             .collect();
     }
@@ -385,6 +514,20 @@ mod tests {
         previous.pane_tree.open_tab(&pane, "tmux-agent".into());
         previous.theme = Some("nord".into());
         previous.osc52_clipboard_enabled = Some(true);
+        previous.project_workspaces_enabled = true;
+        previous.active_project_workspace = Some(PersistedProjectKey {
+            machine_id: "machine-a".into(),
+            project_id: "p".into(),
+        });
+        previous.project_workspaces.push(PersistedWorkspace {
+            key: previous.active_project_workspace.clone().unwrap(),
+            pane_tree: previous.pane_tree.clone(),
+            active_pane: Some(pane.clone()),
+        });
+        previous.sidebar_visible = false;
+        previous.sidebar_width = 312.0;
+        previous.shortcut_bindings.close_tab = Some("ctrl-q".into());
+        previous.shortcut_bindings.next_tab = None;
         previous.maximized_pane = Some(pane);
         let app = PersistedApp::from_snapshot(&snapshot).with_ui_prefs_from(&previous);
 
@@ -404,6 +547,15 @@ mod tests {
         assert_eq!(app.theme.as_deref(), Some("nord"));
         assert_eq!(app.osc52_clipboard_enabled, Some(true));
         assert_eq!(app.pane_tree, previous.pane_tree);
+        assert!(app.project_workspaces_enabled);
+        assert_eq!(
+            app.active_project_workspace,
+            previous.active_project_workspace
+        );
+        assert_eq!(app.project_workspaces, previous.project_workspaces);
+        assert!(!app.sidebar_visible);
+        assert_eq!(app.sidebar_width, 312.0);
+        assert_eq!(app.shortcut_bindings, previous.shortcut_bindings);
         assert!(app.maximized_pane.is_none());
     }
 
@@ -444,6 +596,7 @@ mod tests {
         app.remote_configs.push(PersistedRemote {
             target: "user@nuc:/tmp/muxlane.sock".into(),
             auth: PersistedRemoteAuth::SshConfig,
+            machine_id: Some("machine-nuc".into()),
         });
         app.sessions.push(PersistedAgent {
             agent_id: "a".into(),
@@ -466,6 +619,24 @@ mod tests {
             .split(&root, muxlane_core::SplitAxis::Horizontal, "b".into())
             .unwrap();
         app.active_pane = Some(second.clone());
+        app.project_workspaces_enabled = true;
+        app.active_project_workspace = Some(PersistedProjectKey {
+            machine_id: "machine-a".into(),
+            project_id: "p".into(),
+        });
+        app.project_workspaces.push(PersistedWorkspace {
+            key: app.active_project_workspace.clone().unwrap(),
+            pane_tree: app.pane_tree.clone(),
+            active_pane: Some(second.clone()),
+        });
+        app.project_workspaces.push(PersistedWorkspace {
+            key: PersistedProjectKey {
+                machine_id: "machine-b".into(),
+                project_id: "p".into(),
+            },
+            pane_tree: PaneNode::with_tab("remote-agent".into()),
+            active_pane: None,
+        });
         app.projects.push(Project {
             id: "p".into(),
             name: "repo".into(),
@@ -476,6 +647,13 @@ mod tests {
         save(&p, &app).unwrap();
         let json = std::fs::read_to_string(&p).unwrap();
         assert!(json.contains("\"sessions\""));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value["project_workspaces"].is_array());
+        assert_eq!(
+            value["project_workspaces"][0]["key"]["machine_id"],
+            "machine-a"
+        );
+        assert_eq!(value["project_workspaces"][0]["key"]["project_id"], "p");
         let back = load(&p).unwrap();
         assert_eq!(back, app);
         assert!(std::fs::read_dir(dir.path())
@@ -495,6 +673,7 @@ mod tests {
                 username: "alice".into(),
                 password: Some("correct horse battery staple".into()),
             },
+            machine_id: None,
         });
 
         save(&path, &app).unwrap();
@@ -553,6 +732,162 @@ mod tests {
         assert!(app.remotes.is_empty());
         assert_eq!(app.remote_configs.len(), 1);
         assert_eq!(app.remote_configs[0].target, "user@nuc");
+        assert_eq!(app.remote_configs[0].machine_id, None);
+    }
+
+    #[test]
+    fn legacy_remote_config_without_machine_id_is_compatible() {
+        let remote: PersistedRemote =
+            serde_json::from_str(r#"{"target":"user@nuc","auth":{"auth":"ssh_config"}}"#).unwrap();
+        assert_eq!(remote.target, "user@nuc");
+        assert_eq!(remote.machine_id, None);
+    }
+
+    #[test]
+    fn remote_machine_id_roundtrips() {
+        let remote = PersistedRemote {
+            target: "user@nuc".into(),
+            auth: PersistedRemoteAuth::SshConfig,
+            machine_id: Some("machine-stable".into()),
+        };
+        let json = serde_json::to_string(&remote).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PersistedRemote>(&json).unwrap(),
+            remote
+        );
+    }
+
+    #[test]
+    fn version_one_layout_migrates_to_shared_with_new_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"pane_tree":{"kind":"leaf","group":{"id":"pane-old","tabs":["a"],"active":"a"}},"active_pane":"pane-old"}"#,
+        )
+        .unwrap();
+
+        let app = load(&path).unwrap();
+        assert_eq!(app.version, STORE_VERSION);
+        assert_eq!(app.active_pane.as_deref(), Some("pane-old"));
+        assert!(app.pane_tree.pane_for_agent(&"a".into()).is_some());
+        assert!(!app.project_workspaces_enabled);
+        assert!(app.project_workspaces.is_empty());
+        assert!(app.sidebar_visible);
+        assert_eq!(app.sidebar_width, 230.0);
+    }
+
+    #[test]
+    fn v1_missing_osc52_field_is_flipped_on_during_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"version":1}"#).unwrap();
+
+        let app = load(&path).unwrap();
+        assert_eq!(app.version, STORE_VERSION);
+        assert_eq!(app.osc52_clipboard_enabled, Some(true));
+    }
+
+    #[test]
+    fn v1_explicit_osc52_false_is_overwritten_once_during_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"version":1,"osc52_clipboard_enabled":false}"#).unwrap();
+
+        let app = load(&path).unwrap();
+        assert_eq!(app.osc52_clipboard_enabled, Some(true));
+    }
+
+    #[test]
+    fn v2_explicit_osc52_false_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"version":2,"osc52_clipboard_enabled":false}"#).unwrap();
+
+        let app = load(&path).unwrap();
+        assert_eq!(app.osc52_clipboard_enabled, Some(false));
+    }
+
+    #[test]
+    fn v2_missing_osc52_field_stays_unset_for_default_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"version":2}"#).unwrap();
+
+        let app = load(&path).unwrap();
+        // None means "no explicit user choice": the app layer defaults to true.
+        assert_eq!(app.osc52_clipboard_enabled, None);
+    }
+
+    #[test]
+    fn shortcut_bindings_use_defaults_for_missing_fields_and_preserve_null() {
+        let bindings: PersistedShortcutBindings =
+            serde_json::from_str(r#"{"close_tab":"ctrl-q","next_tab":null}"#).unwrap();
+
+        assert_eq!(bindings.close_tab.as_deref(), Some("ctrl-q"));
+        assert_eq!(bindings.previous_workspace.as_deref(), Some("platform-up"));
+        assert_eq!(bindings.next_workspace.as_deref(), Some("platform-down"));
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-left"));
+        assert_eq!(bindings.next_tab, None);
+    }
+
+    #[test]
+    fn legacy_state_without_shortcuts_receives_defaults_without_version_change() {
+        let app: PersistedApp = serde_json::from_str(r#"{"version":2}"#).unwrap();
+        assert_eq!(app.version, STORE_VERSION);
+        assert_eq!(app.shortcut_bindings, PersistedShortcutBindings::default());
+    }
+
+    #[test]
+    fn legacy_alt_workspace_defaults_migrate_to_platform_keys() {
+        let mut bindings = PersistedShortcutBindings {
+            previous_workspace: Some("alt-left".into()),
+            next_workspace: Some("alt-right".into()),
+            previous_tab: Some("ctrl-alt-p".into()),
+            ..Default::default()
+        };
+        bindings.migrate_legacy_defaults();
+        assert_eq!(bindings.previous_workspace.as_deref(), Some("platform-up"));
+        assert_eq!(bindings.next_workspace.as_deref(), Some("platform-down"));
+    }
+
+    #[test]
+    fn legacy_platform_defaults_migrate_to_their_new_actions() {
+        let mut bindings = PersistedShortcutBindings {
+            previous_workspace: Some("platform-left".into()),
+            next_workspace: Some("platform-right".into()),
+            previous_tab: Some("platform-up".into()),
+            next_tab: Some("platform-down".into()),
+            ..Default::default()
+        };
+        bindings.migrate_legacy_defaults();
+        assert_eq!(bindings.previous_workspace.as_deref(), Some("platform-up"));
+        assert_eq!(bindings.next_workspace.as_deref(), Some("platform-down"));
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-left"));
+        assert_eq!(bindings.next_tab.as_deref(), Some("platform-right"));
+
+        let mut partial = PersistedShortcutBindings {
+            previous_workspace: Some("platform-left".into()),
+            next_workspace: None,
+            previous_tab: Some("ctrl-alt-p".into()),
+            next_tab: Some("platform-down".into()),
+            ..Default::default()
+        };
+        partial.migrate_legacy_defaults();
+        assert_eq!(partial.previous_workspace.as_deref(), Some("platform-up"));
+        assert_eq!(partial.next_workspace, None);
+        assert_eq!(partial.previous_tab.as_deref(), Some("ctrl-alt-p"));
+        assert_eq!(partial.next_tab.as_deref(), Some("platform-right"));
+    }
+
+    #[test]
+    fn shortcut_bindings_roundtrip_with_disabled_values() {
+        let mut app = PersistedApp::default();
+        app.shortcut_bindings.close_tab = None;
+        app.shortcut_bindings.previous_tab = Some("ctrl-alt-b".into());
+        let json = serde_json::to_string(&app).unwrap();
+        let restored: PersistedApp = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.shortcut_bindings, app.shortcut_bindings);
     }
 
     #[test]

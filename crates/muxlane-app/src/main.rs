@@ -1,4 +1,5 @@
 //! muxlane GPUI 主程序：三区极简 UI（侧栏机器树 / 贴边终端网格 / 浮层）
+mod actions;
 mod app;
 mod bootstrap;
 mod dialogs;
@@ -9,12 +10,15 @@ mod notifications;
 mod remotes;
 mod sessions;
 mod settings;
+mod shortcuts;
+mod sidebar_state;
 mod sound;
 mod term_view;
 mod terminal_keys;
 mod text_field;
 mod theme;
 mod widgets;
+mod workspace;
 
 use muxlane_core::model::MachineInfo;
 use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
@@ -116,7 +120,6 @@ fn main() {
         rt.handle().clone(),
         auth,
     );
-    server.set_persistence_path(store_path.clone());
 
     {
         let srv = Arc::clone(&server);
@@ -129,12 +132,13 @@ fn main() {
     let initial_snapshot = rt.block_on(server.snapshot());
     persisted = muxlane_store::PersistedApp::from_snapshot(&initial_snapshot)
         .with_ui_prefs_from(&persisted);
-    let _ = muxlane_store::save(&store_path, &persisted);
 
     if headless {
-        // 纯服务端：持续落盘 authoritative state，远端删除后不会在重启时复活。
+        // Headless state changes persist synchronously through MuxlaneServer.
+        server.set_persistence_path(store_path);
         tracing::info!("muxlane headless server running");
-        rt.block_on(server.run_headless_persistence(store_path.clone(), persisted.clone()));
+        rt.block_on(std::future::pending::<()>());
+        return;
     }
 
     app::launch(server, initial_snapshot, connect_to, persisted, store_path);

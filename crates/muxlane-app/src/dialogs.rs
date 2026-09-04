@@ -7,21 +7,11 @@ use gpui::{
 };
 use std::sync::Arc;
 
-fn resolve_local_project_path(raw_path: &str) -> Option<std::path::PathBuf> {
-    let raw_path = raw_path.trim();
-    if raw_path.is_empty() {
-        return None;
-    }
-    let expanded = if raw_path == "~" {
-        std::env::var_os("HOME").map(std::path::PathBuf::from)?
-    } else if let Some(rest) = raw_path.strip_prefix("~/") {
-        std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)?
-            .join(rest)
-    } else {
-        std::path::PathBuf::from(raw_path)
-    };
-    expanded.canonicalize().ok().filter(|path| path.is_dir())
+pub(crate) fn should_prompt_project_creation(
+    error_code: Option<&str>,
+    create_if_missing: bool,
+) -> bool {
+    !create_if_missing && error_code == Some(muxlane_core::protocol::error_codes::PATH_NOT_FOUND)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,34 +81,35 @@ impl MuxlaneApp {
     }
 
     fn add_local_project(&mut self, raw_path: String, cx: &mut Context<Self>) {
-        let raw_path = raw_path.trim();
-        if raw_path.is_empty() {
+        if self.project_add_busy {
+            return;
+        }
+        let path = raw_path.trim();
+        if path.is_empty() {
             self.dialog_error =
                 Some(i18n::text(self.language, "error.local_project_required").into());
             cx.notify();
             return;
         }
-        let Some(path) = resolve_local_project_path(raw_path) else {
-            self.dialog_error =
-                Some(i18n::text(self.language, "error.invalid_local_project").into());
-            cx.notify();
-            return;
-        };
-        if self
-            .last_snapshot
-            .projects
-            .iter()
-            .any(|project| project.path == path)
-        {
-            self.dialog_error =
-                Some(i18n::text(self.language, "error.local_project_exists").into());
-            cx.notify();
+        self.submit_local_project(path.to_string(), false, cx);
+    }
+
+    pub(crate) fn submit_local_project(
+        &mut self,
+        path: String,
+        create_if_missing: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project_add_busy {
             return;
         }
+        self.project_add_busy = true;
         let server = Arc::clone(&self.server);
+        let requested_path = path.clone();
         let params = muxlane_core::protocol::ProjectAddParams {
-            path: path.display().to_string(),
+            path,
             name: None,
+            create_if_missing,
         };
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -127,27 +118,54 @@ impl MuxlaneApp {
                     Ok::<_, anyhow::Error>(server.snapshot().await)
                 })
                 .await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(snapshot) => {
-                    this.last_snapshot = snapshot;
-                    this.project_dialog = false;
-                    this.dialog_error = None;
-                    this.project_input.update(cx, |input, cx| input.reset(cx));
-                    this.persist();
-                    cx.notify();
+            let _ = this.update(cx, |this, cx| {
+                this.project_add_busy = false;
+                match result {
+                    Ok(snapshot) => {
+                        this.last_snapshot = snapshot;
+                        this.project_dialog = false;
+                        this.pending_project_creation = None;
+                        this.dialog_error = None;
+                        this.project_input.update(cx, |input, cx| input.reset(cx));
+                        this.persist();
+                    }
+                    Err(error) => {
+                        let error_code = error
+                            .downcast_ref::<muxlane_server::ProjectAddError>()
+                            .map(muxlane_server::ProjectAddError::code);
+                        if should_prompt_project_creation(error_code, create_if_missing) {
+                            this.pending_project_creation =
+                                Some(crate::menus::PendingProjectCreation {
+                                    target: crate::menus::ProjectCreationTarget::Local {
+                                        path: requested_path,
+                                    },
+                                    error: None,
+                                });
+                            this.dialog_error = None;
+                        } else if let Some(pending) = this.pending_project_creation.as_mut() {
+                            pending.error = Some(error.to_string());
+                        } else {
+                            this.dialog_error = Some(error.to_string());
+                        }
+                    }
                 }
-                Err(error) => {
-                    this.dialog_error = Some(error.to_string());
-                    cx.notify();
-                }
+                cx.notify();
             });
         })
         .detach();
     }
 
     fn handle_project_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        if self.pending_project_creation.is_some() {
+            match ks.key.as_str() {
+                "escape" => self.cancel_project_create(cx),
+                "enter" => self.confirm_project_create(cx),
+                _ => {}
+            }
+            return;
+        }
         match ks.key.as_str() {
-            "escape" => {
+            "escape" if !self.project_add_busy => {
                 self.project_dialog = false;
                 self.dialog_error = None;
             }
@@ -193,7 +211,6 @@ impl MuxlaneApp {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_lg()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -233,7 +250,6 @@ impl MuxlaneApp {
                             .flex()
                             .border_1()
                             .border_color(rgba(theme.line))
-                            .rounded_sm()
                             .overflow_hidden()
                             .child(
                                 div()
@@ -322,7 +338,6 @@ impl MuxlaneApp {
                                     .id("connect-cancel")
                                     .px_3()
                                     .py_1()
-                                    .rounded_sm()
                                     .text_color(rgba(theme.fg0))
                                     .hover(|s| s.bg(rgba(theme.bg2)))
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -337,7 +352,6 @@ impl MuxlaneApp {
                                     .id("connect-submit")
                                     .px_3()
                                     .py_1()
-                                    .rounded_sm()
                                     .bg(rgba(theme.accent))
                                     .text_color(rgba(theme.on_accent))
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -360,6 +374,7 @@ impl MuxlaneApp {
             return div().into_any_element();
         };
         let input = self.remote_project_input.clone();
+        let busy = self.project_add_busy;
         div()
             .id("remote-project-backdrop")
             .absolute()
@@ -372,9 +387,11 @@ impl MuxlaneApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| {
-                    this.remote_project_dialog = None;
-                    this.dialog_error = None;
-                    cx.notify();
+                    if !this.project_add_busy && this.pending_project_creation.is_none() {
+                        this.remote_project_dialog = None;
+                        this.dialog_error = None;
+                        cx.notify();
+                    }
                 }),
             )
             .child(
@@ -384,7 +401,6 @@ impl MuxlaneApp {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_lg()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -395,7 +411,15 @@ impl MuxlaneApp {
                     .on_key_down(
                         cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
                             match event.keystroke.key.as_str() {
-                                "escape" => {
+                                "escape" if this.pending_project_creation.is_some() => {
+                                    this.cancel_project_create(cx);
+                                    cx.stop_propagation();
+                                }
+                                "enter" if this.pending_project_creation.is_some() => {
+                                    this.confirm_project_create(cx);
+                                    cx.stop_propagation();
+                                }
+                                "escape" if !this.project_add_busy => {
                                     this.remote_project_dialog = None;
                                     this.dialog_error = None;
                                     cx.stop_propagation();
@@ -456,13 +480,16 @@ impl MuxlaneApp {
                                     .id("remote-project-cancel")
                                     .px_3()
                                     .py_1()
-                                    .rounded_sm()
                                     .text_color(rgba(theme.fg0))
-                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .when(!busy, |button| {
+                                        button.hover(|style| style.bg(rgba(theme.bg2)))
+                                    })
                                     .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.remote_project_dialog = None;
-                                        this.dialog_error = None;
-                                        cx.notify();
+                                        if !this.project_add_busy {
+                                            this.remote_project_dialog = None;
+                                            this.dialog_error = None;
+                                            cx.notify();
+                                        }
                                     }))
                                     .child(i18n::text(self.language, "common.cancel")),
                             )
@@ -471,16 +498,24 @@ impl MuxlaneApp {
                                     .id("remote-project-submit")
                                     .px_3()
                                     .py_1()
-                                    .rounded_sm()
                                     .bg(rgba(theme.accent))
                                     .text_color(rgba(theme.on_accent))
+                                    .when(!busy, |button| {
+                                        button.hover(|style| {
+                                            style.bg(rgba(Theme::with_alpha(theme.accent, 0xcc)))
+                                        })
+                                    })
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         if let Some(host) = this.remote_project_dialog.clone() {
                                             let path = this.remote_project_input.read(cx).text();
                                             this.submit_remote_project(host, path, cx);
                                         }
                                     }))
-                                    .child(i18n::text(self.language, "common.add")),
+                                    .child(if busy {
+                                        i18n::text(self.language, "common.adding")
+                                    } else {
+                                        i18n::text(self.language, "common.add")
+                                    }),
                             ),
                     ),
             )
@@ -491,6 +526,7 @@ impl MuxlaneApp {
         let theme = Theme::for_mode(self.theme_mode);
         let input = self.project_input.clone();
         let error = self.dialog_error.clone();
+        let busy = self.project_add_busy;
         div()
             .id("project-dialog-backdrop")
             .absolute()
@@ -503,9 +539,11 @@ impl MuxlaneApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _ev, _window, cx| {
-                    this.project_dialog = false;
-                    this.dialog_error = None;
-                    cx.notify();
+                    if !this.project_add_busy && this.pending_project_creation.is_none() {
+                        this.project_dialog = false;
+                        this.dialog_error = None;
+                        cx.notify();
+                    }
                 }),
             )
             .child(
@@ -515,7 +553,6 @@ impl MuxlaneApp {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_lg()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -570,13 +607,16 @@ impl MuxlaneApp {
                                     .id("project-cancel")
                                     .px_3()
                                     .py_1()
-                                    .rounded_sm()
                                     .text_color(rgba(theme.fg0))
-                                    .hover(|s| s.bg(rgba(theme.bg2)))
+                                    .when(!busy, |button| {
+                                        button.hover(|style| style.bg(rgba(theme.bg2)))
+                                    })
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
-                                        this.project_dialog = false;
-                                        this.dialog_error = None;
-                                        cx.notify();
+                                        if !this.project_add_busy {
+                                            this.project_dialog = false;
+                                            this.dialog_error = None;
+                                            cx.notify();
+                                        }
                                     }))
                                     .child(i18n::text(self.language, "common.cancel")),
                             )
@@ -585,14 +625,22 @@ impl MuxlaneApp {
                                     .id("project-submit")
                                     .px_3()
                                     .py_1()
-                                    .rounded_sm()
                                     .bg(rgba(theme.accent))
                                     .text_color(rgba(theme.on_accent))
+                                    .when(!busy, |button| {
+                                        button.hover(|style| {
+                                            style.bg(rgba(Theme::with_alpha(theme.accent, 0xcc)))
+                                        })
+                                    })
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         let path = this.project_input.read(cx).text();
                                         this.add_local_project(path, cx);
                                     }))
-                                    .child(i18n::text(self.language, "common.add")),
+                                    .child(if busy {
+                                        i18n::text(self.language, "common.adding")
+                                    } else {
+                                        i18n::text(self.language, "common.add")
+                                    }),
                             ),
                     ),
             )
@@ -621,12 +669,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_project_path_requires_an_existing_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            resolve_local_project_path(dir.path().to_str().unwrap()),
-            Some(dir.path().canonicalize().unwrap())
-        );
-        assert!(resolve_local_project_path("/definitely/missing/muxlane-project").is_none());
+    fn project_creation_prompt_requires_first_typed_not_found_error() {
+        assert!(should_prompt_project_creation(
+            Some(muxlane_core::protocol::error_codes::PATH_NOT_FOUND),
+            false
+        ));
+        assert!(!should_prompt_project_creation(
+            Some(muxlane_core::protocol::error_codes::PATH_NOT_FOUND),
+            true
+        ));
+        assert!(!should_prompt_project_creation(
+            Some(muxlane_core::protocol::error_codes::NOT_A_DIRECTORY),
+            false
+        ));
+        assert!(!should_prompt_project_creation(None, false));
     }
 }

@@ -4,6 +4,7 @@ mod state;
 mod subs;
 mod supervisor;
 
+pub use api::ProjectAddError;
 pub use state::ServerState;
 pub use subs::SubRegistry;
 
@@ -195,6 +196,7 @@ impl MuxlaneServer {
                 protocol: muxlane_core::protocol::PROTOCOL_VERSION,
                 features: vec![
                     muxlane_core::protocol::features::PROJECT_ADD.into(),
+                    muxlane_core::protocol::features::PROJECT_CREATE.into(),
                     muxlane_core::protocol::features::AGENT_SPAWN.into(),
                     muxlane_core::protocol::features::TERM_INPUT.into(),
                     muxlane_core::protocol::features::TERM_RESIZE.into(),
@@ -348,7 +350,7 @@ impl MuxlaneServer {
             )),
             Err(error) => Ok(Response::err(
                 req.id,
-                "persistence_failed",
+                muxlane_core::protocol::error_codes::PERSISTENCE_FAILED,
                 error.to_string(),
             )),
         }
@@ -362,7 +364,13 @@ impl MuxlaneServer {
             };
         match self.add_project(params).await {
             Ok(project) => Ok(Response::ok(req.id, serde_json::to_value(project)?)),
-            Err(error) => Ok(Response::err(req.id, "invalid_path", error.to_string())),
+            Err(error) => {
+                let code = error
+                    .downcast_ref::<ProjectAddError>()
+                    .map(ProjectAddError::code)
+                    .unwrap_or(muxlane_core::protocol::error_codes::PERSISTENCE_FAILED);
+                Ok(Response::err(req.id, code, error.to_string()))
+            }
         }
     }
 
@@ -377,7 +385,7 @@ impl MuxlaneServer {
             Ok(result) => Ok(Response::ok(req.id, serde_json::to_value(result)?)),
             Err(error) => Ok(Response::err(
                 req.id,
-                "persistence_failed",
+                muxlane_core::protocol::error_codes::PERSISTENCE_FAILED,
                 error.to_string(),
             )),
         }

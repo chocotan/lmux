@@ -64,7 +64,6 @@ fn render_pi_loading_spinner(frame: usize, theme: Theme) -> gpui::Div {
                 div()
                     .w(px(2.5))
                     .h(px(2.5))
-                    .rounded_full()
                     .when(is_filled, |el| el.bg(rgba(theme.accent)))
                     .when(!is_filled, |el| {
                         el.bg(rgba(Theme::with_alpha(theme.accent, 0x25)))
@@ -155,25 +154,17 @@ pub(crate) fn render_status_indicator(
         muxlane_core::model::AgentStatus::Working => {
             render_pi_loading_spinner(spinner_frame, theme)
         }
-        muxlane_core::model::AgentStatus::Blocked => container.child(
-            div()
-                .w(px(6.))
-                .h(px(6.))
-                .rounded_full()
-                .bg(rgba(theme.yellow)),
-        ),
-        muxlane_core::model::AgentStatus::Done if is_error => {
-            container.child(div().w(px(6.)).h(px(6.)).rounded_full().bg(rgba(theme.red)))
+        muxlane_core::model::AgentStatus::Blocked => {
+            container.child(div().w(px(6.)).h(px(6.)).bg(rgba(theme.yellow)))
         }
-        muxlane_core::model::AgentStatus::Done => container.child(
-            div()
-                .w(px(6.))
-                .h(px(6.))
-                .rounded_full()
-                .bg(rgba(theme.green)),
-        ),
+        muxlane_core::model::AgentStatus::Done if is_error => {
+            container.child(div().w(px(6.)).h(px(6.)).bg(rgba(theme.red)))
+        }
+        muxlane_core::model::AgentStatus::Done => {
+            container.child(div().w(px(6.)).h(px(6.)).bg(rgba(theme.green)))
+        }
         muxlane_core::model::AgentStatus::Idle | muxlane_core::model::AgentStatus::Unknown => {
-            container.child(div().w(px(5.)).h(px(5.)).rounded_full().bg(rgba(theme.fg2)))
+            container.child(div().w(px(5.)).h(px(5.)).bg(rgba(theme.fg2)))
         }
     }
 }

@@ -89,6 +89,15 @@ async fn remote_host_connects_and_receives_events() {
         }
     }
     assert!(got_online, "should receive Online snapshot");
+    assert!(host.supports(muxlane_core::protocol::features::PROJECT_CREATE));
+
+    let created_dir = dir.path().join("created/remotely");
+    let created = host
+        .add_project(&created_dir.display().to_string(), true)
+        .await
+        .unwrap();
+    assert_eq!(created.path, created_dir.canonicalize().unwrap());
+    assert!(created_dir.is_dir());
 
     // 远端新增会话只发 state.changed；RemoteHost 必须重拉 state.list。
     let second = muxlane_core::model::AgentInstance {
@@ -110,6 +119,7 @@ async fn remote_host_connects_and_receives_events() {
         .add_project(muxlane_core::protocol::ProjectAddParams {
             path: dir.path().display().to_string(),
             name: Some("refresh-trigger".into()),
+            create_if_missing: false,
         })
         .await
         .unwrap();

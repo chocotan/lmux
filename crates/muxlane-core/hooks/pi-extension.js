@@ -1,12 +1,12 @@
-function assistantText(messages: any[]) {
+function assistantText(messages) {
   for (let index = (messages || []).length - 1; index >= 0; index--) {
     const message = messages[index]
     if (message?.role !== "assistant") continue
     if (typeof message.content === "string" && message.content.trim()) return message.content.trim()
     if (Array.isArray(message.content)) {
       const text = message.content
-        .filter((part: any) => part?.type === "text" && typeof part.text === "string")
-        .map((part: any) => part.text)
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text)
         .join("\n")
         .trim()
       if (text) return text
@@ -15,39 +15,52 @@ function assistantText(messages: any[]) {
   return ""
 }
 
-function shortText(value: any, max = 160) {
+function shortText(value, max = 160) {
   if (typeof value !== "string") return ""
   const t = value.replace(/\s+/g, " ").trim()
   return t.length <= max ? t : t.slice(0, max - 1) + "…"
 }
 
-// The subagent extension launches isolated JSON workers with these arguments.
-// They inherit MUXLANE_* from the parent PTY, but must never report as the parent agent.
-const isSubagentProcess = process.argv.includes("--mode")
+// Legacy subprocess agents use JSON mode. Native Agent tasks use a named child session.
+const isLegacySubagentProcess = process.argv.includes("--mode")
   && process.argv.includes("json")
   && process.argv.includes("--no-session")
 
-export default function (pi: any) {
+export function isSubagentSession(ctx) {
+  const header = ctx?.sessionManager?.getHeader?.()
+  const name = ctx?.sessionManager?.getSessionName?.() || ""
+  return Boolean(header?.parentSession) && /#[0-9a-f]{8}$/i.test(name)
+}
+
+export function shouldIgnoreRun(ctx) {
+  return isLegacySubagentProcess || isSubagentSession(ctx)
+}
+
+export default function (pi) {
   let latestAssistant = ""
-  const seenAskUserCalls = new Set<string>()
+  const seenAskUserCalls = new Set()
   let doneReported = false
 
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
+    if (shouldIgnoreRun(ctx)) return
     latestAssistant = ""
     doneReported = false
     seenAskUserCalls.clear()
   })
-  pi.on("turn_start", async () => {
+  pi.on("turn_start", async (_event, ctx) => {
+    if (shouldIgnoreRun(ctx)) return
     doneReported = false
     await report("working", "")
   })
-  pi.on("agent_start", async () => {
+  pi.on("agent_start", async (_event, ctx) => {
+    if (shouldIgnoreRun(ctx)) return
     doneReported = false
     await report("working", "")
   })
 
   // Only the parent Pi run owns muxlane state. Subagent lifecycle events stay local.
-  pi.on("tool_execution_start", async (event: any) => {
+  pi.on("tool_execution_start", async (event, ctx) => {
+    if (shouldIgnoreRun(ctx)) return
     const toolName = event?.toolName || ""
     if (toolName === "ask_user" || toolName === "confirm" || toolName === "prompt_user" || toolName === "user_input") {
       const callId = event?.toolCallId || String(Date.now())
@@ -59,7 +72,8 @@ export default function (pi: any) {
     }
   })
 
-  pi.on("message_end", (event: any) => {
+  pi.on("message_end", (event, ctx) => {
+    if (shouldIgnoreRun(ctx)) return
     const message = event?.message
     if (message?.role === "assistant") {
       const text = typeof message.content === "string" ? message.content : assistantText([message])
@@ -67,7 +81,8 @@ export default function (pi: any) {
     }
   })
 
-  pi.on("agent_end", async (event: any, ctx: any) => {
+  pi.on("agent_end", async (event, ctx) => {
+    if (shouldIgnoreRun(ctx)) return
     const text = assistantText(event?.messages || [])
     if (text) latestAssistant = shortText(text, 180)
     // Pi < 0.80.4 没有 agent_settled；旧版在 agent_end 且没有重试时完成上报。
@@ -83,7 +98,8 @@ export default function (pi: any) {
   })
 
   // 新版 Pi 在所有重试、压缩和排队消息结束后触发；旧版没有此事件。
-  pi.on("agent_settled", async (event: any, ctx: any) => {
+  pi.on("agent_settled", async (event, ctx) => {
+    if (shouldIgnoreRun(ctx)) return
     if (doneReported || (ctx?.isIdle && !ctx.isIdle())) return
     doneReported = true
     let msg = latestAssistant

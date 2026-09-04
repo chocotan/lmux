@@ -53,7 +53,9 @@ impl Language {
 
 const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("common.add", "添加", "Add"),
+    ("common.adding", "添加中…", "Adding…"),
     ("common.cancel", "取消", "Cancel"),
+    ("common.clear", "清空", "Clear"),
     ("common.connect", "连接", "Connect"),
     ("common.disabled", "已关闭", "Disabled"),
     ("common.enabled", "已开启", "Enabled"),
@@ -61,8 +63,8 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("dialog.add_local_project", "添加本地项目", "Add Local Project"),
     (
         "dialog.add_local_project_help",
-        "输入已有项目目录；远程项目由连接机器后自动发现",
-        "Enter an existing project directory. Remote projects are discovered after connecting.",
+        "输入项目目录；目录不存在时可确认创建",
+        "Enter a project directory. You can confirm creation if it does not exist.",
     ),
     (
         "dialog.add_remote_project",
@@ -71,8 +73,8 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "dialog.add_remote_project_help",
-        "输入远端已存在的目录；不会上传或删除项目文件",
-        "Enter an existing remote directory. Project files will not be uploaded or deleted.",
+        "输入远端项目目录；目录不存在且远端支持时可确认创建",
+        "Enter a remote project directory. If supported, you can confirm creation when it is missing.",
     ),
     ("dialog.auth_password", "用户名密码", "Password"),
     ("dialog.auth_public_key", "SSH 公钥", "SSH Key"),
@@ -114,16 +116,6 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "Failed to delete session: {error}",
     ),
     (
-        "error.invalid_local_project",
-        "目录不存在或不是文件夹",
-        "The directory does not exist or is not a folder.",
-    ),
-    (
-        "error.local_project_exists",
-        "这个项目已经存在",
-        "This project already exists.",
-    ),
-    (
         "error.local_project_required",
         "请输入本地项目目录",
         "Enter a local project directory.",
@@ -132,6 +124,11 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "error.password_credentials_required",
         "密码连接需要用户名和密码",
         "A username and password are required.",
+    ),
+    (
+        "error.remote_create_directory_unsupported",
+        "远端版本不支持创建缺失目录，请先更新远端 Muxlane 或手动创建目录",
+        "This remote version cannot create missing directories. Update Muxlane remotely or create the directory manually.",
     ),
     (
         "error.remote_create_session",
@@ -150,8 +147,8 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "error.remote_project_required",
-        "请输入远端已有目录",
-        "Enter an existing remote directory.",
+        "请输入远端项目目录",
+        "Enter a remote project directory.",
     ),
     (
         "error.remote_unavailable_for_delete",
@@ -201,6 +198,14 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "更新远端 Muxlane…",
         "Update Remote Muxlane…",
     ),
+    ("confirm.create_directory_title", "创建目录", "Create Directory"),
+    (
+        "confirm.create_directory_copy",
+        "目录 {path} 不存在。是否递归创建并添加为项目？",
+        "The directory {path} does not exist. Create it recursively and add it as a project?",
+    ),
+    ("confirm.creating", "创建中…", "Creating…"),
+    ("confirm.create", "创建并添加", "Create and Add"),
     (
         "confirm.delete_project_copy",
         "将结束 {count} 个 muxlane tmux 会话。项目文件和用户默认 tmux 不会删除。",
@@ -316,6 +321,18 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("relative.minutes_ago", "{count}分钟前", "{count}m ago"),
     ("relative.seconds_ago", "{count}秒前", "{count}s ago"),
     ("sidebar.connect_remote", "连接远程机器", "Connect to Remote"),
+    ("sidebar.hide", "隐藏侧栏", "Hide Sidebar"),
+    ("sidebar.show", "显示侧栏", "Show Sidebar"),
+    (
+        "sidebar.expand_project",
+        "展开项目目录",
+        "Expand Project Directory",
+    ),
+    (
+        "sidebar.collapse_project",
+        "隐藏项目目录",
+        "Collapse Project Directory",
+    ),
     ("sidebar.notifications", "通知", "Notifications"),
     ("status.auth_failed", "认证失败", "Authentication Failed"),
     ("status.connected", "已连接", "Connected"),
@@ -333,6 +350,65 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("status.remote_ssh_probe", "SSH 探测", "Checking SSH"),
     ("status.remote_subscribe", "订阅状态", "Subscribing"),
     ("status.remote_tunnel", "建立 tunnel", "Opening Tunnel"),
+    ("settings.workspaces", "工作区", "Workspaces"),
+    (
+        "settings.project_workspaces",
+        "一项目一工作区",
+        "One Workspace per Project",
+    ),
+    (
+        "settings.project_workspaces_help",
+        "每个项目独立保存分屏和标签页；关闭后使用共享布局",
+        "Keep panes and tabs separate for each project. Disabled mode uses a shared layout.",
+    ),
+    ("settings.shortcuts", "快捷键", "Shortcuts"),
+    ("settings.shortcuts_restore", "恢复默认", "Restore Defaults"),
+    (
+        "settings.shortcut.close_tab",
+        "关闭当前标签页/会话",
+        "Close Current Tab/Session",
+    ),
+    (
+        "settings.shortcut.previous_workspace",
+        "上一个工作区",
+        "Previous Workspace",
+    ),
+    (
+        "settings.shortcut.next_workspace",
+        "下一个工作区",
+        "Next Workspace",
+    ),
+    (
+        "settings.shortcut.previous_tab",
+        "上一个标签页",
+        "Previous Tab",
+    ),
+    (
+        "settings.shortcut.next_tab",
+        "下一个标签页",
+        "Next Tab",
+    ),
+    (
+        "settings.shortcut_recording",
+        "请按一个组合键",
+        "Press One Shortcut",
+    ),
+    ("settings.shortcut_disabled", "已禁用", "Disabled"),
+    (
+        "settings.shortcut_error_invalid",
+        "该组合键无效",
+        "That shortcut is invalid.",
+    ),
+    (
+        "settings.shortcut_error_multiple",
+        "仅支持单个组合键",
+        "Only one shortcut chord is supported.",
+    ),
+    (
+        "settings.shortcut_error_conflict",
+        "组合键 {shortcut} 已被占用",
+        "Shortcut {shortcut} is already assigned.",
+    ),
     ("settings.interface_theme", "界面主题", "Interface Theme"),
     ("settings.language", "语言", "Language"),
     (

@@ -51,6 +51,84 @@ mod tests {
     }
 
     #[test]
+    fn generated_pi_extension_filters_native_subagents_without_hiding_forks() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let extension = dir.path().join("muxlane.mjs");
+        let runner = dir.path().join("runner.mjs");
+        std::fs::write(&extension, PI_EXTENSION).unwrap();
+        std::fs::write(
+            &runner,
+            r#"import assert from "node:assert/strict"
+import net from "node:net"
+import { pathToFileURL } from "node:url"
+
+let connections = 0
+net.createConnection = () => {
+  connections++
+  const handlers = {}
+  const client = {
+    setTimeout() {},
+    end() {},
+    destroy() {},
+    on(name, callback) {
+      handlers[name] = callback
+      if (name === "close") queueMicrotask(() => {
+        handlers.connect?.()
+        handlers.close?.()
+      })
+      return client
+    },
+  }
+  return client
+}
+process.env.MUXLANE_SOCKET = "/tmp/muxlane-hook-test.sock"
+process.env.MUXLANE_AGENT_ID = "parent"
+process.env.MUXLANE_HOOK_TOKEN = "token"
+
+const extension = await import(pathToFileURL(process.argv[2]).href)
+const context = (parentSession, name) => ({
+  sessionManager: {
+    getHeader: () => ({ parentSession }),
+    getSessionName: () => name,
+  },
+})
+const child = context("parent.jsonl", "worker#76869bf6")
+assert.equal(extension.isSubagentSession(child), true)
+assert.equal(extension.isSubagentSession(context("parent.jsonl", "delegate#0ABEDA48")), true)
+assert.equal(extension.isSubagentSession(context("parent.jsonl", "forked investigation")), false)
+assert.equal(extension.isSubagentSession(context(undefined, "worker#76869bf6")), false)
+
+const handlers = new Map()
+extension.default({ on: (name, callback) => handlers.set(name, callback) })
+assert.equal(handlers.size, 7)
+const event = new Proxy({}, { get() { throw new Error("ignored event was inspected") } })
+for (const callback of handlers.values()) await callback(event, child)
+assert.equal(connections, 0)
+await handlers.get("turn_start")({}, context(undefined, "parent session"))
+assert.equal(connections, 1)
+"#,
+        )
+        .unwrap();
+        let output = std::process::Command::new("node")
+            .arg(&runner)
+            .arg(&extension)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "node behavior test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn installs_opencode_and_pi_plugins_idempotently() {
         let dir = tempfile::tempdir().unwrap();
         install_agent_plugins(dir.path()).unwrap();
@@ -63,8 +141,14 @@ mod tests {
         assert!(opencode.contains("client.session.messages"));
         assert!(pi.contains("agent_settled"));
         assert!(pi.contains("assistantText"));
-        assert!(pi.contains("isSubagentProcess"));
+        assert!(pi.contains("isLegacySubagentProcess"));
         assert!(pi.contains("--no-session"));
+        assert!(pi.contains("isSubagentSession"));
+        assert!(pi.contains("getHeader"));
+        assert!(pi.contains("getSessionName"));
+        assert!(pi.contains("header?.parentSession"));
+        assert!(pi.contains("/#[0-9a-f]{8}$/i"));
+        assert_eq!(pi.matches("if (shouldIgnoreRun(ctx)) return").count(), 7);
     }
 
     #[test]

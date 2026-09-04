@@ -4,10 +4,34 @@ use crate::app::MuxlaneApp;
 use crate::i18n;
 use crate::term_view::TermView;
 use crate::theme::Theme;
+use crate::workspace::ProjectKey;
 use gpui::{AppContext, Context, Entity, Focusable, Window};
-use muxlane_core::model::AgentId;
+use muxlane_core::model::{AgentId, Snapshot};
 use muxlane_term::VTerm;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalLocation {
+    Local,
+    Remote(String),
+}
+
+fn terminal_location(
+    local: &Snapshot,
+    remotes: &HashMap<String, Snapshot>,
+    agent: &AgentId,
+) -> Option<TerminalLocation> {
+    if local.agent(agent).is_some() {
+        return Some(TerminalLocation::Local);
+    }
+    remotes.iter().find_map(|(host, snapshot)| {
+        snapshot
+            .agent(agent)
+            .is_some()
+            .then(|| TerminalLocation::Remote(host.clone()))
+    })
+}
 
 impl MuxlaneApp {
     pub(crate) fn mark_agent_working(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
@@ -103,38 +127,42 @@ impl MuxlaneApp {
         term
     }
 
-    pub(crate) fn open_agent(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
-        if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
-            self.activate_tab(&pane, agent, cx);
-            cx.notify();
-            return;
+    fn ensure_local_terminal(&mut self, agent: &AgentId, cx: &mut Context<Self>) -> bool {
+        if self.terms.contains_key(agent) {
+            return true;
         }
-        if !self.terms.contains_key(agent) {
-            let Some(sess) = self.server.try_session(agent) else {
-                return;
-            };
-            let term = Self::create_local_term(
-                agent.clone(),
-                sess,
-                &self.font_family,
-                Theme::for_mode(self.theme_mode),
-                self.osc52_clipboard_enabled,
-                cx,
-            );
-            self.terms.insert(agent.clone(), term);
-        }
-        let pane = self.active_pane.clone();
-        self.pane_tree.open_tab(&pane, agent.clone());
-        self.activate_tab(&pane, agent, cx);
-        cx.notify();
+        let Some(sess) = self.server.try_session(agent) else {
+            return false;
+        };
+        let term = Self::create_local_term(
+            agent.clone(),
+            sess,
+            &self.font_family,
+            Theme::for_mode(self.theme_mode),
+            self.osc52_clipboard_enabled,
+            cx,
+        );
+        self.terms.insert(agent.clone(), term);
+        true
     }
 
-    pub(crate) fn open_remote_agent(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
-        if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
-            self.activate_tab(&pane, agent, cx);
-            cx.notify();
-            return;
-        }
+    fn target_pane_for_agent(&self, agent: &AgentId) -> muxlane_core::PaneId {
+        self.pane_tree
+            .pane_for_agent(agent)
+            .unwrap_or_else(|| self.active_pane.clone())
+    }
+
+    pub(crate) fn open_agent(
+        &mut self,
+        agent: &AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = self.target_pane_for_agent(agent);
+        self.activate_agent(&pane, agent, window, cx);
+    }
+
+    fn ensure_remote_terminal(&mut self, agent: &AgentId, cx: &mut Context<Self>) -> bool {
         if !self.terms.contains_key(agent) {
             let (vterm, clipboard_rx) = VTerm::new_with_clipboard(120, 32);
             vterm.feed(
@@ -258,9 +286,38 @@ impl MuxlaneApp {
                 });
             }
         }
-        let pane = self.active_pane.clone();
-        self.pane_tree.open_tab(&pane, agent.clone());
-        self.activate_tab(&pane, agent, cx);
+        self.terms.contains_key(agent)
+    }
+
+    pub(crate) fn ensure_agent_terminal(
+        &mut self,
+        agent: &AgentId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match terminal_location(&self.last_snapshot, &self.remote_snaps, agent) {
+            Some(TerminalLocation::Local) => self.ensure_local_terminal(agent, cx),
+            Some(TerminalLocation::Remote(_)) => self.ensure_remote_terminal(agent, cx),
+            None => false,
+        }
+    }
+
+    pub(crate) fn ensure_active_terminal(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.clone() {
+            self.ensure_agent_terminal(&active, cx);
+        }
+    }
+
+    pub(crate) fn activate_agent(
+        &mut self,
+        pane: &muxlane_core::PaneId,
+        agent: &AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab(pane, agent, cx);
+        if self.ensure_agent_terminal(agent, cx) {
+            self.focus_agent(agent, window, cx);
+        }
         cx.notify();
     }
 
@@ -310,16 +367,10 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_remote = self
-            .remote_snaps
-            .values()
-            .any(|snap| snap.agent(agent).is_some());
-        if is_remote {
-            self.open_remote_agent(agent, cx);
-        } else {
-            self.open_agent(agent, cx);
+        if let Some(key) = self.project_key_for_agent(agent) {
+            self.select_project_workspace_inner(key, cx);
         }
-        self.focus_agent(agent, window, cx);
+        self.open_agent(agent, window, cx);
     }
 
     pub(crate) fn delete_session(
@@ -335,26 +386,51 @@ impl MuxlaneApp {
                 .iter()
                 .find(|(_, snap)| snap.agents.iter().any(|a| &a.id == agent))
                 .map(|(host, _)| host.clone());
-            if let Some(host_name) = host_name {
-                if let Some(host) = self
-                    .remotes
+            let remote = host_name.as_ref().and_then(|host_name| {
+                self.remotes
                     .iter()
-                    .find(|host| host.cfg.name == host_name)
+                    .find(|host| host.cfg.name == *host_name)
                     .cloned()
-                {
-                    let id = agent.clone();
-                    self.server.rt_spawn(async move {
-                        let _ = host.delete_agent(&id).await;
-                    });
-                }
-                if let Some(snapshot) = self.remote_snaps.get_mut(&host_name) {
-                    snapshot.agents.retain(|candidate| &candidate.id != agent);
-                    for project in &mut snapshot.projects {
-                        project.agents.retain(|candidate| candidate != agent);
+            });
+            let (Some(host_name), Some(remote)) = (host_name, remote) else {
+                self.notifications.update(cx, |center, cx| {
+                    center.show_error(
+                        i18n::text(self.language, "error.remote_unavailable_for_delete").into(),
+                        cx,
+                    )
+                });
+                cx.notify();
+                return;
+            };
+            let agent = agent.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let agent_for_delete = agent.clone();
+                let result = cx
+                    .background_spawn(async move { remote.delete_agent(&agent_for_delete).await })
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| match result {
+                    Ok(()) => {
+                        if let Some(snapshot) = this.remote_snaps.get_mut(&host_name) {
+                            snapshot.agents.retain(|candidate| candidate.id != agent);
+                            for project in &mut snapshot.projects {
+                                project.agents.retain(|candidate| candidate != &agent);
+                            }
+                        }
+                        this.finish_delete_session(&agent, window, cx);
                     }
-                }
-            }
-            self.finish_delete_session(agent, window, cx);
+                    Err(error) => {
+                        this.notifications.update(cx, |center, cx| {
+                            center.show_error(
+                                i18n::text(this.language, "error.delete_session")
+                                    .replace("{error}", &error.to_string()),
+                                cx,
+                            )
+                        });
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
             return;
         }
 
@@ -410,6 +486,8 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let removed = std::collections::HashSet::from([agent.clone()]);
+        self.workspace.remove_agents(&removed);
         if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
             self.pane_tree.close_tab(&pane, agent);
         }
@@ -427,7 +505,8 @@ impl MuxlaneApp {
         }
         self.session_menu = None;
         if let Some(active) = self.active.clone() {
-            self.focus_agent(&active, window, cx);
+            let pane = self.active_pane.clone();
+            self.activate_agent(&pane, &active, window, cx);
         }
         self.persist();
         cx.notify();
@@ -443,6 +522,7 @@ impl MuxlaneApp {
         }
         self.notifications
             .update(cx, |center, cx| center.remove_agents(&removed, cx));
+        self.workspace.remove_agents(&removed);
         let valid: std::collections::HashSet<_> = self
             .last_snapshot
             .agents
@@ -475,6 +555,7 @@ impl MuxlaneApp {
         if clear_maximized {
             self.maximized_pane = None;
         }
+        self.ensure_active_terminal(cx);
     }
 }
 
@@ -486,28 +567,67 @@ impl MuxlaneApp {
         cx: &mut Context<Self>,
     ) {
         let target = self.new_session_target.take();
-        if let Some(NewSessionTarget::Remote { host, project }) = target.clone() {
-            self.palette_open = false;
-            self.spawn_remote_agent(host, project, Some(preset.clone()), window, cx);
+        let target_key = match target {
+            Some(NewSessionTarget::Remote { host, project }) => {
+                self.palette_open = false;
+                self.spawn_remote_agent(
+                    crate::remotes::RemoteAgentSpawnRequest {
+                        host,
+                        project,
+                        preset: Some(preset.clone()),
+                        preferred_pane: None,
+                        split_axis: None,
+                    },
+                    window,
+                    cx,
+                );
+                return;
+            }
+            Some(NewSessionTarget::Local(project)) => {
+                ProjectKey::new(self.local_machine_id(), project)
+            }
+            None => {
+                self.workspace
+                    .current_project()
+                    .filter(|_| self.workspace.enabled())
+                    .cloned()
+                    .or_else(|| {
+                        self.active
+                            .as_ref()
+                            .and_then(|agent| self.project_key_for_agent(agent))
+                    })
+                    .or_else(|| {
+                        self.last_snapshot.projects.first().map(|project| {
+                            ProjectKey::new(self.local_machine_id(), project.id.clone())
+                        })
+                    })
+                    .unwrap_or_else(|| ProjectKey::new(self.local_machine_id(), String::new()))
+            }
+        };
+        if target_key.project_id.is_empty() {
             return;
         }
-        let target_local_id = match target {
-            Some(NewSessionTarget::Local(id)) => Some(id),
-            _ => None,
+        if target_key.machine_id != self.local_machine_id() {
+            let Some(host) = self.remote_host_for_key(&target_key) else {
+                return;
+            };
+            self.palette_open = false;
+            self.spawn_remote_agent(
+                crate::remotes::RemoteAgentSpawnRequest {
+                    host,
+                    project: target_key.project_id,
+                    preset: Some(preset.clone()),
+                    preferred_pane: None,
+                    split_axis: None,
+                },
+                window,
+                cx,
+            );
+            return;
+        }
+        let Some(project) = self.last_snapshot.project(&target_key.project_id).cloned() else {
+            return;
         };
-        let project = target_local_id
-            .as_ref()
-            .and_then(|id| self.last_snapshot.project(id))
-            .cloned()
-            .or_else(|| {
-                self.active
-                    .as_ref()
-                    .and_then(|id| self.last_snapshot.agent(id))
-                    .and_then(|agent| self.last_snapshot.project(&agent.project))
-                    .cloned()
-            })
-            .or_else(|| self.last_snapshot.projects.first().cloned());
-        let Some(project) = project else { return };
         let params = muxlane_core::protocol::AgentSpawnParams {
             project: project.id.clone(),
             agent_type: Some(preset.agent_type),
@@ -522,8 +642,9 @@ impl MuxlaneApp {
             preset_name: Some(preset.label.clone()),
         };
         let server = Arc::clone(&self.server);
-        let pane = self.active_pane.clone();
-        let project_key = format!("local:{}", project.id);
+        let preferred_pane = self.active_pane.clone();
+        let pane = self.capture_spawn_target(&target_key, Some(&preferred_pane));
+        let collapse_key = format!("local:{}", project.id);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -546,15 +667,11 @@ impl MuxlaneApp {
                         this.osc52_clipboard_enabled,
                         cx,
                     );
-                    this.collapsed_projects.remove(&project_key);
+                    this.collapsed_projects.remove(&collapse_key);
                     this.terms.insert(agent_id.clone(), term);
-                    this.pane_tree.open_tab(&pane, agent_id.clone());
-                    this.activate_tab(&pane, &agent_id, cx);
-                    this.focus_agent(&agent_id, window, cx);
                     this.palette_open = false;
                     this.new_session_target = None;
-                    this.persist();
-                    cx.notify();
+                    this.place_async_agent(&target_key, agent_id, Some(pane), None, window, cx);
                 }
                 Err(error) => {
                     this.notifications.update(cx, |center, cx| {
@@ -569,5 +686,42 @@ impl MuxlaneApp {
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use muxlane_core::model::{AgentInstance, AgentStatus, AgentType};
+
+    fn snapshot_with_agent(id: &str) -> Snapshot {
+        Snapshot {
+            agents: vec![AgentInstance {
+                id: id.into(),
+                project: "project".into(),
+                agent_type: AgentType::Shell,
+                title: "shell".into(),
+                status: AgentStatus::Idle,
+                status_since: 0,
+                seen: true,
+                tmux_session: Some(format!("muxlane-{id}")),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn terminal_location_distinguishes_local_remote_and_missing_agents() {
+        let local = snapshot_with_agent("local-agent");
+        let remotes = HashMap::from([("host".into(), snapshot_with_agent("remote-agent"))]);
+        assert_eq!(
+            terminal_location(&local, &remotes, &"local-agent".into()),
+            Some(TerminalLocation::Local)
+        );
+        assert_eq!(
+            terminal_location(&local, &remotes, &"remote-agent".into()),
+            Some(TerminalLocation::Remote("host".into()))
+        );
+        assert_eq!(terminal_location(&local, &remotes, &"missing".into()), None);
     }
 }

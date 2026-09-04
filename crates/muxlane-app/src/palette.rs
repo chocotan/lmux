@@ -3,8 +3,10 @@ use crate::app::MuxlaneApp;
 use crate::i18n;
 use crate::icons::*;
 use crate::theme::Theme;
+use crate::workspace::ProjectKey;
 use gpui::{
-    div, prelude::*, px, relative, rgba, Context, MouseButton, ParentElement, Styled, Window,
+    div, prelude::*, px, relative, rgba, Context, Focusable, MouseButton, ParentElement, Styled,
+    Window,
 };
 use muxlane_core::SplitAxis;
 
@@ -19,6 +21,11 @@ pub(crate) enum NewSessionTarget {
 
 #[derive(Clone)]
 enum PaletteItem {
+    Project {
+        key: ProjectKey,
+        label: String,
+        path: String,
+    },
     Preset {
         preset: muxlane_core::AgentPreset,
     },
@@ -31,7 +38,81 @@ enum PaletteItem {
 }
 
 impl MuxlaneApp {
+    pub(crate) fn default_palette_project(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<ProjectKey> {
+        self.terms
+            .iter()
+            .find_map(|(agent, term)| {
+                term.focus_handle(cx)
+                    .is_focused(window)
+                    .then(|| self.project_key_for_agent(agent))
+                    .flatten()
+            })
+            .or_else(|| {
+                self.pane_tree
+                    .group(&self.active_pane)
+                    .and_then(|group| group.active.as_ref())
+                    .and_then(|agent| self.project_key_for_agent(agent))
+            })
+            .or_else(|| self.workspace.current_project().cloned())
+            .or_else(|| self.available_project_keys().into_iter().next())
+    }
+
+    fn palette_project_label(&self, key: &ProjectKey) -> Option<(String, String)> {
+        if key.machine_id == self.local_machine_id() {
+            return self
+                .last_snapshot
+                .project(&key.project_id)
+                .map(|project| (project.name.clone(), project.path.display().to_string()));
+        }
+        self.remote_snaps.values().find_map(|snapshot| {
+            snapshot
+                .machine
+                .as_ref()
+                .is_some_and(|machine| machine.machine_id == key.machine_id)
+                .then(|| snapshot.project(&key.project_id))
+                .flatten()
+                .map(|project| (project.name.clone(), project.path.display().to_string()))
+        })
+    }
+
+    pub(crate) fn select_palette_project(&mut self, key: ProjectKey, cx: &mut Context<Self>) {
+        self.palette_project = Some(key.clone());
+        self.new_session_target = if key.machine_id == self.local_machine_id() {
+            Some(NewSessionTarget::Local(key.project_id))
+        } else {
+            self.remote_host_for_key(&key)
+                .map(|host| NewSessionTarget::Remote {
+                    host,
+                    project: key.project_id,
+                })
+        };
+        self.palette_index = 0;
+        self.palette_input.update(cx, |input, cx| input.reset(cx));
+        cx.notify();
+    }
+
     fn palette_project_path(&self) -> Option<std::path::PathBuf> {
+        if let Some(key) = &self.palette_project {
+            if key.machine_id == self.local_machine_id() {
+                return self
+                    .last_snapshot
+                    .project(&key.project_id)
+                    .map(|p| p.path.clone());
+            }
+            return self.remote_snaps.values().find_map(|snapshot| {
+                snapshot
+                    .machine
+                    .as_ref()
+                    .is_some_and(|machine| machine.machine_id == key.machine_id)
+                    .then(|| snapshot.project(&key.project_id))
+                    .flatten()
+                    .map(|project| project.path.clone())
+            });
+        }
         match &self.new_session_target {
             Some(NewSessionTarget::Local(id)) => {
                 self.last_snapshot.project(id).map(|p| p.path.clone())
@@ -70,6 +151,11 @@ impl MuxlaneApp {
     fn compute_palette_items(&self, cx: &Context<Self>) -> Vec<PaletteItem> {
         let query = self.palette_input.read(cx).text().trim().to_lowercase();
         let mut items = Vec::new();
+        for key in self.available_project_keys() {
+            if let Some((label, path)) = self.palette_project_label(&key) {
+                items.push(PaletteItem::Project { key, label, path });
+            }
+        }
 
         if let Some(target) = &self.new_session_target {
             // 新增 Agent 会话模式：仅列出预设 Agent，不混入已有会话跳转与全局操作指令
@@ -160,6 +246,9 @@ impl MuxlaneApp {
             items
                 .into_iter()
                 .filter(|item| match item {
+                    PaletteItem::Project { label, path, .. } => {
+                        format!("{label} {path}").to_lowercase().contains(&query)
+                    }
                     PaletteItem::Preset { preset } => {
                         let text = i18n::text(self.language, "palette.new")
                             .replace("{name}", &format!("{} {}", preset.label, preset.program))
@@ -178,15 +267,20 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.palette_open = false;
-        // 注意：new_session_target 由消费方（spawn_preset 的远程/本地分支）
-        // 自行读取并清除，此处不能提前清空，否则远程会话会回退到本地项目。
         match item {
+            PaletteItem::Project { key, .. } => {
+                self.select_palette_project(key, cx);
+                self.palette_open = true;
+                return;
+            }
             PaletteItem::Preset { preset } => {
+                self.palette_open = false;
                 self.spawn_preset(&preset, window, cx);
             }
             PaletteItem::Action { id, .. } => {
+                self.palette_open = false;
                 self.new_session_target = None;
+                self.palette_project = None;
                 match id {
                     "cmd-split-h" => {
                         let pane = self.active_pane.clone();
@@ -282,6 +376,7 @@ impl MuxlaneApp {
             "escape" => {
                 self.palette_open = false;
                 self.new_session_target = None;
+                self.palette_project = None;
                 if let Some(active) = self.active.clone() {
                     self.focus_agent(&active, window, cx);
                 }
@@ -321,6 +416,44 @@ impl MuxlaneApp {
                 let is_selected = index == current_index;
                 let item_for_click = item.clone();
                 let row = match item {
+                    PaletteItem::Project { key, label, path } => {
+                        let selected = self.palette_project.as_ref() == Some(&key);
+                        let item_for_click = item_for_click.clone();
+                        div()
+                            .id(gpui::ElementId::Name(
+                                format!("pal-project-{}-{}", key.machine_id, key.project_id).into(),
+                            ))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .text_size(px(12.))
+                            .text_color(rgba(theme.fg0))
+                            .when(is_selected, |el| el.bg(rgba(theme.bg2)))
+                            .when(selected, |el| {
+                                el.border_l_2().border_color(rgba(theme.accent))
+                            })
+                            .hover(|s| s.bg(rgba(theme.bg2)))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                if let PaletteItem::Project { key, .. } = item_for_click.clone() {
+                                    this.select_palette_project(key, cx);
+                                }
+                            }))
+                            .child(panel_icon(CONNECT_ICON, theme.accent))
+                            .child(label)
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .max_w(px(260.))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(10.))
+                                    .text_color(rgba(theme.fg2))
+                                    .child(path),
+                            )
+                    }
                     PaletteItem::Preset { preset } => div()
                         .id(gpui::ElementId::Name(
                             format!("pal-preset-{}", preset.id).into(),
@@ -378,7 +511,6 @@ impl MuxlaneApp {
                                     .ml_auto()
                                     .px_1p5()
                                     .py_0p5()
-                                    .rounded_xs()
                                     .border_1()
                                     .border_color(rgba(theme.line))
                                     .text_size(px(9.5))
@@ -429,6 +561,7 @@ impl MuxlaneApp {
                 cx.listener(|this, _ev, window, cx| {
                     this.palette_open = false;
                     this.new_session_target = None;
+                    this.palette_project = None;
                     if let Some(active) = this.active.clone() {
                         this.focus_agent(&active, window, cx);
                     }

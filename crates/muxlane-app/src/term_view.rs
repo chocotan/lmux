@@ -2,16 +2,20 @@
 //! TermView 在 GPUI task 内 drain PTY 输出，chunk 到达即 process + notify。
 use crate::theme::Theme;
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, ClipboardItem, Context,
-    EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
-    Hsla, InputHandler, MouseButton, ParentElement, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, ShapedLine, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
-    Window,
+    canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, ClipboardEntry,
+    ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks,
+    FontFeatures, FontStyle, FontWeight, Hsla, ImageFormat, InputHandler, MouseButton,
+    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, Styled, Task,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use muxlane_core::model::AgentId;
 use muxlane_term::{PtySession, VTerm};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 const FONT_SIZE: f32 = 13.0;
 const TERM_PADDING_X: f32 = 12.0;
@@ -267,6 +271,40 @@ impl Focusable for TermView {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+fn paste_image_path(format: ImageFormat) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        std::path::PathBuf::from(format!(
+            "/tmp/muxlane-paste-{}.{}",
+            muxlane_core::model::new_id("image"),
+            format.extension()
+        ))
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join(format!(
+            "muxlane-paste-{}.{}",
+            muxlane_core::model::new_id("image"),
+            format.extension()
+        ))
+    }
+}
+
+fn write_paste_image(image: &gpui::Image) -> Option<std::path::PathBuf> {
+    let path = paste_image_path(image.format());
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path).ok()?;
+    if file.write_all(image.bytes()).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(path)
 }
 
 impl TermView {
@@ -572,11 +610,24 @@ impl TermView {
     }
 
     fn paste_clipboard(&self, cx: &mut Context<Self>) {
-        let text = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .or_else(|| Self::read_primary(cx))
-            .filter(|text| !text.is_empty());
+        let clipboard = cx.read_from_clipboard();
+        let text = match clipboard {
+            Some(item) => {
+                if let Some(text) = item.text().filter(|text| !text.is_empty()) {
+                    Some(text)
+                } else {
+                    item.entries().iter().find_map(|entry| match entry {
+                        ClipboardEntry::Image(image) => {
+                            write_paste_image(image).map(|path| path.to_string_lossy().into_owned())
+                        }
+                        _ => None,
+                    })
+                }
+            }
+            None => read_system_clipboard_text()
+                .or_else(|| Self::read_primary(cx))
+                .filter(|text| !text.is_empty()),
+        };
         let Some(text) = text else {
             return;
         };
@@ -698,6 +749,49 @@ impl TermView {
     }
 }
 
+fn read_system_clipboard_text() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        return clipboard_command("pbpaste", &[]);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            if let Some(text) =
+                clipboard_command("wl-paste", &["--no-newline", "--type", "text/plain"])
+            {
+                return Some(text);
+            }
+        }
+        return clipboard_command(
+            "xclip",
+            &["-selection", "clipboard", "-o", "-t", "text/plain"],
+        )
+        .or_else(|| clipboard_command("xsel", &["--clipboard", "--output"]));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return clipboard_command("powershell", &["-NoProfile", "-Command", "Get-Clipboard"]);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+fn clipboard_command(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    (!text.is_empty()).then_some(text)
+}
+
 fn wheel_report(
     up: bool,
     col: usize,
@@ -745,7 +839,7 @@ fn mouse_report(
 ) -> Vec<u8> {
     let mut code = if motion {
         32 + button
-    } else if sgr {
+    } else if sgr || pressed {
         button
     } else {
         3
@@ -1180,7 +1274,6 @@ impl Render for TermView {
                                 .top(px(TERM_PADDING_Y))
                                 .w(px(SCROLLBAR_WIDTH))
                                 .h(px(geometry.track_height))
-                                .rounded_sm()
                                 .bg(rgba(term_theme.scrollbar_track()))
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -1217,7 +1310,6 @@ impl Render for TermView {
                                         .top(px(geometry.thumb_top))
                                         .w_full()
                                         .h(px(geometry.thumb_height))
-                                        .rounded_sm()
                                         .bg(rgba(term_theme.scrollbar_thumb())),
                                 ),
                         )
@@ -1245,6 +1337,18 @@ mod tests {
             true,
             &"x".repeat(MAX_OSC52_CLIPBOARD_BYTES + 1)
         ));
+    }
+
+    #[test]
+    fn paste_image_paths_use_format_extensions_and_unique_names() {
+        let png = paste_image_path(ImageFormat::Png);
+        let jpeg = paste_image_path(ImageFormat::Jpeg);
+        let webp = paste_image_path(ImageFormat::Webp);
+        assert!(png.to_string_lossy().ends_with(".png"));
+        assert!(jpeg.to_string_lossy().ends_with(".jpg"));
+        assert!(webp.to_string_lossy().ends_with(".webp"));
+        assert_ne!(png, jpeg);
+        assert_ne!(png, paste_image_path(ImageFormat::Png));
     }
 
     #[test]
@@ -1312,8 +1416,25 @@ mod tests {
             vec![0x1b, b'[', b'M', 64, 34, 35]
         );
         assert_eq!(
+            mouse_report(0, 1, 2, false, true, false, false, false, false),
+            vec![0x1b, b'[', b'M', 32, 34, 35]
+        );
+        assert_eq!(
             mouse_report(0, 1, 2, false, false, false, false, false, false),
             vec![0x1b, b'[', b'M', 35, 34, 35]
         );
+    }
+
+    #[test]
+    fn repeated_click_reports_include_press_release_pairs() {
+        let first = mouse_report(0, 3, 1, false, true, false, false, false, false);
+        let release = mouse_report(0, 3, 1, false, false, false, false, false, false);
+        let second = mouse_report(0, 3, 1, false, true, false, false, false, false);
+        let mut double = first.clone();
+        double.extend_from_slice(&release);
+        double.extend_from_slice(&second);
+        assert_eq!(double.len(), first.len() * 3);
+        assert_eq!(&double[..first.len()], first.as_slice());
+        assert_eq!(&double[first.len()..first.len() * 2], release.as_slice());
     }
 }

@@ -1,9 +1,9 @@
 //! 服务端集成测试：真 UnixListener + 真 PTY + 裸 TCP 客户端模拟
 use muxlane_core::model::{AgentId, AgentInstance, AgentStatus, AgentType, MachineInfo, Project};
 use muxlane_core::protocol::{
-    events, methods, read_frame, write_frame, EventMsg, Request, Response,
+    events, methods, read_frame, write_frame, EventMsg, ProjectAddParams, Request, Response,
 };
-use muxlane_server::{DirtyFlag, MuxlaneServer, ServerState};
+use muxlane_server::{DirtyFlag, MuxlaneServer, ProjectAddError, ServerState};
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -72,6 +72,34 @@ async fn spawn_server() -> (
     panic!("server socket never became ready");
 }
 
+async fn rpc_call(sock: &PathBuf, method: &str, params: serde_json::Value) -> Response {
+    let mut conn = BufReader::new(UnixStream::connect(sock).await.unwrap());
+    write_frame(
+        &mut conn,
+        &Request {
+            id: 1,
+            method: method.into(),
+            params,
+        },
+    )
+    .await
+    .unwrap();
+    loop {
+        let value = read_frame(&mut conn).await.unwrap();
+        if value.get("event").is_none() {
+            return serde_json::from_value(value).unwrap();
+        }
+    }
+}
+
+fn project_params(path: impl Into<String>, create_if_missing: bool) -> ProjectAddParams {
+    ProjectAddParams {
+        path: path.into(),
+        name: None,
+        create_if_missing,
+    }
+}
+
 async fn launch_agent(
     server: &Arc<MuxlaneServer>,
     _state: &Arc<RwLock<ServerState>>,
@@ -123,6 +151,245 @@ async fn local_state_changes_wake_dirty_subscribers() {
         .expect("state change notification timed out")
         .expect("state change channel closed");
     assert_eq!(server.snapshot().await.agents.len(), 1);
+}
+
+#[tokio::test]
+async fn project_add_api_creates_validates_and_deduplicates_paths() {
+    let (server, _sock, state, _dirty, dir) = spawn_server().await;
+
+    let existing = dir.path().join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    let first = server
+        .add_project(project_params(existing.display().to_string(), false))
+        .await
+        .unwrap();
+    assert_eq!(first.path, existing.canonicalize().unwrap());
+
+    let missing = dir.path().join("missing");
+    let error = server
+        .add_project(project_params(missing.display().to_string(), false))
+        .await
+        .unwrap_err();
+    let error = error.downcast_ref::<ProjectAddError>().unwrap();
+    assert_eq!(
+        error.code(),
+        muxlane_core::protocol::error_codes::PATH_NOT_FOUND
+    );
+    assert!(error.to_string().contains("No such file or directory"));
+    assert!(!missing.exists());
+    assert_eq!(state.read().await.projects.len(), 1);
+
+    let nested = dir.path().join("new/parent/project");
+    let created = server
+        .add_project(project_params(nested.display().to_string(), true))
+        .await
+        .unwrap();
+    assert!(nested.is_dir());
+    assert_eq!(created.path, nested.canonicalize().unwrap());
+
+    let file = dir.path().join("project-file");
+    std::fs::write(&file, "not a directory").unwrap();
+    let error = server
+        .add_project(project_params(file.display().to_string(), false))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<ProjectAddError>().unwrap().code(),
+        muxlane_core::protocol::error_codes::NOT_A_DIRECTORY
+    );
+
+    let child_of_file = file.join("child");
+    let error = server
+        .add_project(project_params(child_of_file.display().to_string(), true))
+        .await
+        .unwrap_err();
+    let error = error.downcast_ref::<ProjectAddError>().unwrap();
+    assert_eq!(
+        error.code(),
+        muxlane_core::protocol::error_codes::CREATE_DIRECTORY_FAILED
+    );
+    assert!(error.to_string().contains("Not a directory"));
+    assert!(!child_of_file.exists());
+
+    let error = server
+        .add_project(project_params("~another-user/project", false))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<ProjectAddError>().unwrap().code(),
+        muxlane_core::protocol::error_codes::INVALID_PATH
+    );
+
+    let canonical = dir.path().join("concurrent");
+    std::fs::create_dir(&canonical).unwrap();
+    let alias = canonical.join(".");
+    let (left, right) = tokio::join!(
+        server.add_project(project_params(canonical.display().to_string(), false)),
+        server.add_project(project_params(alias.display().to_string(), false)),
+    );
+    let left = left.unwrap();
+    let right = right.unwrap();
+    assert_eq!(left.id, right.id);
+    assert_eq!(
+        state
+            .read()
+            .await
+            .projects
+            .iter()
+            .filter(|project| project.path == canonical.canonicalize().unwrap())
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn immediate_persistence_tracks_project_agent_and_supervisor_removal() {
+    let (server, _sock, _state, _dirty, dir) = spawn_server().await;
+    let store_path = dir.path().join("state.json");
+    server.set_persistence_path(store_path.clone());
+
+    let project_dir = dir.path().join("persisted-project");
+    std::fs::create_dir(&project_dir).unwrap();
+    let project = server
+        .add_project(project_params(project_dir.display().to_string(), false))
+        .await
+        .unwrap();
+    assert_eq!(muxlane_store::load(&store_path).unwrap().projects.len(), 1);
+
+    let live = server
+        .spawn_agent(muxlane_core::protocol::AgentSpawnParams {
+            project: project.id.clone(),
+            agent_type: Some(AgentType::Shell),
+            program: Some("bash".into()),
+            args: Some(vec!["-c".into(), "sleep 30".into()]),
+            env: None,
+            preset_name: None,
+        })
+        .await
+        .unwrap();
+    let live_tmux = live.tmux_session.clone().unwrap();
+    let _live_cleanup = KillTmuxSessionOnDrop(live_tmux.clone());
+    for _ in 0..100 {
+        if tmux_session_exists(&live_tmux) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(muxlane_store::load(&store_path).unwrap().sessions.len(), 1);
+
+    let deleted = server.delete_agent(&live.id).await.unwrap();
+    assert!(deleted.failed_agents.is_empty());
+    assert!(muxlane_store::load(&store_path)
+        .unwrap()
+        .sessions
+        .is_empty());
+
+    let exited = server
+        .spawn_agent(muxlane_core::protocol::AgentSpawnParams {
+            project: project.id.clone(),
+            agent_type: Some(AgentType::Shell),
+            program: Some("bash".into()),
+            args: Some(vec!["-c".into(), "exit 0".into()]),
+            env: None,
+            preset_name: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(muxlane_store::load(&store_path).unwrap().sessions.len(), 1);
+    for _ in 0..100 {
+        server.maintain_sessions().await;
+        if !server
+            .snapshot()
+            .await
+            .agents
+            .iter()
+            .any(|agent| agent.id == exited.id)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        !server
+            .snapshot()
+            .await
+            .agents
+            .iter()
+            .any(|agent| agent.id == exited.id),
+        "supervisor did not remove the exited session"
+    );
+    assert!(muxlane_store::load(&store_path)
+        .unwrap()
+        .sessions
+        .is_empty());
+
+    let deleted = server.delete_project(&project.id).await.unwrap();
+    assert!(deleted.failed_agents.is_empty());
+    assert!(muxlane_store::load(&store_path)
+        .unwrap()
+        .projects
+        .is_empty());
+}
+
+#[tokio::test]
+async fn project_add_rpc_advertises_and_enforces_create_capability() {
+    let (_server, sock, state, _dirty, dir) = spawn_server().await;
+
+    let hello = rpc_call(&sock, methods::SYSTEM_HELLO, serde_json::json!({})).await;
+    let hello: muxlane_core::protocol::HelloResult =
+        serde_json::from_value(hello.result.unwrap()).unwrap();
+    assert!(hello
+        .features
+        .iter()
+        .any(|feature| feature == muxlane_core::protocol::features::PROJECT_CREATE));
+
+    let missing = dir.path().join("rpc-missing");
+    let response = rpc_call(
+        &sock,
+        methods::PROJECT_ADD,
+        serde_json::json!({"path": missing}),
+    )
+    .await;
+    assert_eq!(
+        response.error.unwrap().code,
+        muxlane_core::protocol::error_codes::PATH_NOT_FOUND
+    );
+    assert!(!missing.exists());
+    assert!(state.read().await.projects.is_empty());
+
+    let nested = dir.path().join("rpc/new/nested");
+    let response = rpc_call(
+        &sock,
+        methods::PROJECT_ADD,
+        serde_json::json!({"path": nested, "create_if_missing": true}),
+    )
+    .await;
+    let project: Project = serde_json::from_value(response.result.unwrap()).unwrap();
+    assert_eq!(project.path, nested.canonicalize().unwrap());
+    assert!(nested.is_dir());
+
+    let file = dir.path().join("rpc-file");
+    std::fs::write(&file, "not a directory").unwrap();
+    let response = rpc_call(
+        &sock,
+        methods::PROJECT_ADD,
+        serde_json::json!({"path": file, "create_if_missing": true}),
+    )
+    .await;
+    assert_eq!(
+        response.error.unwrap().code,
+        muxlane_core::protocol::error_codes::NOT_A_DIRECTORY
+    );
+
+    let duplicate = rpc_call(
+        &sock,
+        methods::PROJECT_ADD,
+        serde_json::json!({"path": nested, "create_if_missing": false}),
+    )
+    .await;
+    let duplicate: Project = serde_json::from_value(duplicate.result.unwrap()).unwrap();
+    assert_eq!(project.id, duplicate.id);
+    assert_eq!(state.read().await.projects.len(), 1);
 }
 
 #[tokio::test]
@@ -589,4 +856,134 @@ async fn agent_delete_kills_and_cleans_state() {
         .unwrap()
         .unwrap();
     assert_eq!(ev["event"], muxlane_core::protocol::events::STATE_CHANGED);
+}
+
+/// 无 Tokio 上下文的极简 block_on（noop waker + 有界轮询）。
+/// 模拟 app 侧 GPUI background executor 线程：future 可正常驱动，
+/// 但线程本地没有 Tokio runtime（Handle::current() 会 panic）。
+fn block_on_detached<F: std::future::Future>(fut: F) -> F::Output {
+    use std::task::{Context, Poll, Waker};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut fut = std::pin::pin!(fut);
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "detached future timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+fn tmux_session_exists(name: &str) -> bool {
+    std::process::Command::new("tmux")
+        .args(["-L", "muxlane", "has-session", "-t", &format!("={name}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+struct KillTmuxSessionOnDrop(String);
+
+impl Drop for KillTmuxSessionOnDrop {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("tmux")
+            .args(["-L", "muxlane", "kill-session", "-t"])
+            .arg(format!("={}", self.0))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// 回归：app 在 GPUI background executor（非 Tokio 线程）里直接调用
+/// spawn_agent / delete_agent，内部必须用 server 持有的 runtime handle，
+/// 不能 tokio::task::spawn_blocking（依赖 Handle::current()，进程直接 abort）。
+#[test]
+fn spawn_and_delete_agent_from_non_tokio_thread() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (server, state) = rt.block_on(async {
+        let state = Arc::new(RwLock::new(ServerState::new(MachineInfo {
+            machine_id: "m_test".into(),
+            name: "test-box".into(),
+            os: "linux".into(),
+            version: "0.1.0".into(),
+        })));
+        state.write().await.add_project(Project {
+            id: "p_test".into(),
+            name: "testproj".into(),
+            path: "/tmp/testproj".into(),
+            branch: None,
+            agents: vec![],
+        });
+        (
+            MuxlaneServer::new(
+                dir.path().join("muxlane.sock"),
+                Arc::clone(&state),
+                DirtyFlag::new(),
+            ),
+            state,
+        )
+    });
+
+    // 在全新的 std 线程（保证无线程本地 runtime）上驱动 spawn_agent
+    let srv = Arc::clone(&server);
+    let spawned = std::thread::spawn(move || {
+        block_on_detached(async move {
+            srv.spawn_agent(muxlane_core::protocol::AgentSpawnParams {
+                project: "p_test".into(),
+                agent_type: Some(AgentType::Shell),
+                program: Some("bash".into()),
+                args: Some(vec!["-c".into(), "sleep 30".into()]),
+                env: None,
+                preset_name: None,
+            })
+            .await
+        })
+    })
+    .join()
+    .expect("caller thread panicked")
+    .expect("spawn_agent failed");
+    let agent = spawned.id.clone();
+    let tmux_name = spawned.tmux_session.clone().expect("tmux session name");
+    assert!(!tmux_name.is_empty());
+    let _tmux_cleanup = KillTmuxSessionOnDrop(tmux_name.clone());
+
+    // `new-session -A` 客户端是异步建立的：等 tmux server 真正建好 session，
+    // 否则 kill-session 会抢在创建之前（真实 app 里用户不可能这么快删除）。
+    rt.block_on(async {
+        for _ in 0..100 {
+            if tmux_session_exists(&tmux_name) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("tmux session never appeared");
+    });
+
+    // 同一线程模型驱动 delete_agent（destroy_sessions 内部也走 spawn_blocking）
+    let srv = Arc::clone(&server);
+    let id = agent.clone();
+    let deleted =
+        std::thread::spawn(move || block_on_detached(async move { srv.delete_agent(&id).await }))
+            .join()
+            .expect("caller thread panicked")
+            .expect("delete_agent failed");
+    assert!(deleted.failed_agents.is_empty());
+
+    rt.block_on(async {
+        assert!(server.session(&agent).await.is_none());
+        assert!(!state.read().await.agents.iter().any(|a| a.id == agent));
+    });
+    assert!(!tmux_session_exists(&tmux_name));
 }
