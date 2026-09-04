@@ -62,10 +62,10 @@ fn main() {
     let mut persisted = match muxlane_store::load(&store_path) {
         Ok(state) => state,
         Err(error) => {
-            eprintln!(
-                "muxlane: 无法读取状态文件 {}: {error}\n为避免覆盖原数据，启动已中止。",
-                store_path.display()
-            );
+            let message = i18n::text(i18n::Language::detect(), "main.state_load_failed")
+                .replace("{path}", &store_path.display().to_string())
+                .replace("{error}", &error.to_string());
+            eprintln!("{message}");
             std::process::exit(2);
         }
     };

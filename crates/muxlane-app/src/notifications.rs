@@ -113,7 +113,7 @@ impl NotificationCenter {
     }
 
     pub(crate) fn push_notification(&mut self, draft: NotificationDraft, cx: &mut Context<Self>) {
-        let body = effective_notification_body(draft.to, draft.message);
+        let body = effective_notification_body(draft.to, draft.message, self.language);
         let now_secs = muxlane_core::model::now_secs();
 
         if draft.from == draft.to {
@@ -152,12 +152,12 @@ impl NotificationCenter {
         }
 
         let toast_title = match draft.to {
-            AgentStatus::Blocked => {
-                format!("{} · {} 等待输入", draft.machine_name, draft.project_name)
-            }
-            AgentStatus::Done => {
-                format!("{} · {} 任务完成", draft.machine_name, draft.project_name)
-            }
+            AgentStatus::Blocked => i18n::text(self.language, "notification.title_input")
+                .replace("{machine}", &draft.machine_name)
+                .replace("{project}", &draft.project_name),
+            AgentStatus::Done => i18n::text(self.language, "notification.title_done")
+                .replace("{machine}", &draft.machine_name)
+                .replace("{project}", &draft.project_name),
             _ => format!("{} · {}", draft.machine_name, draft.project_name),
         };
 
@@ -322,8 +322,7 @@ impl NotificationCenter {
                                             .text_color(rgba(theme.fg0))
                                             .child(i18n::text(
                                                 self.language,
-                                                "通知中心",
-                                                "Notifications",
+                                                "notification.center",
                                             )),
                                     )
                                     .when(unread_count > 0, |header| {
@@ -362,7 +361,10 @@ impl NotificationCenter {
                                                 .on_click(cx.listener(|this, _ev, _window, cx| {
                                                     this.clear(cx)
                                                 }))
-                                                .child(i18n::text(self.language, "清空", "Clear")),
+                                                .child(i18n::text(
+                                                    self.language,
+                                                    "notification.clear",
+                                                )),
                                         )
                                     })
                                     .child(
@@ -402,8 +404,7 @@ impl NotificationCenter {
                                                 .text_color(rgba(theme.fg2))
                                                 .child(i18n::text(
                                                     self.language,
-                                                    "暂无通知",
-                                                    "No notifications",
+                                                    "notification.empty",
                                                 )),
                                         ),
                                 )
@@ -417,15 +418,15 @@ impl NotificationCenter {
                                 };
                                 let status_text = match n.to {
                                     AgentStatus::Blocked => {
-                                        i18n::text(self.language, "等待输入", "Input required")
+                                        i18n::text(self.language, "status.input_required")
                                     }
                                     AgentStatus::Done => {
-                                        i18n::text(self.language, "任务完成", "Task completed")
+                                        i18n::text(self.language, "status.task_completed")
                                     }
                                     AgentStatus::Working => {
-                                        i18n::text(self.language, "执行中", "Working")
+                                        i18n::text(self.language, "status.working")
                                     }
-                                    _ => i18n::text(self.language, "空闲", "Idle"),
+                                    _ => i18n::text(self.language, "status.idle"),
                                 };
                                 let agent_id = n.agent.clone();
                                 let is_unread = n.unread;
@@ -619,7 +620,7 @@ impl Render for NotificationCenter {
                                     .mt_1()
                                     .text_size(px(9.5))
                                     .text_color(rgba(theme.fg2))
-                                    .child("点击直达终端"),
+                                    .child(i18n::text(self.language, "notification.click_to_open")),
                             )
                     })),
             );
@@ -650,7 +651,11 @@ impl Render for NotificationCenter {
     }
 }
 
-fn effective_notification_body(status: AgentStatus, message: Option<String>) -> String {
+fn effective_notification_body(
+    status: AgentStatus,
+    message: Option<String>,
+    language: Language,
+) -> String {
     let normalized = message
         .unwrap_or_default()
         .split_whitespace()
@@ -658,8 +663,8 @@ fn effective_notification_body(status: AgentStatus, message: Option<String>) -> 
         .join(" ");
     if normalized.is_empty() {
         return match status {
-            AgentStatus::Blocked => "等待输入".into(),
-            AgentStatus::Done => "任务已完成".into(),
+            AgentStatus::Blocked => i18n::text(language, "status.input_required").into(),
+            AgentStatus::Done => i18n::text(language, "status.task_completed_body").into(),
             _ => status.as_str().into(),
         };
     }
@@ -681,17 +686,18 @@ mod tests {
         assert_eq!(
             effective_notification_body(
                 AgentStatus::Done,
-                Some("  完成了修复\n并通过测试  ".into()),
+                Some("  Fixed the issue\nand passed tests  ".into()),
+                Language::English,
             ),
-            "完成了修复 并通过测试"
+            "Fixed the issue and passed tests"
         );
         assert_eq!(
-            effective_notification_body(AgentStatus::Done, Some("  ".into())),
-            "任务已完成"
+            effective_notification_body(AgentStatus::Done, Some("  ".into()), Language::Chinese),
+            i18n::text(Language::Chinese, "status.task_completed_body")
         );
         assert_eq!(
-            effective_notification_body(AgentStatus::Blocked, None),
-            "等待输入"
+            effective_notification_body(AgentStatus::Blocked, None, Language::English),
+            i18n::text(Language::English, "status.input_required")
         );
     }
 }

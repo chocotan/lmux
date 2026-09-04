@@ -290,8 +290,7 @@ impl MuxlaneApp {
                         .active(|s| s.bg(rgba(theme.bg3)))
                         .tooltip(hover_tip(i18n::text(
                             self.language,
-                            "连接远程机器",
-                            "Connect remote machine",
+                            "sidebar.connect_remote",
                         )))
                         .on_click(cx.listener(|this, _ev, window, cx| {
                             this.open_connect_dialog(window, cx);
@@ -381,30 +380,59 @@ impl MuxlaneApp {
             let (dot_color, status_text, remediation) = match self.remote_states.get(&name) {
                 Some(muxlane_client::RemoteState::Online(_)) => {
                     if self.remote_snaps.contains_key(&name) {
-                        (theme.green, "已连接", None)
+                        (
+                            theme.green,
+                            i18n::text(self.language, "status.connected"),
+                            None,
+                        )
                     } else {
-                        (theme.fg1, "连接中", None)
+                        (
+                            theme.fg1,
+                            i18n::text(self.language, "status.connecting"),
+                            None,
+                        )
                     }
                 }
-                Some(muxlane_client::RemoteState::NeedsInstall { .. }) => {
-                    (theme.yellow, "未安装", Some((true, false, None)))
-                }
+                Some(muxlane_client::RemoteState::NeedsInstall { .. }) => (
+                    theme.yellow,
+                    i18n::text(self.language, "status.needs_install"),
+                    Some((true, false, None)),
+                ),
                 Some(muxlane_client::RemoteState::NeedsStart { binary, .. }) => (
                     theme.yellow,
-                    "未启动",
+                    i18n::text(self.language, "status.needs_start"),
                     Some((false, false, Some(binary.clone()))),
                 ),
-                Some(muxlane_client::RemoteState::NeedsUpgrade { .. }) => {
-                    (theme.yellow, "需要更新", Some((false, true, None)))
+                Some(muxlane_client::RemoteState::NeedsUpgrade { .. }) => (
+                    theme.yellow,
+                    i18n::text(self.language, "status.needs_update"),
+                    Some((false, true, None)),
+                ),
+                Some(muxlane_client::RemoteState::AuthenticationFailed(_)) => (
+                    theme.red,
+                    i18n::text(self.language, "status.auth_failed"),
+                    None,
+                ),
+                Some(muxlane_client::RemoteState::Connecting(stage)) => (
+                    theme.yellow,
+                    i18n::text(
+                        self.language,
+                        match stage {
+                            muxlane_client::RemoteStage::SshProbe => "status.remote_ssh_probe",
+                            muxlane_client::RemoteStage::Tunnel => "status.remote_tunnel",
+                            muxlane_client::RemoteStage::Subscribe => "status.remote_subscribe",
+                        },
+                    ),
+                    None,
+                ),
+                Some(muxlane_client::RemoteState::Offline(_)) => {
+                    (theme.fg1, i18n::text(self.language, "status.offline"), None)
                 }
-                Some(muxlane_client::RemoteState::AuthenticationFailed(_)) => {
-                    (theme.red, "认证失败", None)
-                }
-                Some(muxlane_client::RemoteState::Connecting(stage)) => {
-                    (theme.yellow, stage.label(), None)
-                }
-                Some(muxlane_client::RemoteState::Offline(_)) => (theme.fg1, "离线", None),
-                _ => (theme.fg1, "连接中", None),
+                _ => (
+                    theme.fg1,
+                    i18n::text(self.language, "status.connecting"),
+                    None,
+                ),
             };
             let reconnectable = !matches!(
                 self.remote_states.get(&name),
@@ -416,12 +444,12 @@ impl MuxlaneApp {
             ) {
                 host.latency_ms()
                     .map(|latency| format!("{latency} ms"))
-                    .unwrap_or_else(|| "已连接".into())
+                    .unwrap_or_else(|| i18n::text(self.language, "status.connected").into())
             } else if matches!(
                 self.remote_states.get(&name),
                 Some(muxlane_client::RemoteState::Offline(_))
             ) {
-                "已断开".into()
+                i18n::text(self.language, "status.disconnected").into()
             } else {
                 status_text.to_string()
             };
@@ -650,11 +678,11 @@ impl MuxlaneApp {
                                     }
                                 }))
                                 .child(if install {
-                                    "安装…"
+                                    i18n::text(self.language, "bootstrap.install")
                                 } else if upgrade {
-                                    "更新…"
+                                    i18n::text(self.language, "bootstrap.update")
                                 } else {
-                                    "启动…"
+                                    i18n::text(self.language, "bootstrap.start")
                                 }),
                         )
                     }),
@@ -662,7 +690,7 @@ impl MuxlaneApp {
             // 进度条
             if let Some(progress) = self.bootstrap_progress.get(&name) {
                 let overall = progress.phase.overall(progress.percent);
-                let phase_text = format_upload_phase(progress);
+                let phase_text = format_upload_phase(progress, self.language);
                 let host_to_cancel = name.clone();
                 rnode = rnode.child(
                     div()
@@ -767,8 +795,7 @@ impl MuxlaneApp {
                     .active(|s| s.bg(rgba(theme.bg3)))
                     .tooltip(hover_tip(i18n::text(
                         self.language,
-                        "通知",
-                        "Notifications",
+                        "sidebar.notifications",
                     )))
                     .when(unread_count > 0, |el| {
                         el.bg(rgba(Theme::with_alpha(badge_color, 0x18)))
@@ -825,7 +852,7 @@ impl MuxlaneApp {
                     .hover(|s| s.bg(rgba(theme.bg2)))
                     .active(|s| s.bg(rgba(theme.bg3)))
                     .when(self.settings_open, |el| el.bg(rgba(theme.bg2)))
-                    .tooltip(hover_tip(i18n::text(self.language, "设置", "Settings")))
+                    .tooltip(hover_tip(i18n::text(self.language, "common.settings")))
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         this.settings_open = true;
                         this.palette_open = false;

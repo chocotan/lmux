@@ -1,5 +1,6 @@
 //! Pane tree, tab navigation, split layout, and divider drag handling.
 use crate::app::MuxlaneApp;
+use crate::i18n;
 use crate::icons::*;
 use crate::theme::Theme;
 use crate::widgets::*;
@@ -235,7 +236,11 @@ impl MuxlaneApp {
                 }
                 Err(error) => {
                     this.notifications.update(cx, |center, cx| {
-                        center.show_error(format!("创建 Shell 失败：{error}"), cx)
+                        center.show_error(
+                            i18n::text(this.language, "error.create_shell")
+                                .replace("{error}", &error.to_string()),
+                            cx,
+                        )
                     });
                     cx.notify();
                 }
@@ -859,7 +864,7 @@ impl MuxlaneApp {
                             .items_center()
                             .justify_center()
                             .text_color(rgba(theme.fg2))
-                            .child("从左侧选择 agent 打开 tab"),
+                            .child(i18n::text(self.language, "pane.select_agent")),
                     );
                 }
                 pane.into_any_element()

@@ -1,5 +1,6 @@
 //! Connection, local project, and remote project dialogs.
 use crate::app::MuxlaneApp;
+use crate::i18n;
 use crate::theme::Theme;
 use gpui::{
     div, prelude::*, px, rgba, Context, Focusable, MouseButton, ParentElement, Styled, Window,
@@ -92,12 +93,14 @@ impl MuxlaneApp {
     fn add_local_project(&mut self, raw_path: String, cx: &mut Context<Self>) {
         let raw_path = raw_path.trim();
         if raw_path.is_empty() {
-            self.dialog_error = Some("请输入本地项目目录".into());
+            self.dialog_error =
+                Some(i18n::text(self.language, "error.local_project_required").into());
             cx.notify();
             return;
         }
         let Some(path) = resolve_local_project_path(raw_path) else {
-            self.dialog_error = Some("目录不存在或不是文件夹".into());
+            self.dialog_error =
+                Some(i18n::text(self.language, "error.invalid_local_project").into());
             cx.notify();
             return;
         };
@@ -107,7 +110,8 @@ impl MuxlaneApp {
             .iter()
             .any(|project| project.path == path)
         {
-            self.dialog_error = Some("这个项目已经存在".into());
+            self.dialog_error =
+                Some(i18n::text(self.language, "error.local_project_exists").into());
             cx.notify();
             return;
         }
@@ -211,7 +215,7 @@ impl MuxlaneApp {
                             .border_color(rgba(theme.line))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg0))
-                            .child("连接远程机器"),
+                            .child(i18n::text(self.language, "dialog.connect_remote")),
                     )
                     .child(
                         div()
@@ -219,7 +223,7 @@ impl MuxlaneApp {
                             .pt_3()
                             .text_size(px(11.))
                             .text_color(rgba(theme.fg1))
-                            .child("输入 SSH Host 或 ~/.ssh/config 别名；socket 自动发现"),
+                            .child(i18n::text(self.language, "dialog.connect_remote_help")),
                     )
                     .child(div().mx_4().mt_3().child(input))
                     .child(
@@ -247,7 +251,7 @@ impl MuxlaneApp {
                                         this.connect_auth_mode = ConnectAuthMode::SshConfig;
                                         cx.notify();
                                     }))
-                                    .child("SSH 配置"),
+                                    .child(i18n::text(self.language, "dialog.auth_ssh_config")),
                             )
                             .child(
                                 div()
@@ -265,7 +269,7 @@ impl MuxlaneApp {
                                         this.connect_auth_mode = ConnectAuthMode::PublicKey;
                                         cx.notify();
                                     }))
-                                    .child("SSH 公钥"),
+                                    .child(i18n::text(self.language, "dialog.auth_public_key")),
                             )
                             .child(
                                 div()
@@ -283,7 +287,7 @@ impl MuxlaneApp {
                                         this.connect_auth_mode = ConnectAuthMode::Password;
                                         cx.notify();
                                     }))
-                                    .child("用户名密码"),
+                                    .child(i18n::text(self.language, "dialog.auth_password")),
                             ),
                     )
                     .when(auth_mode == ConnectAuthMode::PublicKey, |dialog| {
@@ -326,7 +330,7 @@ impl MuxlaneApp {
                                         this.dialog_error = None;
                                         cx.notify();
                                     }))
-                                    .child("取消"),
+                                    .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child(
                                 div()
@@ -340,7 +344,7 @@ impl MuxlaneApp {
                                         let target = this.connect_input.read(cx).text();
                                         this.add_remote_target(target, cx);
                                     }))
-                                    .child("连接"),
+                                    .child(i18n::text(self.language, "common.connect")),
                             ),
                     ),
             )
@@ -416,7 +420,10 @@ impl MuxlaneApp {
                             .border_color(rgba(theme.line))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg0))
-                            .child(format!("在 {host} 添加项目")),
+                            .child(
+                                i18n::text(self.language, "dialog.add_remote_project")
+                                    .replace("{host}", &host),
+                            ),
                     )
                     .child(
                         div()
@@ -424,7 +431,7 @@ impl MuxlaneApp {
                             .pt_3()
                             .text_size(px(11.))
                             .text_color(rgba(theme.fg1))
-                            .child("输入远端已存在的目录；不会上传或删除项目文件"),
+                            .child(i18n::text(self.language, "dialog.add_remote_project_help")),
                     )
                     .child(div().mx_4().mt_3().child(input))
                     .when_some(self.dialog_error.clone(), |dialog, error| {
@@ -457,7 +464,7 @@ impl MuxlaneApp {
                                         this.dialog_error = None;
                                         cx.notify();
                                     }))
-                                    .child("取消"),
+                                    .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child(
                                 div()
@@ -473,7 +480,7 @@ impl MuxlaneApp {
                                             this.submit_remote_project(host, path, cx);
                                         }
                                     }))
-                                    .child("添加"),
+                                    .child(i18n::text(self.language, "common.add")),
                             ),
                     ),
             )
@@ -530,7 +537,7 @@ impl MuxlaneApp {
                             .border_color(rgba(theme.line))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg0))
-                            .child("添加本地项目"),
+                            .child(i18n::text(self.language, "dialog.add_local_project")),
                     )
                     .child(
                         div()
@@ -538,7 +545,7 @@ impl MuxlaneApp {
                             .pt_3()
                             .text_size(px(11.))
                             .text_color(rgba(theme.fg1))
-                            .child("输入已有项目目录；远程项目由连接机器后自动发现"),
+                            .child(i18n::text(self.language, "dialog.add_local_project_help")),
                     )
                     .child(div().mx_4().mt_3().child(input))
                     .when_some(error, |dialog, error| {
@@ -571,7 +578,7 @@ impl MuxlaneApp {
                                         this.dialog_error = None;
                                         cx.notify();
                                     }))
-                                    .child("取消"),
+                                    .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child(
                                 div()
@@ -585,7 +592,7 @@ impl MuxlaneApp {
                                         let path = this.project_input.read(cx).text();
                                         this.add_local_project(path, cx);
                                     }))
-                                    .child("添加"),
+                                    .child(i18n::text(self.language, "common.add")),
                             ),
                     ),
             )

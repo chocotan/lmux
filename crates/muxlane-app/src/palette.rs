@@ -1,5 +1,6 @@
 //! Command palette item discovery, keyboard handling, execution, and rendering.
 use crate::app::MuxlaneApp;
+use crate::i18n;
 use crate::icons::*;
 use crate::theme::Theme;
 use gpui::{
@@ -105,49 +106,49 @@ impl MuxlaneApp {
             // 3. 操作指令
             items.push(PaletteItem::Action {
                 id: "cmd-split-h",
-                label: "水平分屏",
+                label: i18n::text(self.language, "palette.horizontal_split"),
                 shortcut: Some("h"),
                 icon: SPLIT_HORIZONTAL_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-split-v",
-                label: "垂直分屏",
+                label: i18n::text(self.language, "palette.vertical_split"),
                 shortcut: Some("v"),
                 icon: SPLIT_VERTICAL_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-max",
-                label: "最大化 / 还原当前面板",
+                label: i18n::text(self.language, "palette.maximize"),
                 shortcut: Some("m"),
                 icon: MAXIMIZE_ICON,
             });
             if self.pane_tree.leaf_count() > 1 {
                 items.push(PaletteItem::Action {
                     id: "cmd-close-pane",
-                    label: "关闭当前分屏",
+                    label: i18n::text(self.language, "palette.close_split"),
                     shortcut: Some("x"),
                     icon: CLOSE_ICON,
                 });
             }
             items.push(PaletteItem::Action {
                 id: "cmd-connect",
-                label: "连接远程开发机…",
+                label: i18n::text(self.language, "palette.connect_remote"),
                 shortcut: None,
                 icon: CONNECT_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-toggle-theme",
                 label: if self.theme_mode.is_dark() {
-                    "切换为浅色模式"
+                    i18n::text(self.language, "palette.toggle_light")
                 } else {
-                    "切换为深色模式"
+                    i18n::text(self.language, "palette.toggle_dark")
                 },
                 shortcut: None,
                 icon: THEME_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-clear-notifs",
-                label: "清空所有通知",
+                label: i18n::text(self.language, "palette.clear_notifications"),
                 shortcut: None,
                 icon: NOTIFICATION_ICON,
             });
@@ -160,8 +161,9 @@ impl MuxlaneApp {
                 .into_iter()
                 .filter(|item| match item {
                     PaletteItem::Preset { preset } => {
-                        let text =
-                            format!("新建 {} {}", preset.label, preset.program).to_lowercase();
+                        let text = i18n::text(self.language, "palette.new")
+                            .replace("{name}", &format!("{} {}", preset.label, preset.program))
+                            .to_lowercase();
                         text.contains(&query)
                     }
                     PaletteItem::Action { label, .. } => label.to_lowercase().contains(&query),
@@ -312,7 +314,7 @@ impl MuxlaneApp {
                     .py_6()
                     .text_size(px(12.))
                     .text_color(rgba(theme.fg2))
-                    .child("无匹配结果"),
+                    .child(i18n::text(self.language, "palette.no_results")),
             );
         } else {
             for (index, item) in items.into_iter().enumerate() {
@@ -337,7 +339,10 @@ impl MuxlaneApp {
                             this.execute_palette_item(item_for_click.clone(), window, cx);
                         }))
                         .child(panel_icon(PLUS_ICON, theme.accent))
-                        .child(format!("新建 {}", preset.label))
+                        .child(
+                            i18n::text(self.language, "palette.new")
+                                .replace("{name}", &preset.label),
+                        )
                         .child(
                             div()
                                 .ml_auto()
