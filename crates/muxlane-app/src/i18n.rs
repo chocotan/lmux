@@ -57,8 +57,6 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("common.cancel", "取消", "Cancel"),
     ("common.clear", "清空", "Clear"),
     ("common.connect", "连接", "Connect"),
-    ("common.disabled", "已关闭", "Disabled"),
-    ("common.enabled", "已开启", "Enabled"),
     ("common.settings", "设置", "Settings"),
     ("dialog.add_local_project", "添加本地项目", "Add Local Project"),
     (
@@ -294,6 +292,11 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ),
     ("palette.toggle_dark", "切换为深色模式", "Switch to Dark Mode"),
     (
+        "palette.tab_switch_column",
+        "Tab 切换项目 / Agent 类型 · Enter 确认",
+        "Tab: switch projects / agent types · Enter: confirm",
+    ),
+    (
         "palette.toggle_light",
         "切换为浅色模式",
         "Switch to Light Mode",
@@ -352,7 +355,6 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("status.remote_tunnel", "建立 tunnel", "Opening Tunnel"),
     ("settings.general", "通用", "General"),
     ("settings.appearance", "外观", "Appearance"),
-    ("settings.workspaces", "工作区", "Workspaces"),
     (
         "settings.project_workspaces",
         "一项目一工作区",
@@ -454,7 +456,6 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "终端使用的等宽字体",
         "Monospace font used in terminals",
     ),
-    ("settings.theme", "主题", "Theme"),
     (
         "terminal.attaching",
         "正在 attach 远程终端…",

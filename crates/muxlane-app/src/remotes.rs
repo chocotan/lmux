@@ -497,6 +497,7 @@ impl MuxlaneApp {
                     this.collapsed_projects.remove(&remote_project_key);
                     let remote_machine_key = format!("machine:remote:{}", host);
                     this.collapsed_machines.remove(&remote_machine_key);
+                    this.jump_to_project_if_needed(&target_key, cx);
                     this.place_async_agent(
                         &target_key,
                         agent_id,

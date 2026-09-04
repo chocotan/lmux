@@ -5,7 +5,7 @@ use crate::i18n;
 use crate::term_view::TermView;
 use crate::theme::Theme;
 use crate::workspace::ProjectKey;
-use gpui::{AppContext, Context, Entity, Focusable, Window};
+use gpui::{App, AppContext, Context, Entity, Focusable, Window};
 use muxlane_core::model::{AgentId, Snapshot};
 use muxlane_term::VTerm;
 use std::collections::HashMap;
@@ -307,6 +307,64 @@ impl MuxlaneApp {
         }
     }
 
+    pub(crate) fn sync_active_terminal_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminal_focus_suspended(cx) {
+            return;
+        }
+        let Some(focus) = self
+            .active
+            .as_ref()
+            .and_then(|agent| self.terms.get(agent))
+            .map(|term| term.focus_handle(cx))
+        else {
+            return;
+        };
+        if focus.is_focused(window) {
+            return;
+        }
+        let focus_is_managed = window.focused(cx).is_none()
+            || self.focus.is_focused(window)
+            || self
+                .terms
+                .values()
+                .any(|term| term.focus_handle(cx).is_focused(window))
+            || [
+                &self.palette_input,
+                &self.connect_input,
+                &self.connect_username,
+                &self.connect_password,
+                &self.connect_key_path,
+                &self.project_input,
+                &self.remote_project_input,
+            ]
+            .into_iter()
+            .any(|input| input.focus_handle(cx).is_focused(window));
+        if focus_is_managed {
+            focus.focus(window, cx);
+            window.invalidate_character_coordinates();
+        }
+    }
+
+    pub(crate) fn terminal_focus_suspended(&self, cx: &App) -> bool {
+        self.palette_open
+            || self.connect_dialog
+            || self.project_dialog
+            || self.remote_project_dialog.is_some()
+            || self.settings_open
+            || self.session_menu.is_some()
+            || self.tree_menu.is_some()
+            || self.delete_confirm.is_some()
+            || self.pending_project_creation.is_some()
+            || self.bootstrap_confirm.is_some()
+            || self.notifications.read(cx).summary().2
+            || self.split_drag.is_some()
+            || self.sidebar.drag.is_some()
+    }
+
     pub(crate) fn activate_agent(
         &mut self,
         pane: &muxlane_core::PaneId,
@@ -327,8 +385,16 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(term) = self.terms.get(agent) {
-            term.focus_handle(cx).focus(window, cx);
+        let focus = self.terms.get(agent).map(|term| term.focus_handle(cx));
+        if let Some(focus) = &focus {
+            focus.focus(window, cx);
+            window.invalidate_character_coordinates();
+            tracing::debug!(
+                agent = %agent,
+                handle_focused = focus.is_focused(window),
+                active = ?self.active,
+                "focus agent requested"
+            );
         }
         // 清理当前 agent 的 Toast 与标记通知已读
         self.notifications
@@ -671,7 +737,9 @@ impl MuxlaneApp {
                     this.terms.insert(agent_id.clone(), term);
                     this.palette_open = false;
                     this.new_session_target = None;
+                    this.jump_to_project_if_needed(&target_key, cx);
                     this.place_async_agent(&target_key, agent_id, Some(pane), None, window, cx);
+                    this.select_project_workspace(target_key.clone(), window, cx);
                 }
                 Err(error) => {
                     this.notifications.update(cx, |center, cx| {

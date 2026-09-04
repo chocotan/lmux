@@ -39,7 +39,6 @@ PY
 trap cleanup EXIT
 
 export SHELL="${MUXLANE_TEST_SHELL:-/usr/bin/zsh}"
-export MUXLANE_TEST_AUTO_OPEN=1
 export XDG_DATA_HOME="$TMP/data"
 mkdir -p "$XDG_DATA_HOME/muxlane"
 SMOKE_PROJECT="$TMP/workspace/muxlane"
@@ -56,6 +55,8 @@ with open(path, "w") as f:
         "initialized": True,
         "projects": [{"id": "p_smoke", "name": "muxlane", "path": root, "branch": None, "agents": []}],
         "sessions": [{"agent_id": agent, "project_id": "p_smoke", "agent_type": "shell", "title": "shell", "tmux_session": tmux_session}],
+        "pane_tree": {"kind": "leaf", "group": {"id": "pane_smoke", "tabs": [agent], "active": agent}},
+        "active_pane": "pane_smoke",
     }, f)
 PY
 "$ROOT/target/debug/muxlane" >"$TMP/muxlane.log" 2>&1 &
@@ -91,6 +92,15 @@ wait_state() {
     sleep .05
   done
   echo "timed out waiting for state: $label" >&2
+  return 1
+}
+wait_tmux_text() {
+  local session="$1" text="$2" label="$3"
+  for _ in {1..100}; do
+    if tmux -L muxlane capture-pane -p -t "$session" | grep -Fq "$text"; then return 0; fi
+    sleep .05
+  done
+  echo "timed out waiting for terminal text: $label" >&2
   return 1
 }
 assert_state_stable() {
@@ -186,6 +196,11 @@ wmctrl -i -r "$WID" -t "$WORKSPACE"
 wmctrl -s "$WORKSPACE"
 sleep .4
 xdotool windowactivate "$WID"
+sleep .8
+xdotool type --delay 2 "echo MUXLANE_STARTUP_FOCUS"
+xdotool key Return
+wait_tmux_text "$SMOKE_TMUX" MUXLANE_STARTUP_FOCUS "restored active tab input"
+echo '✓ restored active tab accepted input without a click'
 
 # 旧 state 不含快捷键字段时必须原地补默认值，不升级当前 store version。
 STATE="$XDG_DATA_HOME/muxlane/state.json" python3 - <<'PY'
@@ -194,8 +209,8 @@ d=json.load(open(os.environ['STATE']))
 assert d['version']==2, d['version']
 assert d['shortcut_bindings']=={
     'close_tab':'ctrl-w',
-    'previous_workspace':'platform-up',
-    'next_workspace':'platform-down',
+    'previous_workspace':None,
+    'next_workspace':None,
     'previous_tab':'platform-left',
     'next_tab':'platform-right',
 }, d['shortcut_bindings']
@@ -446,11 +461,21 @@ import -window "$WID" "$ARTIFACTS/05-tab-closed.png"
 xdotool key ctrl+shift+t; sleep .5
 STATE="$XDG_DATA_HOME/muxlane/state.json" python3 - <<'PY'
 import os,json
-d=json.load(open(os.environ['STATE']))
+p=os.environ['STATE']
+d=json.load(open(p))
 assert d['pane_tree']['kind']=='leaf', d['pane_tree']
 assert len(d['pane_tree']['group']['tabs'])==2, d['pane_tree']
+active=d['pane_tree']['group']['active']
+assert active==d['pane_tree']['group']['tabs'][-1], d['pane_tree']
+session=next(item['tmux_session'] for item in d['sessions'] if item['agent_id']==active)
+open(os.path.join(os.path.dirname(p), 'new-tab-tmux'), 'w').write(session)
 print('✓ tab-strip create path added a Shell tab without splitting')
 PY
+xdotool type --delay 2 "echo MUXLANE_NEW_TAB_FOCUS"
+xdotool key Return
+NEW_TAB_TMUX="$(<"$XDG_DATA_HOME/muxlane/new-tab-tmux")"
+wait_tmux_text "$NEW_TAB_TMUX" MUXLANE_NEW_TAB_FOCUS "new active tab input"
+echo '✓ new active tab accepted input without a click'
 xdotool key ctrl+w; sleep .2
 click_at "$X_TERM" "$Y_TERM" 1
 

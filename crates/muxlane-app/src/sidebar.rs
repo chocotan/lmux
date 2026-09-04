@@ -14,6 +14,68 @@ use gpui::{
 };
 use std::sync::Arc;
 
+/// 侧栏项目行拖拽负载：仅同机器内重排。
+#[derive(Clone)]
+pub(crate) struct DragProject {
+    pub(crate) machine_id: String,
+    pub(crate) project_id: String,
+    pub(crate) label: String,
+}
+
+impl MuxlaneApp {
+    /// 按自定义顺序返回项目；未记录的保持原顺序排在尾部。
+    pub(crate) fn ordered_projects<'a>(
+        &self,
+        machine_id: &str,
+        projects: &'a [muxlane_core::model::Project],
+    ) -> Vec<&'a muxlane_core::model::Project> {
+        let Some(order) = self.project_order.get(machine_id) else {
+            return projects.iter().collect();
+        };
+        let mut indexed: Vec<(usize, &muxlane_core::model::Project)> =
+            projects.iter().enumerate().collect();
+        indexed.sort_by_key(|(original, project)| {
+            let pos = order
+                .iter()
+                .position(|id| id == &project.id)
+                .unwrap_or(usize::MAX);
+            (pos, *original)
+        });
+        indexed.into_iter().map(|(_, project)| project).collect()
+    }
+
+    /// 把 dragged 项目移动到 target 项目之前（同机器）。
+    pub(crate) fn move_project_order(&mut self, machine_id: &str, dragged: &str, target: &str) {
+        if dragged == target {
+            return;
+        }
+        let snapshot = if machine_id == self.local_machine_id() {
+            Some(&self.last_snapshot)
+        } else {
+            self.remote_snaps.values().find(|snapshot| {
+                snapshot
+                    .machine
+                    .as_ref()
+                    .is_some_and(|machine| machine.machine_id == machine_id)
+            })
+        };
+        let Some(snapshot) = snapshot else { return };
+        let mut ids: Vec<String> = self
+            .ordered_projects(machine_id, &snapshot.projects)
+            .into_iter()
+            .map(|project| project.id.clone())
+            .collect();
+        let Some(from) = ids.iter().position(|id| id == dragged) else {
+            return;
+        };
+        let id = ids.remove(from);
+        let to = ids.iter().position(|id| id == target).unwrap_or(ids.len());
+        ids.insert(to, id);
+        self.project_order.insert(machine_id.to_string(), ids);
+        self.persist();
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SidebarDividerDrag;
 
@@ -105,6 +167,19 @@ impl MuxlaneApp {
         let project_path = project.path.display().to_string();
         let collapse_key_for_click = collapse_key.clone();
         let palette_key = workspace_key.clone();
+        // 仅在没有聚焦会话时高亮项目：会话行已有自己的选中态，避免双重高亮。
+        let is_current = self.active.is_none()
+            && self.workspace.enabled()
+            && workspace_key
+                .as_ref()
+                .is_some_and(|key| self.workspace.current_project() == Some(key));
+        let drag_payload = workspace_key.as_ref().map(|key| DragProject {
+            machine_id: key.machine_id.clone(),
+            project_id: key.project_id.clone(),
+            label: project.name.clone(),
+        });
+        let drop_machine = workspace_key.as_ref().map(|key| key.machine_id.clone());
+        let drop_project = workspace_key.as_ref().map(|key| key.project_id.clone());
         div()
             .id(gpui::ElementId::Name(row_id.into()))
             .flex()
@@ -117,7 +192,32 @@ impl MuxlaneApp {
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(rgba(theme.fg0))
             .group(project_group.clone())
+            .when(is_current, |row| row.bg(rgba(theme.bg2)))
             .hover(|style| style.bg(rgba(theme.bg2)))
+            .when_some(drag_payload, |row, payload| {
+                row.on_drag(payload, {
+                    let theme = theme;
+                    move |drag: &DragProject, offset, _, cx| {
+                        let label = drag.label.clone();
+                        cx.new(move |_| DragGhost {
+                            label: label.into(),
+                            offset,
+                            theme,
+                        })
+                    }
+                })
+            })
+            .on_drop::<DragProject>(cx.listener(move |this, drag: &DragProject, _window, cx| {
+                if let (Some(machine), Some(target)) =
+                    (drop_machine.as_ref(), drop_project.as_ref())
+                {
+                    if drag.machine_id == *machine {
+                        this.move_project_order(machine, &drag.project_id, target);
+                        cx.notify();
+                    }
+                }
+                cx.stop_propagation();
+            }))
             .tooltip(hover_tip(project_path))
             .on_click(cx.listener(move |this, _event, window, cx| {
                 if let Some(workspace_key) = workspace_key.clone() {
@@ -144,6 +244,7 @@ impl MuxlaneApp {
                     cx.notify();
                 }),
             )
+            .child(panel_icon(FOLDER_ICON, theme.fg1))
             .child(
                 div()
                     .flex_1()
@@ -196,6 +297,15 @@ impl MuxlaneApp {
                                 this.palette_open = true;
                                 this.palette_index = 0;
                                 this.palette_scroll.scroll_to_item(0);
+                                this.palette_column = super::palette::PaletteColumn::Presets;
+                                this.palette_project_index = palette_key
+                                    .as_ref()
+                                    .and_then(|key| {
+                                        this.available_project_keys()
+                                            .iter()
+                                            .position(|candidate| candidate == key)
+                                    })
+                                    .unwrap_or(0);
                                 this.palette_input.update(cx, |input, cx| input.reset(cx));
                                 this.palette_input.focus_handle(cx).focus(window, cx);
                                 dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu);
@@ -231,7 +341,7 @@ impl MuxlaneApp {
             .items_center()
             .gap_1()
             .h(px(26.))
-            .pl(px(24.))
+            .pl_4()
             .pr_2()
             .text_size(px(11.5))
             .when(
@@ -346,25 +456,6 @@ impl MuxlaneApp {
                             this.open_connect_dialog(window, cx);
                         }))
                         .child(panel_icon(PLUS_ICON, theme.fg1)),
-                )
-                .child(
-                    div()
-                        .id("sidebar-hide-button")
-                        .w(px(20.))
-                        .h(px(20.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .text_color(rgba(theme.fg1))
-                        .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
-                        .active(|s| s.bg(rgba(theme.bg3)))
-                        .tooltip(hover_tip(i18n::text(self.language, "sidebar.hide")))
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            this.set_sidebar_visible(false, window, cx);
-                        }))
-                        .child(panel_icon(SIDEBAR_COLLAPSE_ICON, theme.fg1)),
                 ),
         );
         tree = tree.child(
@@ -437,10 +528,11 @@ impl MuxlaneApp {
                 ),
         );
         if !local_collapsed {
-            for project in &snap.projects {
+            let local_machine_id = self.local_machine_id();
+            for project in self.ordered_projects(&local_machine_id, &snap.projects) {
                 let project_key = format!("local:{}", project.id);
                 let project_collapsed = self.collapsed_projects.contains(&project_key);
-                let mut pnode = div().flex().flex_col().ml(px(18.));
+                let mut pnode = div().flex().flex_col();
                 pnode = pnode.child(self.render_project_row(project, None, theme, cx));
                 if !project_collapsed {
                     for agent in snap.agents_of(&project.id) {
@@ -817,10 +909,15 @@ impl MuxlaneApp {
             }
             if !machine_collapsed {
                 if let Some(rsnap) = snap_ref {
-                    for project in &rsnap.projects {
+                    let machine_id = rsnap
+                        .machine
+                        .as_ref()
+                        .map(|machine| machine.machine_id.clone())
+                        .unwrap_or_default();
+                    for project in self.ordered_projects(&machine_id, &rsnap.projects) {
                         let project_key = format!("remote:{name}:{}", project.id);
                         let project_collapsed = self.collapsed_projects.contains(&project_key);
-                        let mut pnode = div().flex().flex_col().ml(px(18.));
+                        let mut pnode = div().flex().flex_col();
                         pnode =
                             pnode.child(self.render_project_row(project, Some(&name), theme, cx));
                         if !project_collapsed {
@@ -848,10 +945,27 @@ impl MuxlaneApp {
             .px_2()
             .flex()
             .items_center()
-            .justify_end()
             .gap_1()
             .border_t_1()
             .border_color(rgba(theme.line))
+            .child(
+                div()
+                    .id("sidebar-hide-button")
+                    .w(px(32.))
+                    .h(px(32.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(theme.bg2)))
+                    .active(|s| s.bg(rgba(theme.bg3)))
+                    .tooltip(hover_tip(i18n::text(self.language, "sidebar.hide")))
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.set_sidebar_visible(false, window, cx);
+                    }))
+                    .child(panel_icon(SIDEBAR_COLLAPSE_ICON, theme.fg1)),
+            )
+            .child(div().flex_1())
             .child({
                 let pulse =
                     (1.0 - (self.pulse_phase as f32 * std::f32::consts::TAU / 36.0).cos()) * 0.5;

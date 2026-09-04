@@ -5,8 +5,8 @@ use gpui::{
     canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, ClipboardEntry,
     ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks,
     FontFeatures, FontStyle, FontWeight, Hsla, ImageFormat, InputHandler, MouseButton,
-    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, Styled, Task,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, Styled,
+    Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use muxlane_core::model::AgentId;
 use muxlane_term::{PtySession, VTerm};
@@ -191,13 +191,14 @@ impl InputHandler for TerminalInputHandler {
         &mut self,
         _replacement_range: Option<std::ops::Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
         let bytes = commit_terminal_text(&self.marked_text, text);
         if !bytes.is_empty() {
             self.sink.write(&bytes);
         }
+        window.invalidate_character_coordinates();
     }
 
     fn replace_and_mark_text_in_range(
@@ -205,17 +206,19 @@ impl InputHandler for TerminalInputHandler {
         _range_utf16: Option<std::ops::Range<usize>>,
         new_text: &str,
         _new_selected_range: Option<std::ops::Range<usize>>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
         // Preedit 是可替换的组合态，不能提前写入 PTY；最终 commit 走 replace_text。
         set_terminal_preedit(&self.marked_text, new_text);
+        window.invalidate_character_coordinates();
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {
+    fn unmark_text(&mut self, window: &mut Window, _cx: &mut App) {
         if let Some(text) = take_terminal_preedit(&self.marked_text) {
             self.sink.write(text.as_bytes());
         }
+        window.invalidate_character_coordinates();
     }
 
     fn bounds_for_range(
@@ -260,6 +263,7 @@ pub struct TermView {
     selecting: bool,
     forwarding_mouse: bool,
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
+    focus_subscriptions: Option<(Subscription, Subscription)>,
     osc52_clipboard_enabled: Arc<AtomicBool>,
     _drain: Task<()>,
     _clipboard: Task<()>,
@@ -453,6 +457,7 @@ impl TermView {
             selecting: false,
             forwarding_mouse: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
+            focus_subscriptions: None,
             osc52_clipboard_enabled,
             _drain: drain,
             _clipboard: clipboard,
@@ -492,6 +497,7 @@ impl TermView {
             selecting: false,
             forwarding_mouse: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
+            focus_subscriptions: None,
             osc52_clipboard_enabled,
             _drain: idle,
             _clipboard: clipboard,
@@ -871,6 +877,18 @@ fn mouse_report(
 impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.vterm.render_snapshot();
+        if self.focus_subscriptions.is_none() {
+            let focus = self.focus.clone();
+            let focus_in = cx.on_focus_in(&focus, window, |_this, window, cx| {
+                window.invalidate_character_coordinates();
+                cx.notify();
+            });
+            let focus_out = cx.on_focus_out(&focus, window, |_this, _event, window, cx| {
+                window.invalidate_character_coordinates();
+                cx.notify();
+            });
+            self.focus_subscriptions = Some((focus_in, focus_out));
+        }
         let focused = self.focus.is_focused(window);
         let font_family = self.font_family.clone();
         let term_theme = self.theme;
@@ -935,6 +953,7 @@ impl Render for TermView {
             }))
             .on_click(cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
                 this.focus.focus(window, cx);
+                window.invalidate_character_coordinates();
                 cx.notify();
             }))
             .cursor_text()
@@ -1166,6 +1185,7 @@ impl Render for TermView {
                         MouseButton::Left,
                         cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                             this.focus.focus(window, cx);
+                            window.invalidate_character_coordinates();
                             let Some((line, col, right)) = this.grid_point(event.position) else {
                                 return;
                             };
@@ -1179,6 +1199,28 @@ impl Render for TermView {
                                     cx.stop_propagation();
                                     return;
                                 }
+                            }
+                            // 双击选词、三击选行并复制（zed 的 click_count→选区类型映射；
+                            // tmux 的选区不会进系统剪贴板，故不转发）。
+                            if event.click_count >= 2 && !event.modifiers.shift {
+                                if event.click_count >= 3 {
+                                    this.vterm.select_lines_at(line, col);
+                                } else {
+                                    this.vterm.select_word_at(line, col);
+                                }
+                                // 保持 selecting，拖动可按词/行扩展选区（alacritty 语义）。
+                                this.selecting = true;
+                                this.forwarding_mouse = false;
+                                if let Some(text) = this
+                                    .vterm
+                                    .selection_to_string()
+                                    .filter(|text| !text.is_empty())
+                                {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                    Self::write_primary(cx, text);
+                                }
+                                cx.stop_propagation();
+                                return;
                             }
                             // Shift：本地划选。其余拖选/点击交给 tmux（mouse on + copy-mode）。
                             if event.modifiers.shift {

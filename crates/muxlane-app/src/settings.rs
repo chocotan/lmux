@@ -4,8 +4,8 @@ use crate::i18n::{self, Language};
 use crate::shortcuts::{self, ShortcutAction, ShortcutError};
 use crate::theme::{Theme, ThemeMode};
 use gpui::{
-    deferred, div, prelude::*, px, rgba, Context, Div, MouseButton, ParentElement, Stateful,
-    Styled, Window,
+    deferred, div, prelude::*, px, relative, rgba, Context, Div, MouseButton, ParentElement,
+    Stateful, Styled, Window,
 };
 
 pub(crate) const FONT_FAMILIES: &[&str] = &[
@@ -70,22 +70,32 @@ fn setting_row(
 fn render_switch(id: &'static str, on: bool, theme: Theme) -> Stateful<Div> {
     div()
         .id(id)
-        .relative()
-        .w(px(28.))
-        .h(px(16.))
+        .w(px(40.))
+        .h(px(32.))
         .flex_none()
-        .border_1()
-        .border_color(rgba(if on { theme.accent } else { theme.line }))
-        .bg(rgba(if on { theme.accent } else { theme.bg0 }))
+        .flex()
+        .items_center()
+        .justify_end()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(theme.bg2)))
         .child(
             div()
-                .absolute()
-                .top(px(2.))
-                .when(on, |thumb| thumb.right(px(2.)))
-                .when(!on, |thumb| thumb.left(px(2.)))
-                .w(px(10.))
-                .h(px(10.))
-                .bg(rgba(if on { theme.on_accent } else { theme.fg2 })),
+                .relative()
+                .w(px(28.))
+                .h(px(16.))
+                .border_1()
+                .border_color(rgba(if on { theme.accent } else { theme.line }))
+                .bg(rgba(if on { theme.accent } else { theme.bg0 }))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .when(on, |thumb| thumb.right(px(2.)))
+                        .when(!on, |thumb| thumb.left(px(2.)))
+                        .w(px(10.))
+                        .h(px(10.))
+                        .bg(rgba(if on { theme.on_accent } else { theme.fg2 })),
+                ),
         )
 }
 
@@ -393,6 +403,15 @@ impl MuxlaneApp {
                             .border_color(rgba(theme.line))
                             .shadow_lg()
                             .occlude()
+                            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                                this.dismiss_settings_menus();
+                                cx.notify();
+                            }))
+                            .on_any_mouse_down(cx.listener(
+                                |_this, _event: &gpui::MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                },
+                            ))
                             .children(ThemeMode::ALL.into_iter().map(|mode| {
                                 let selected = mode == current_mode;
                                 let swatch = Theme::for_mode(mode);
@@ -491,6 +510,15 @@ impl MuxlaneApp {
                             .border_color(rgba(theme.line))
                             .shadow_lg()
                             .occlude()
+                            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                                this.dismiss_settings_menus();
+                                cx.notify();
+                            }))
+                            .on_any_mouse_down(cx.listener(
+                                |_this, _event: &gpui::MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                },
+                            ))
                             .children(FONT_FAMILIES.iter().map(|family| {
                                 let selected = current_font == *family;
                                 let family = (*family).to_string();
@@ -585,6 +613,15 @@ impl MuxlaneApp {
                             .border_color(rgba(theme.line))
                             .shadow_lg()
                             .occlude()
+                            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                                this.dismiss_settings_menus();
+                                cx.notify();
+                            }))
+                            .on_any_mouse_down(cx.listener(
+                                |_this, _event: &gpui::MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                },
+                            ))
                             .children(Language::ALL.into_iter().map(|language| {
                                 let selected = language == current_language;
                                 div()
@@ -815,6 +852,11 @@ impl MuxlaneApp {
     pub(crate) fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
         let current_page = self.settings_page;
+        let content_id = match current_page {
+            SettingsPage::General => "settings-content-general",
+            SettingsPage::Appearance => "settings-content-appearance",
+            SettingsPage::Shortcuts => "settings-content-shortcuts",
+        };
         let content = match current_page {
             SettingsPage::General => self.render_general_settings(cx),
             SettingsPage::Appearance => self.render_appearance_settings(cx),
@@ -844,6 +886,8 @@ impl MuxlaneApp {
                     .occlude()
                     .w(px(880.))
                     .h(px(600.))
+                    .max_w(relative(0.92))
+                    .max_h(relative(0.82))
                     .flex()
                     .flex_col()
                     .bg(rgba(theme.bg0))
@@ -959,6 +1003,7 @@ impl MuxlaneApp {
                                                     .on_click(cx.listener(
                                                         move |this, _event, _window, cx| {
                                                             this.settings_page = page;
+                                                            this.cancel_shortcut_capture();
                                                             this.dismiss_settings_menus();
                                                             cx.notify();
                                                         },
@@ -970,7 +1015,7 @@ impl MuxlaneApp {
                             )
                             .child(
                                 div()
-                                    .id("settings-content")
+                                    .id(content_id)
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()

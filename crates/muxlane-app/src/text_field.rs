@@ -1,7 +1,7 @@
 use crate::theme::{Theme, ThemeMode};
 use gpui::{
     canvas, div, point, prelude::*, px, rgba, size, Bounds, Context, ElementInputHandler,
-    EntityInputHandler, FocusHandle, Focusable, Pixels, Point, Render, SharedString,
+    EntityInputHandler, FocusHandle, Focusable, Pixels, Point, Render, SharedString, Subscription,
     UTF16Selection, Window,
 };
 use std::ops::Range;
@@ -45,23 +45,37 @@ pub struct TextField {
     marked_range: Option<Range<usize>>,
     secure: bool,
     theme_mode: ThemeMode,
+    _focus_subscription: Subscription,
 }
 
 impl TextField {
-    pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        placeholder: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus = cx.focus_handle();
+        let focus_subscription = cx.on_focus_in(&focus, window, |_this, window, _cx| {
+            window.invalidate_character_coordinates();
+        });
         Self {
-            focus: cx.focus_handle(),
+            focus,
             content: String::new(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
             marked_range: None,
             secure: false,
             theme_mode: ThemeMode::Light,
+            _focus_subscription: focus_subscription,
         }
     }
 
-    pub fn new_secure(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        let mut field = Self::new(placeholder, cx);
+    pub fn new_secure(
+        placeholder: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut field = Self::new(placeholder, window, cx);
         field.secure = true;
         field
     }
@@ -368,8 +382,9 @@ impl EntityInputHandler for TextField {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.marked_range = None;
+        window.invalidate_character_coordinates();
         cx.notify();
     }
 
@@ -377,7 +392,7 @@ impl EntityInputHandler for TextField {
         &mut self,
         range_utf16: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let range = range_utf16
@@ -390,6 +405,7 @@ impl EntityInputHandler for TextField {
         let cursor = start + text.len();
         self.selected_range = cursor..cursor;
         self.marked_range = None;
+        window.invalidate_character_coordinates();
         cx.notify();
     }
 
@@ -398,7 +414,7 @@ impl EntityInputHandler for TextField {
         range_utf16: Option<Range<usize>>,
         new_text: &str,
         new_selected_range_utf16: Option<Range<usize>>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let range = range_utf16
@@ -413,6 +429,7 @@ impl EntityInputHandler for TextField {
         self.selected_range = new_selected_range_utf16
             .map(|selected| marked_selection(start, new_text, selected))
             .unwrap_or(marked.end..marked.end);
+        window.invalidate_character_coordinates();
         cx.notify();
     }
 
@@ -531,6 +548,7 @@ impl Render for TextField {
             .text_size(px(12.))
             .on_click(cx.listener(|this, _event, window, cx| {
                 this.focus.focus(window, cx);
+                window.invalidate_character_coordinates();
                 cx.stop_propagation();
                 cx.notify();
             }))
@@ -629,6 +647,7 @@ impl Render for TextField {
                 };
 
                 if handled {
+                    window.invalidate_character_coordinates();
                     cx.stop_propagation();
                 }
             }))

@@ -65,6 +65,28 @@ impl MuxlaneApp {
         self.persist();
     }
 
+    fn activate_edge_tab(&mut self, first: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let agent = if first {
+            self.pane_tree
+                .all_groups()
+                .into_iter()
+                .find_map(|group| group.tabs.first().cloned())
+        } else {
+            self.pane_tree
+                .all_groups()
+                .into_iter()
+                .rev()
+                .find_map(|group| group.tabs.last().cloned())
+        };
+        if let Some(agent) = agent {
+            let pane = self
+                .pane_tree
+                .pane_for_agent(&agent)
+                .unwrap_or_else(|| self.active_pane.clone());
+            self.activate_agent(&pane, &agent, window, cx);
+        }
+    }
+
     pub(super) fn select_tab_n(
         &mut self,
         index: usize,
@@ -92,9 +114,6 @@ impl MuxlaneApp {
         }) else {
             return;
         };
-        if len == 0 {
-            return;
-        }
         if cur + 1 < len {
             if let Some(agent) = self
                 .pane_tree
@@ -115,6 +134,7 @@ impl MuxlaneApp {
         );
         if let Some(target) = target {
             self.select_project_workspace(target, window, cx);
+            self.activate_edge_tab(true, window, cx);
         } else if let Some(agent) = self
             .pane_tree
             .group(&self.active_pane)
@@ -127,21 +147,15 @@ impl MuxlaneApp {
     }
 
     pub(super) fn prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((cur, len)) = self.pane_tree.group(&self.active_pane).map(|group| {
-            (
-                group
-                    .active
-                    .as_ref()
-                    .and_then(|agent| group.tabs.iter().position(|tab| tab == agent))
-                    .unwrap_or(0),
-                group.tabs.len(),
-            )
+        let Some(cur) = self.pane_tree.group(&self.active_pane).map(|group| {
+            group
+                .active
+                .as_ref()
+                .and_then(|agent| group.tabs.iter().position(|tab| tab == agent))
+                .unwrap_or(0)
         }) else {
             return;
         };
-        if len == 0 {
-            return;
-        }
         if cur > 0 {
             if let Some(agent) = self
                 .pane_tree
@@ -162,6 +176,7 @@ impl MuxlaneApp {
         );
         if let Some(target) = target {
             self.select_project_workspace(target, window, cx);
+            self.activate_edge_tab(false, window, cx);
         } else if let Some(agent) = self
             .pane_tree
             .group(&self.active_pane)
@@ -303,6 +318,7 @@ impl MuxlaneApp {
                     );
                     this.collapsed_projects.remove(&collapse_key);
                     this.terms.insert(agent_id.clone(), term);
+                    this.jump_to_project_if_needed(&target_key, cx);
                     this.place_async_agent(
                         &target_key,
                         agent_id,
@@ -883,26 +899,20 @@ impl MuxlaneApp {
                     .when(is_focused_pane || pane_att.is_alerting, |el| el.shadow_md())
                     .on_hover(cx.listener({
                         let pane_id = pane_click_id.clone();
-                        let active_id = pane_click_active.clone();
                         move |this, hovered: &bool, window, cx| {
-                            if !*hovered
-                                || this.palette_open
-                                || this.connect_dialog
-                                || this.project_dialog
-                                || this.remote_project_dialog.is_some()
-                                || this.session_menu.is_some()
-                                || this.tree_menu.is_some()
-                                || this.split_drag.is_some()
-                            {
+                            if !*hovered || this.terminal_focus_suspended(cx) {
                                 return;
                             }
-                            if this.active_pane != pane_id
-                                || this.active.as_ref() != active_id.as_ref()
-                            {
-                                if let Some(agent_id) = &active_id {
-                                    this.activate_agent(&pane_id, agent_id, window, cx);
+                            if this.active_pane != pane_id {
+                                if let Some(agent_id) = this
+                                    .pane_tree
+                                    .group(&pane_id)
+                                    .and_then(|group| group.active.clone())
+                                {
+                                    this.activate_agent(&pane_id, &agent_id, window, cx);
                                 } else {
                                     this.active_pane = pane_id.clone();
+                                    this.active = None;
                                 }
                                 cx.notify();
                             }
@@ -918,6 +928,7 @@ impl MuxlaneApp {
                                     this.activate_agent(&pane_id, agent_id, window, cx);
                                 } else {
                                     this.active_pane = pane_id.clone();
+                                    this.active = None;
                                 }
                                 cx.notify();
                             }

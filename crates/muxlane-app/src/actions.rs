@@ -3,8 +3,6 @@ gpui::actions!(
     [
         TogglePalette,
         CloseTab,
-        PreviousWorkspace,
-        NextWorkspace,
         NewShellTab,
         NextTab,
         PreviousTab,

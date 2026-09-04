@@ -4,7 +4,7 @@ use muxlane_core::{PaneId, PaneNode};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::app::MuxlaneApp;
-use gpui::{Context, Focusable, Window};
+use gpui::{Context, Window};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ProjectKey {
@@ -113,6 +113,10 @@ impl WorkspaceLayout {
     }
 }
 
+fn empty_layout() -> WorkspaceLayout {
+    WorkspaceLayout::new(PaneNode::empty(), None)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WorkspaceController {
     enabled: bool,
@@ -154,18 +158,14 @@ impl WorkspaceController {
         self.current_project.as_ref()
     }
 
-    pub(crate) fn initial_layout(
-        &mut self,
-        selected: Option<ProjectKey>,
-        project_agents: &HashSet<AgentId>,
-    ) -> WorkspaceLayout {
+    pub(crate) fn initial_layout(&mut self, selected: Option<ProjectKey>) -> WorkspaceLayout {
         self.current_project = selected.clone();
         if self.enabled {
             if let Some(key) = selected {
                 return self
                     .projects
                     .entry(key)
-                    .or_insert_with(|| self.shared.projected(project_agents))
+                    .or_insert_with(empty_layout)
                     .clone();
             }
         }
@@ -176,37 +176,20 @@ impl WorkspaceController {
         &mut self,
         key: ProjectKey,
         current: WorkspaceLayout,
-        project_agents: &HashSet<AgentId>,
     ) -> Option<WorkspaceLayout> {
         self.save_current(current);
         if self.current_project.as_ref() == Some(&key) {
             return None;
         }
         self.current_project = Some(key.clone());
-        self.layout_for_project(key, project_agents)
+        self.layout_for_project(key)
     }
 
-    pub(crate) fn cycle_target(
-        &self,
-        ordered_projects: &[ProjectKey],
-        next: bool,
-    ) -> Option<ProjectKey> {
-        let first = ordered_projects.first()?;
-        if ordered_projects.len() == 1 {
-            return (self.current_project.as_ref() != Some(first)).then(|| first.clone());
-        }
-        adjacent_project_target(ordered_projects, self.current_project.as_ref(), next)
-    }
-
-    fn layout_for_project(
-        &mut self,
-        key: ProjectKey,
-        project_agents: &HashSet<AgentId>,
-    ) -> Option<WorkspaceLayout> {
+    fn layout_for_project(&mut self, key: ProjectKey) -> Option<WorkspaceLayout> {
         self.enabled.then(|| {
             self.projects
                 .entry(key)
-                .or_insert_with(|| self.shared.projected(project_agents))
+                .or_insert_with(empty_layout)
                 .clone()
         })
     }
@@ -259,7 +242,7 @@ impl WorkspaceController {
         &mut self,
         key: &ProjectKey,
         current: WorkspaceLayout,
-        next: Option<(ProjectKey, HashSet<AgentId>)>,
+        next: Option<ProjectKey>,
     ) -> Option<WorkspaceLayout> {
         self.save_current(current);
         let removed_current = self.current_project.as_ref() == Some(key);
@@ -279,7 +262,7 @@ impl WorkspaceController {
         machine_id: &str,
         valid_projects: &HashSet<String>,
         current: WorkspaceLayout,
-        next: Option<(ProjectKey, HashSet<AgentId>)>,
+        next: Option<ProjectKey>,
     ) -> (bool, Option<WorkspaceLayout>) {
         self.save_current(current);
         let previous_len = self.projects.len();
@@ -304,7 +287,7 @@ impl WorkspaceController {
         &mut self,
         machine_id: &str,
         current: WorkspaceLayout,
-        next: Option<(ProjectKey, HashSet<AgentId>)>,
+        next: Option<ProjectKey>,
     ) -> Option<WorkspaceLayout> {
         self.save_current(current);
         let removed_current = self
@@ -322,17 +305,14 @@ impl WorkspaceController {
         Some(self.select_after_removal(next))
     }
 
-    fn select_after_removal(
-        &mut self,
-        next: Option<(ProjectKey, HashSet<AgentId>)>,
-    ) -> WorkspaceLayout {
-        let Some((key, agents)) = next else {
-            return WorkspaceLayout::new(PaneNode::empty(), None);
+    fn select_after_removal(&mut self, next: Option<ProjectKey>) -> WorkspaceLayout {
+        let Some(key) = next else {
+            return empty_layout();
         };
         self.current_project = Some(key.clone());
         self.projects
             .entry(key)
-            .or_insert_with(|| self.shared.projected(&agents))
+            .or_insert_with(empty_layout)
             .clone()
     }
 
@@ -340,7 +320,6 @@ impl WorkspaceController {
         &mut self,
         key: &ProjectKey,
         current: WorkspaceLayout,
-        project_agents: &HashSet<AgentId>,
         preferred_pane: Option<&PaneId>,
     ) -> PaneId {
         if !self.enabled {
@@ -352,7 +331,7 @@ impl WorkspaceController {
         }
         self.projects
             .entry(key.clone())
-            .or_insert_with(|| self.shared.projected(project_agents))
+            .or_insert_with(empty_layout)
             .target_pane(preferred_pane)
     }
 
@@ -525,9 +504,8 @@ impl MuxlaneApp {
         key: ProjectKey,
         cx: &mut Context<Self>,
     ) {
-        let agents = self.project_agents(&key);
         let current = self.current_workspace_layout();
-        if let Some(layout) = self.workspace.switch_project(key, current, &agents) {
+        if let Some(layout) = self.workspace.switch_project(key, current) {
             self.apply_workspace_layout(layout);
         }
         self.persist();
@@ -539,10 +517,9 @@ impl MuxlaneApp {
         key: &ProjectKey,
         preferred_pane: Option<&PaneId>,
     ) -> PaneId {
-        let agents = self.project_agents(key);
         let current = self.current_workspace_layout();
         self.workspace
-            .prepare_spawn_target(key, current, &agents, preferred_pane)
+            .prepare_spawn_target(key, current, preferred_pane)
     }
 
     pub(crate) fn remote_host_for_key(&self, key: &ProjectKey) -> Option<String> {
@@ -558,9 +535,8 @@ impl MuxlaneApp {
     pub(crate) fn available_project_keys(&self) -> Vec<ProjectKey> {
         let local_machine_id = self.local_machine_id();
         let mut keys: Vec<_> = self
-            .last_snapshot
-            .projects
-            .iter()
+            .ordered_projects(&local_machine_id, &self.last_snapshot.projects)
+            .into_iter()
             .map(|project| ProjectKey::new(local_machine_id.clone(), project.id.clone()))
             .collect();
         for remote in &self.remotes {
@@ -578,36 +554,19 @@ impl MuxlaneApp {
                 continue;
             };
             keys.extend(
-                snapshot
-                    .projects
-                    .iter()
+                self.ordered_projects(&machine.machine_id, &snapshot.projects)
+                    .into_iter()
                     .map(|project| ProjectKey::new(machine.machine_id.clone(), project.id.clone())),
             );
         }
         keys
     }
 
-    pub(crate) fn cycle_project_workspace(
-        &mut self,
-        next: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ordered = self.available_project_keys();
-        if let Some(target) = self.workspace.cycle_target(&ordered, next) {
-            self.select_project_workspace(target, window, cx);
-        }
-    }
-
     pub(crate) fn remove_project_workspace(&mut self, key: &ProjectKey) {
         let next = self
             .available_project_keys()
             .into_iter()
-            .find(|candidate| candidate != key)
-            .map(|candidate| {
-                let agents = self.project_agents(&candidate);
-                (candidate, agents)
-            });
+            .find(|candidate| candidate != key);
         let current = self.current_workspace_layout();
         if let Some(layout) = self.workspace.remove_project(key, current, next) {
             self.apply_workspace_layout(layout);
@@ -619,16 +578,9 @@ impl MuxlaneApp {
         machine_id: &str,
         valid_projects: &HashSet<String>,
     ) -> bool {
-        let next = self
-            .available_project_keys()
-            .into_iter()
-            .find(|candidate| {
-                candidate.machine_id != machine_id || valid_projects.contains(&candidate.project_id)
-            })
-            .map(|candidate| {
-                let agents = self.project_agents(&candidate);
-                (candidate, agents)
-            });
+        let next = self.available_project_keys().into_iter().find(|candidate| {
+            candidate.machine_id != machine_id || valid_projects.contains(&candidate.project_id)
+        });
         let current = self.current_workspace_layout();
         let (changed, layout) =
             self.workspace
@@ -643,14 +595,18 @@ impl MuxlaneApp {
         let next = self
             .available_project_keys()
             .into_iter()
-            .find(|candidate| candidate.machine_id != machine_id)
-            .map(|candidate| {
-                let agents = self.project_agents(&candidate);
-                (candidate, agents)
-            });
+            .find(|candidate| candidate.machine_id != machine_id);
         let current = self.current_workspace_layout();
         if let Some(layout) = self.workspace.remove_machine(machine_id, current, next) {
             self.apply_workspace_layout(layout);
+        }
+    }
+
+    /// 用户主动 spawn 完成后的跳转：目标项目不是当前工作区时先切过去，
+    /// 否则 place_async_agent 会把新会话放到后台不激活。
+    pub(crate) fn jump_to_project_if_needed(&mut self, key: &ProjectKey, cx: &mut Context<Self>) {
+        if self.workspace.enabled() && self.workspace.current_project() != Some(key) {
+            self.select_project_workspace_inner(key.clone(), cx);
         }
     }
 
@@ -685,22 +641,8 @@ impl MuxlaneApp {
             pane
         };
         self.activate_agent(&activation_pane, &agent, window, cx);
-        let focused_term = self.terms.get(&agent).map(|term| term.focus_handle(cx));
         self.persist();
         cx.notify();
-
-        // A newly created TermView is not in the dispatch tree until the next frame.
-        // Refocus it once mounted only if the user has not moved focus elsewhere.
-        let agent_to_focus = agent.clone();
-        cx.on_next_frame(window, move |this, window, cx| {
-            if this.active.as_ref() == Some(&agent_to_focus)
-                && focused_term
-                    .as_ref()
-                    .is_some_and(|focus| focus.is_focused(window))
-            {
-                this.focus_agent(&agent_to_focus, window, cx);
-            }
-        });
     }
 
     pub(crate) fn set_project_workspaces_enabled(
@@ -819,7 +761,7 @@ mod tests {
             .insert(empty.clone(), WorkspaceLayout::new(PaneNode::empty(), None));
 
         let layout = controller
-            .switch_project(empty.clone(), layout_with("first"), &HashSet::new())
+            .switch_project(empty.clone(), layout_with("first"))
             .unwrap();
         assert_eq!(controller.current_project(), Some(&empty));
         let group = layout.pane_tree.group(&layout.active_pane).unwrap();
@@ -865,21 +807,13 @@ mod tests {
             .insert(remote.clone(), layout_with("remote-agent"));
 
         let remote_layout = controller
-            .switch_project(
-                remote.clone(),
-                layout_with("local-edited"),
-                &HashSet::from(["remote-agent".into()]),
-            )
+            .switch_project(remote.clone(), layout_with("local-edited"))
             .unwrap();
         assert!(contains(&remote_layout, "remote-agent"));
         assert!(!contains(&remote_layout, "local-edited"));
 
         let local_layout = controller
-            .switch_project(
-                local.clone(),
-                layout_with("remote-edited"),
-                &HashSet::from(["local-edited".into()]),
-            )
+            .switch_project(local.clone(), layout_with("remote-edited"))
             .unwrap();
         assert!(contains(&local_layout, "local-edited"));
         assert!(contains(
@@ -889,13 +823,13 @@ mod tests {
     }
 
     #[test]
-    fn first_project_layout_projects_tabs_and_preserves_split_structure() {
+    fn first_project_layout_starts_empty() {
         let mut shared_tree = PaneNode::with_tab("keep".into());
         let first = shared_tree.first_pane_id();
-        let second = shared_tree
+        shared_tree
             .split(&first, SplitAxis::Horizontal, "drop".into())
             .unwrap();
-        let shared = WorkspaceLayout::new(shared_tree, Some(second.clone()));
+        let shared = WorkspaceLayout::new(shared_tree, None);
         let key = ProjectKey::new("m", "p");
         let mut controller = WorkspaceController {
             enabled: true,
@@ -904,11 +838,9 @@ mod tests {
             current_project: None,
         };
 
-        let projected = controller.initial_layout(Some(key), &HashSet::from(["keep".to_string()]));
-        assert_eq!(projected.pane_tree.leaf_count(), 2);
-        assert!(contains(&projected, "keep"));
-        assert!(!contains(&projected, "drop"));
-        assert_eq!(projected.active_pane, second);
+        let initial = controller.initial_layout(Some(key));
+        assert_eq!(initial.pane_tree.leaf_count(), 1);
+        assert!(initial.pane_tree.all_groups()[0].tabs.is_empty());
     }
 
     #[test]
@@ -943,11 +875,7 @@ mod tests {
         controller.projects.insert(b.clone(), layout_with("b"));
 
         let next = controller
-            .remove_project(
-                &a,
-                layout_with("a-edited"),
-                Some((b.clone(), HashSet::from(["b".into()]))),
-            )
+            .remove_project(&a, layout_with("a-edited"), Some(b.clone()))
             .unwrap();
         assert_eq!(controller.current_project(), Some(&b));
         assert!(contains(&next, "b"));
@@ -970,11 +898,7 @@ mod tests {
         controller.projects.insert(b.clone(), layout_with("b"));
 
         let next = controller
-            .remove_machine(
-                "machine-a",
-                layout_with("a-edited"),
-                Some((b.clone(), HashSet::from(["b".into()]))),
-            )
+            .remove_machine("machine-a", layout_with("a-edited"), Some(b.clone()))
             .unwrap();
         assert_eq!(controller.current_project(), Some(&b));
         assert!(contains(&next, "b"));
@@ -989,14 +913,9 @@ mod tests {
         let a = ProjectKey::new("m", "a");
         let b = ProjectKey::new("m", "b");
         let mut controller = controller(true, Some(a.clone()));
-        let pane = controller.prepare_spawn_target(
-            &a,
-            layout_with("a"),
-            &HashSet::from(["a".into()]),
-            None,
-        );
+        let pane = controller.prepare_spawn_target(&a, layout_with("a"), None);
         let b_layout = controller
-            .switch_project(b.clone(), layout_with("a"), &HashSet::from(["b".into()]))
+            .switch_project(b.clone(), layout_with("a"))
             .unwrap();
         assert!(!controller.should_activate_async_result(&a));
 
@@ -1087,7 +1006,7 @@ mod tests {
             "remote",
             &HashSet::from(["kept".to_string()]),
             layout_with("deleted-hot"),
-            Some((local.clone(), HashSet::from(["local-agent".into()]))),
+            Some(local.clone()),
         );
 
         assert!(changed);
@@ -1131,59 +1050,10 @@ mod tests {
         let target = ProjectKey::new("m", "p");
         let mut controller = controller(false, Some(ProjectKey::new("m", "other")));
         let hot = layout_with("shared-hot");
-        let pane = controller.prepare_spawn_target(
-            &target,
-            hot.clone(),
-            &HashSet::new(),
-            Some(&hot.active_pane),
-        );
+        let pane = controller.prepare_spawn_target(&target, hot.clone(), Some(&hot.active_pane));
         assert_eq!(pane, hot.active_pane);
         assert!(controller.should_activate_async_result(&target));
         assert!(!controller.projects.contains_key(&target));
-    }
-
-    #[test]
-    fn cycling_uses_supplied_sidebar_order_wraps_and_handles_missing_current() {
-        let local_a = ProjectKey::new("local", "a");
-        let local_b = ProjectKey::new("local", "b");
-        let remote_a = ProjectKey::new("remote", "a");
-        let order = vec![local_a.clone(), local_b.clone(), remote_a.clone()];
-        let current_controller = controller(true, Some(local_a.clone()));
-
-        assert_eq!(current_controller.cycle_target(&order, true), Some(local_b));
-        assert_eq!(
-            current_controller.cycle_target(&order, false),
-            Some(remote_a.clone())
-        );
-
-        let current_controller = controller(true, Some(remote_a));
-        assert_eq!(current_controller.cycle_target(&order, true), Some(local_a));
-        let missing = controller(true, Some(ProjectKey::new("gone", "gone")));
-        assert_eq!(missing.cycle_target(&order, true), Some(order[0].clone()));
-        assert_eq!(
-            missing.cycle_target(&order, false),
-            Some(order.last().unwrap().clone())
-        );
-        assert_eq!(missing.cycle_target(&[], true), None);
-    }
-
-    #[test]
-    fn single_project_cycle_selects_only_when_current_is_missing_or_invalid() {
-        let only = ProjectKey::new("local", "only");
-        let order = [only.clone()];
-
-        assert_eq!(
-            controller(true, None).cycle_target(&order, true),
-            Some(only.clone())
-        );
-        assert_eq!(
-            controller(true, Some(ProjectKey::new("gone", "gone"))).cycle_target(&order, false),
-            Some(only.clone())
-        );
-        assert_eq!(
-            controller(true, Some(only)).cycle_target(&order, true),
-            None
-        );
     }
 
     #[test]

@@ -244,6 +244,28 @@ impl VTerm {
         }
     }
 
+    /// 双击词选择：按语义边界选中整个词。
+    pub fn select_word_at(&self, line: i32, col: usize) {
+        self.select_at(SelectionType::Semantic, line, col);
+    }
+
+    /// 三击行选择：选中整行。
+    pub fn select_lines_at(&self, line: i32, col: usize) {
+        self.select_at(SelectionType::Lines, line, col);
+    }
+
+    fn select_at(&self, ty: SelectionType, line: i32, col: usize) {
+        if let Some(mut guard) = self.lock_inner() {
+            guard.term.selection = Some(Selection::new(
+                ty,
+                Point::new(Line(line), Column(col)),
+                Side::Left,
+            ));
+            guard.cached = None;
+            guard.damage = ContentDamage::Full;
+        }
+    }
+
     pub fn update_selection(&self, line: i32, col: usize, right: bool) {
         if let Some(mut guard) = self.lock_inner() {
             if let Some(selection) = guard.term.selection.as_mut() {
@@ -606,6 +628,24 @@ mod selection_tests {
         vterm.feed(format!("\x1b]52;c;{payload}\x07").as_bytes());
         let text = rx.try_recv().expect("osc52 clipboard event");
         assert_eq!(text, "copied-from-tmux");
+    }
+
+    #[test]
+    fn word_selection_grabs_semantic_word() {
+        let vterm = VTerm::new(80, 24);
+        vterm.feed(b"foo bar baz\r\n");
+        vterm.select_word_at(0, 5);
+        let text = vterm.selection_to_string().unwrap_or_default();
+        assert_eq!(text, "bar");
+    }
+
+    #[test]
+    fn line_selection_grabs_whole_line() {
+        let vterm = VTerm::new(80, 24);
+        vterm.feed(b"first line\r\nsecond line\r\n");
+        vterm.select_lines_at(1, 3);
+        let text = vterm.selection_to_string().unwrap_or_default();
+        assert_eq!(text, "second line\n");
     }
 
     #[test]

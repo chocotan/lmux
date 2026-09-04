@@ -30,7 +30,7 @@ use gpui::{
 use muxlane_core::model::{AgentId, Snapshot};
 use muxlane_core::{PaneId, PaneNode, SplitAxis};
 use muxlane_server::MuxlaneServer;
-use palette::NewSessionTarget;
+use palette::{NewSessionTarget, PaletteColumn};
 use panes::{DividerDrag, SplitDrag};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -163,6 +163,9 @@ pub struct MuxlaneApp {
     palette_scroll: ScrollHandle,
     pub(crate) palette_input: Entity<TextField>,
     pub(crate) palette_project: Option<ProjectKey>,
+    palette_project_index: usize,
+    palette_project_scroll: ScrollHandle,
+    palette_column: PaletteColumn,
     presets: Vec<muxlane_core::AgentPreset>,
     pub(crate) new_session_target: Option<NewSessionTarget>,
 
@@ -198,6 +201,8 @@ pub struct MuxlaneApp {
     pulse_phase: usize,
     pub(crate) collapsed_machines: std::collections::HashSet<String>,
     pub(crate) collapsed_projects: std::collections::HashSet<String>,
+    /// 侧栏项目自定义排序：machine_id -> 按显示顺序排列的 project_id。
+    pub(crate) project_order: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Focusable for MuxlaneApp {
@@ -485,20 +490,7 @@ impl MuxlaneApp {
             &available_local_projects,
             fallback_agent_project,
         );
-        let project_agents: std::collections::HashSet<_> = selected_project
-            .as_ref()
-            .map(|key| {
-                initial_snapshot
-                    .agents
-                    .iter()
-                    .filter(|agent| {
-                        key.machine_id == local_machine_id && agent.project == key.project_id
-                    })
-                    .map(|agent| agent.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let restored_layout = workspace.initial_layout(selected_project, &project_agents);
+        let restored_layout = workspace.initial_layout(selected_project);
         let restored_tree = restored_layout.pane_tree;
         let restored_active = restored_layout.active_pane;
         let theme_mode = persisted
@@ -535,43 +527,50 @@ impl MuxlaneApp {
         )
         .detach();
         let palette_input = cx.new(|cx| {
-            let mut field = TextField::new(i18n::text(language, "palette.placeholder"), cx);
+            let mut field = TextField::new(i18n::text(language, "palette.placeholder"), window, cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_input = cx.new(|cx| {
-            let mut field = TextField::new(i18n::text(language, "placeholder.remote_target"), cx);
+            let mut field = TextField::new(
+                i18n::text(language, "placeholder.remote_target"),
+                window,
+                cx,
+            );
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_username = cx.new(|cx| {
-            let mut field = TextField::new(i18n::text(language, "placeholder.username"), cx);
+            let mut field =
+                TextField::new(i18n::text(language, "placeholder.username"), window, cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_password = cx.new(|cx| {
-            let mut field = TextField::new_secure(i18n::text(language, "placeholder.password"), cx);
+            let mut field =
+                TextField::new_secure(i18n::text(language, "placeholder.password"), window, cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_key_path = cx.new(|cx| {
-            let mut field = TextField::new(i18n::text(language, "placeholder.private_key"), cx);
+            let mut field =
+                TextField::new(i18n::text(language, "placeholder.private_key"), window, cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let project_input = cx.new(|cx| {
-            let mut field = TextField::new("~/projects/my-project", cx);
+            let mut field = TextField::new("~/projects/my-project", window, cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let remote_project_input = cx.new(|cx| {
-            let mut field = TextField::new("~/projects/remote-project", cx);
+            let mut field = TextField::new("~/projects/remote-project", window, cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
@@ -614,6 +613,9 @@ impl MuxlaneApp {
             palette_scroll: ScrollHandle::new(),
             palette_input,
             palette_project: None,
+            palette_project_index: 0,
+            palette_project_scroll: ScrollHandle::new(),
+            palette_column: PaletteColumn::Presets,
             presets: muxlane_core::builtin_presets(muxlane_term::default_shell_program()),
             connect_dialog: false,
             connect_input,
@@ -647,6 +649,7 @@ impl MuxlaneApp {
             sidebar_frame_pending: false,
             collapsed_machines: std::collections::HashSet::new(),
             collapsed_projects: std::collections::HashSet::new(),
+            project_order: persisted.project_order.clone(),
             bootstrap_progress: HashMap::new(),
         };
         app.active = app
@@ -723,6 +726,7 @@ impl MuxlaneApp {
         app.sidebar_width = self.sidebar.width;
         app.shortcut_bindings = self.shortcut_bindings.clone();
         app.dark_mode = Some(self.theme_mode.is_dark());
+        app.project_order = self.project_order.clone();
         app.theme = Some(self.theme_mode.id().into());
         app.font_family = Some(self.font_family.clone());
         app.sound_enabled = Some(self.sound_enabled);
@@ -847,6 +851,7 @@ impl MuxlaneApp {
 
 impl Render for MuxlaneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_active_terminal_focus(window, cx);
         let theme = Theme::for_mode(self.theme_mode);
         self.schedule_sidebar_frame(window, cx);
         // ── 终端网格：PaneTree 递归渲染。
@@ -899,12 +904,6 @@ impl Render for MuxlaneApp {
                 {
                     this.close_tab(&pane, &agent, window, cx);
                 }
-            }))
-            .on_action(cx.listener(|this, _: &PreviousWorkspace, window, cx| {
-                this.cycle_project_workspace(false, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NextWorkspace, window, cx| {
-                this.cycle_project_workspace(true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewShellTab, window, cx| {
                 let pane = this.active_pane.clone();

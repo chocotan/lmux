@@ -1,7 +1,6 @@
 use crate::actions::{
-    CloseTab, NewShellTab, NextTab, NextWorkspace, PreviousTab, PreviousWorkspace, SelectTab1,
-    SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    TogglePalette,
+    CloseTab, NewShellTab, NextTab, PreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
+    SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, TogglePalette,
 };
 use gpui::{App, KeyBinding, Keystroke};
 use muxlane_store::PersistedShortcutBindings;
@@ -44,30 +43,16 @@ pub(crate) const FIXED_CHORDS: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ShortcutAction {
     CloseTab,
-    PreviousWorkspace,
-    NextWorkspace,
     PreviousTab,
     NextTab,
 }
 
 impl ShortcutAction {
-    pub(crate) const ALL: [Self; 5] = [
-        Self::CloseTab,
-        Self::PreviousWorkspace,
-        Self::NextWorkspace,
-        Self::PreviousTab,
-        Self::NextTab,
-    ];
+    pub(crate) const ALL: [Self; 3] = [Self::CloseTab, Self::PreviousTab, Self::NextTab];
 
     pub(crate) fn build_binding(self, chord: &str) -> KeyBinding {
         match self {
             Self::CloseTab => KeyBinding::new(&expand_platform_chord(chord), CloseTab, None),
-            Self::PreviousWorkspace => {
-                KeyBinding::new(&expand_platform_chord(chord), PreviousWorkspace, None)
-            }
-            Self::NextWorkspace => {
-                KeyBinding::new(&expand_platform_chord(chord), NextWorkspace, None)
-            }
             Self::PreviousTab => KeyBinding::new(&expand_platform_chord(chord), PreviousTab, None),
             Self::NextTab => KeyBinding::new(&expand_platform_chord(chord), NextTab, None),
         }
@@ -76,8 +61,6 @@ impl ShortcutAction {
     pub(crate) fn label_key(self) -> &'static str {
         match self {
             Self::CloseTab => "settings.shortcut.close_tab",
-            Self::PreviousWorkspace => "settings.shortcut.previous_workspace",
-            Self::NextWorkspace => "settings.shortcut.next_workspace",
             Self::PreviousTab => "settings.shortcut.previous_tab",
             Self::NextTab => "settings.shortcut.next_tab",
         }
@@ -86,8 +69,6 @@ impl ShortcutAction {
     pub(crate) fn binding(self, bindings: &PersistedShortcutBindings) -> &Option<String> {
         match self {
             Self::CloseTab => &bindings.close_tab,
-            Self::PreviousWorkspace => &bindings.previous_workspace,
-            Self::NextWorkspace => &bindings.next_workspace,
             Self::PreviousTab => &bindings.previous_tab,
             Self::NextTab => &bindings.next_tab,
         }
@@ -100,8 +81,6 @@ impl ShortcutAction {
     ) {
         match self {
             Self::CloseTab => bindings.close_tab = value,
-            Self::PreviousWorkspace => bindings.previous_workspace = value,
-            Self::NextWorkspace => bindings.next_workspace = value,
             Self::PreviousTab => bindings.previous_tab = value,
             Self::NextTab => bindings.next_tab = value,
         }
@@ -246,16 +225,14 @@ mod tests {
         let defaults = normalize(&PersistedShortcutBindings::default()).unwrap();
         let chords: Vec<_> = ShortcutAction::ALL
             .into_iter()
-            .map(|action| action.binding(&defaults).clone().unwrap())
+            .map(|action| action.binding(&defaults).clone())
             .collect();
         assert_eq!(
             chords,
             [
-                "ctrl-w",
-                "platform-up",
-                "platform-down",
-                "platform-left",
-                "platform-right"
+                Some("ctrl-w".into()),
+                Some("platform-left".into()),
+                Some("platform-right".into())
             ]
         );
     }
@@ -296,7 +273,7 @@ mod tests {
     #[test]
     fn configurable_duplicates_and_fixed_conflicts_are_rejected() {
         let bindings = PersistedShortcutBindings {
-            next_workspace: Some("platform-left".into()),
+            next_tab: Some("platform-left".into()),
             ..Default::default()
         };
         assert_eq!(
@@ -304,7 +281,7 @@ mod tests {
             Err(ShortcutError::Conflict("platform-left".into()))
         );
         let bindings = PersistedShortcutBindings {
-            next_workspace: Some("platform-k".into()),
+            next_tab: Some("platform-k".into()),
             ..Default::default()
         };
         assert_eq!(

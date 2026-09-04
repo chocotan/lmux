@@ -56,11 +56,11 @@ fn default_close_tab_shortcut() -> Option<String> {
 }
 
 fn default_previous_workspace_shortcut() -> Option<String> {
-    Some("platform-up".into())
+    None
 }
 
 fn default_next_workspace_shortcut() -> Option<String> {
-    Some("platform-down".into())
+    None
 }
 
 fn default_previous_tab_shortcut() -> Option<String> {
@@ -101,14 +101,16 @@ impl PersistedShortcutBindings {
     /// Migrate the old defaults written before the platform-key scheme.
     /// User-defined shortcuts other than those exact legacy defaults are preserved.
     fn migrate_legacy_defaults(&mut self) {
-        if self.previous_workspace.as_deref() == Some("platform-left")
-            || self.previous_workspace.as_deref() == Some("alt-left")
-        {
+        if matches!(
+            self.previous_workspace.as_deref(),
+            Some("platform-left") | Some("alt-left") | Some("platform-up")
+        ) {
             self.previous_workspace = default_previous_workspace_shortcut();
         }
-        if self.next_workspace.as_deref() == Some("platform-right")
-            || self.next_workspace.as_deref() == Some("alt-right")
-        {
+        if matches!(
+            self.next_workspace.as_deref(),
+            Some("platform-right") | Some("alt-right") | Some("platform-down")
+        ) {
             self.next_workspace = default_next_workspace_shortcut();
         }
         if self.previous_tab.as_deref() == Some("platform-up") {
@@ -172,6 +174,9 @@ pub struct PersistedApp {
     pub sidebar_width: f32,
     #[serde(default)]
     pub shortcut_bindings: PersistedShortcutBindings,
+    /// 侧栏项目自定义排序：machine_id -> 按显示顺序排列的 project_id。
+    #[serde(default)]
+    pub project_order: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl PersistedApp {
@@ -219,6 +224,7 @@ impl PersistedApp {
         self.sidebar_width = previous.sidebar_width;
         self.shortcut_bindings = previous.shortcut_bindings.clone();
         self.shortcut_bindings.migrate_legacy_defaults();
+        self.project_order = previous.project_order.clone();
         self
     }
 }
@@ -248,6 +254,7 @@ impl Default for PersistedApp {
             sidebar_visible: default_sidebar_visible(),
             sidebar_width: default_sidebar_width(),
             shortcut_bindings: PersistedShortcutBindings::default(),
+            project_order: Default::default(),
         }
     }
 }
@@ -825,8 +832,8 @@ mod tests {
             serde_json::from_str(r#"{"close_tab":"ctrl-q","next_tab":null}"#).unwrap();
 
         assert_eq!(bindings.close_tab.as_deref(), Some("ctrl-q"));
-        assert_eq!(bindings.previous_workspace.as_deref(), Some("platform-up"));
-        assert_eq!(bindings.next_workspace.as_deref(), Some("platform-down"));
+        assert_eq!(bindings.previous_workspace, None);
+        assert_eq!(bindings.next_workspace, None);
         assert_eq!(bindings.previous_tab.as_deref(), Some("platform-left"));
         assert_eq!(bindings.next_tab, None);
     }
@@ -847,8 +854,8 @@ mod tests {
             ..Default::default()
         };
         bindings.migrate_legacy_defaults();
-        assert_eq!(bindings.previous_workspace.as_deref(), Some("platform-up"));
-        assert_eq!(bindings.next_workspace.as_deref(), Some("platform-down"));
+        assert_eq!(bindings.previous_workspace, None);
+        assert_eq!(bindings.next_workspace, None);
     }
 
     #[test]
@@ -861,8 +868,8 @@ mod tests {
             ..Default::default()
         };
         bindings.migrate_legacy_defaults();
-        assert_eq!(bindings.previous_workspace.as_deref(), Some("platform-up"));
-        assert_eq!(bindings.next_workspace.as_deref(), Some("platform-down"));
+        assert_eq!(bindings.previous_workspace, None);
+        assert_eq!(bindings.next_workspace, None);
         assert_eq!(bindings.previous_tab.as_deref(), Some("platform-left"));
         assert_eq!(bindings.next_tab.as_deref(), Some("platform-right"));
 
@@ -874,7 +881,7 @@ mod tests {
             ..Default::default()
         };
         partial.migrate_legacy_defaults();
-        assert_eq!(partial.previous_workspace.as_deref(), Some("platform-up"));
+        assert_eq!(partial.previous_workspace, None);
         assert_eq!(partial.next_workspace, None);
         assert_eq!(partial.previous_tab.as_deref(), Some("ctrl-alt-p"));
         assert_eq!(partial.next_tab.as_deref(), Some("platform-right"));
