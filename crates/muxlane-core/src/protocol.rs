@@ -173,6 +173,15 @@ impl EventMsg {
     }
 }
 
+/// 稳定的 RPC 错误码。客户端可据此分支处理，不能依赖错误文案。
+pub mod error_codes {
+    pub const PATH_NOT_FOUND: &str = "path_not_found";
+    pub const NOT_A_DIRECTORY: &str = "not_a_directory";
+    pub const CREATE_DIRECTORY_FAILED: &str = "create_directory_failed";
+    pub const INVALID_PATH: &str = "invalid_path";
+    pub const PERSISTENCE_FAILED: &str = "persistence_failed";
+}
+
 /// 事件名常量
 pub mod events {
     pub const STATE_CHANGED: &str = "state.changed";
@@ -185,6 +194,7 @@ pub mod events {
 /// 特性名常量
 pub mod features {
     pub const PROJECT_ADD: &str = "project.add";
+    pub const PROJECT_CREATE: &str = "project.create_missing";
     pub const AGENT_SPAWN: &str = "agent.spawn";
     pub const TERM_INPUT: &str = "term.input";
     pub const TERM_RESIZE: &str = "term.resize";
@@ -287,6 +297,8 @@ pub struct ProjectAddParams {
     pub path: String,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub create_if_missing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,6 +397,13 @@ pub fn encode_line(value: &impl Serialize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::model::Snapshot;
+
+    #[test]
+    fn project_add_defaults_create_if_missing_to_false() {
+        let params: ProjectAddParams =
+            serde_json::from_value(serde_json::json!({"path": "/tmp/project"})).unwrap();
+        assert!(!params.create_if_missing);
+    }
 
     #[test]
     fn osc_title_extraction() {

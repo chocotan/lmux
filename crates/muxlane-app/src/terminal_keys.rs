@@ -267,6 +267,21 @@ mod tests {
     }
 
     #[test]
+    fn unclaimed_alt_arrows_keep_terminal_fallback_sequences() {
+        for (key_name, expected) in [
+            ("up", "\x1b[1;3A"),
+            ("down", "\x1b[1;3B"),
+            ("right", "\x1b[1;3C"),
+            ("left", "\x1b[1;3D"),
+        ] {
+            assert_eq!(
+                encode(&modified(key_name, false, true, false), false),
+                bytes(expected)
+            );
+        }
+    }
+
+    #[test]
     fn insert_delete_and_page_keys_support_standard_modifiers() {
         for (key_name, parameter) in [("insert", 2), ("delete", 3), ("pageup", 5), ("pagedown", 6)]
         {

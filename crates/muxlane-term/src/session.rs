@@ -111,6 +111,9 @@ struct Shared {
     /// 独立 killer：read thread 可在 child.wait() 阻塞，kill 也不争 child 锁。
     killer: std::sync::Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
     stream_gate: std::sync::Mutex<()>,
+    /// 最近一次收到 PTY 输出的时刻（毫秒）；0 = 尚无输出。
+    /// 读线程在每个 chunk 上更新，供状态检测做静默兜底。
+    last_output_ms: AtomicU64,
 }
 
 pub struct PtySession {
@@ -221,6 +224,7 @@ impl PtySession {
             child: std::sync::Mutex::new(child),
             killer: std::sync::Mutex::new(killer),
             stream_gate: std::sync::Mutex::new(()),
+            last_output_ms: AtomicU64::new(0),
         });
 
         let session = Arc::new(PtySession {
@@ -253,6 +257,9 @@ impl PtySession {
                     match reader.read(&mut chunk) {
                         Ok(0) => break, // EOF
                         Ok(n) => {
+                            shared_ref
+                                .last_output_ms
+                                .store(now_millis(), Ordering::Relaxed);
                             let bytes = bytes::Bytes::copy_from_slice(&chunk[..n]);
                             // replay push + broadcast send 与 subscribe 原子交接，消除首帧丢字节窗口。
                             if let Ok(_gate) = shared_ref.stream_gate.lock() {
@@ -327,6 +334,15 @@ impl PtySession {
 
     pub fn interaction_recent(&self) -> bool {
         now_millis().saturating_sub(self.last_input_ms.load(Ordering::Relaxed)) <= 75
+    }
+
+    /// 距最近一次 PTY 输出的秒数；尚无输出时返回 None。
+    pub fn secs_since_output(&self) -> Option<f64> {
+        let ms = self.shared.last_output_ms.load(Ordering::Relaxed);
+        if ms == 0 {
+            return None;
+        }
+        Some(now_millis().saturating_sub(ms) as f64 / 1000.0)
     }
     pub fn set_focused(&self, focused: bool) {
         self.focused.store(focused, Ordering::Relaxed);
@@ -485,6 +501,7 @@ set-option -g history-limit 50000
 set-option -g window-size latest
 set-option -g mouse on
 set-option -g set-clipboard external
+set-option -g copy-command \"if command -v pbcopy >/dev/null 2>&1; then pbcopy; elif command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; else cat >/dev/null; fi\"
 set-option -sg escape-time 10
 set-environment -gu NO_COLOR
 set-environment -g COLORTERM truecolor
@@ -507,9 +524,9 @@ bind-key -T copy-mode MouseUp1Pane send-keys -X copy-selection-and-cancel
 bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 5 scroll-down-and-cancel
 bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 5 scroll-down-and-cancel
 bind-key -T copy-mode-vi DoubleClick1Pane send-keys -X select-word \\; send-keys -X copy-pipe
-bind-key -n DoubleClick1Pane copy-mode -H \\; send-keys -X select-word \\; send-keys -X copy-pipe
+bind-key -n DoubleClick1Pane select-pane \\; copy-mode -H \\; send-keys -X select-word \\; send-keys -X copy-pipe
 bind-key -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X copy-pipe
-bind-key -n TripleClick1Pane copy-mode -H \\; send-keys -X select-line \\; send-keys -X copy-pipe
+bind-key -n TripleClick1Pane select-pane \\; copy-mode -H \\; send-keys -X select-line \\; send-keys -X copy-pipe
 ";
     if std::fs::read_to_string(&path).ok().as_deref() != Some(CONFIG) {
         let _ = std::fs::write(&path, CONFIG);
@@ -580,6 +597,7 @@ mod tests {
         assert!(config.contains("set-option -g mouse on"));
         assert!(config.contains("set-option -g set-titles off"));
         assert!(config.contains("set-option -g status off"));
+        assert!(config.contains("set-option -g copy-command"));
         assert!(config.contains("set-option -g xterm-keys on"));
         assert!(config.contains("set-option -g history-limit 50000"));
         assert!(config.contains("copy-mode -M"));
@@ -588,6 +606,12 @@ mod tests {
         assert_eq!(config.matches("scroll-down-and-cancel").count(), 2);
         assert!(config.contains("MouseDragEnd1Pane"));
         assert!(config.contains("MouseUp1Pane"));
+        assert!(config.contains(
+            "bind-key -n DoubleClick1Pane select-pane \\; copy-mode -H \\; send-keys -X select-word \\; send-keys -X copy-pipe"
+        ));
+        assert!(config.contains(
+            "bind-key -n TripleClick1Pane select-pane \\; copy-mode -H \\; send-keys -X select-line \\; send-keys -X copy-pipe"
+        ));
     }
 
     #[test]
@@ -623,6 +647,27 @@ mod tests {
 
         for _ in 0..2 {
             configure_tmux_server(&socket, &config);
+        }
+
+        for (event, selection) in [
+            ("DoubleClick1Pane", "select-word"),
+            ("TripleClick1Pane", "select-line"),
+        ] {
+            let output = std::process::Command::new("tmux")
+                .args(["-L", &socket, "list-keys", "-T", "root"])
+                .output()
+                .unwrap();
+            let bindings = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                bindings.lines().any(|line| {
+                    line.contains(event)
+                        && line.contains("select-pane")
+                        && line.contains("copy-mode -H")
+                        && line.contains(selection)
+                        && line.contains("copy-pipe")
+                }),
+                "missing {event} copy binding in root table: {bindings}"
+            );
         }
 
         for table in ["copy-mode-vi", "copy-mode"] {

@@ -5,19 +5,27 @@ pub(crate) mod palette;
 mod panes;
 #[path = "sidebar.rs"]
 mod sidebar;
+use self::sidebar::{hover_tip, SidebarDividerDrag};
+use crate::actions::*;
 use crate::dialogs::ConnectAuthMode;
 use crate::i18n::{self, Language};
 use crate::icons::svg_asset;
-use crate::menus::{dismiss_context_menus, BootstrapConfirm, DeleteConfirm, SessionMenu, TreeMenu};
+use crate::menus::{
+    dismiss_context_menus, BootstrapConfirm, DeleteConfirm, PendingProjectCreation, SessionMenu,
+    TreeMenu,
+};
 use crate::notifications::{NotificationCenter, NotificationCenterEvent, NotificationDraft};
 use crate::settings::{DEFAULT_FONT_FAMILY, FONT_FAMILIES};
+use crate::shortcuts::{ShortcutAction, ShortcutError};
+use crate::sidebar_state::{SidebarState, SIDEBAR_RAIL_WIDTH};
 use crate::term_view::TermView;
 use crate::text_field::TextField;
 use crate::theme::{Theme, ThemeMode};
+use crate::workspace::{ProjectKey, WorkspaceController};
 use gpui::{
     div, prelude::*, px, rgba, size, App, AssetSource, Bounds, Context, Entity, FocusHandle,
-    Focusable, KeyBinding, MouseButton, ParentElement, Render, ScrollHandle, SharedString, Styled,
-    Window, WindowBounds, WindowOptions,
+    Focusable, MouseButton, ParentElement, Render, ScrollHandle, SharedString, Styled,
+    Subscription, Window, WindowBounds, WindowOptions,
 };
 use muxlane_core::model::{AgentId, Snapshot};
 use muxlane_core::{PaneId, PaneNode, SplitAxis};
@@ -28,29 +36,29 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-gpui::actions!(
-    muxlane,
-    [
-        TogglePalette,
-        CloseTab,
-        NewShellTab,
-        NextTab,
-        PrevTab,
-        SelectTab1,
-        SelectTab2,
-        SelectTab3,
-        SelectTab4,
-        SelectTab5,
-        SelectTab6,
-        SelectTab7,
-        SelectTab8,
-        SelectTab9,
-        ToggleTheme,
-    ]
-);
+use std::time::Instant;
 
 struct Assets;
+
+fn select_initial_project(
+    persisted_current: Option<ProjectKey>,
+    local_machine_id: &str,
+    available_local_projects: &[String],
+    fallback_agent_project: Option<String>,
+) -> Option<ProjectKey> {
+    match persisted_current {
+        Some(key)
+            if key.machine_id != local_machine_id
+                || available_local_projects.contains(&key.project_id) =>
+        {
+            Some(key)
+        }
+        _ => fallback_agent_project
+            .filter(|project_id| available_local_projects.contains(project_id))
+            .or_else(|| available_local_projects.first().cloned())
+            .map(|project_id| ProjectKey::new(local_machine_id, project_id)),
+    }
+}
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
@@ -72,22 +80,7 @@ pub fn launch(
     gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            cx.bind_keys([
-                KeyBinding::new("ctrl-k", TogglePalette, None),
-                KeyBinding::new("ctrl-w", CloseTab, None),
-                KeyBinding::new("ctrl-shift-t", NewShellTab, None),
-                KeyBinding::new("ctrl-tab", NextTab, None),
-                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-                KeyBinding::new("alt-1", SelectTab1, None),
-                KeyBinding::new("alt-2", SelectTab2, None),
-                KeyBinding::new("alt-3", SelectTab3, None),
-                KeyBinding::new("alt-4", SelectTab4, None),
-                KeyBinding::new("alt-5", SelectTab5, None),
-                KeyBinding::new("alt-6", SelectTab6, None),
-                KeyBinding::new("alt-7", SelectTab7, None),
-                KeyBinding::new("alt-8", SelectTab8, None),
-                KeyBinding::new("alt-9", SelectTab9, None),
-            ]);
+            crate::shortcuts::install_keymap_or_defaults(cx, &persisted.shortcut_bindings);
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             let _ = cx.open_window(
                 WindowOptions {
@@ -126,8 +119,9 @@ pub struct MuxlaneApp {
     pub(crate) active_pane: PaneId,
     pub(crate) maximized_pane: Option<PaneId>,
     pub(crate) active: Option<AgentId>,
-    split_drag: Option<SplitDrag>,
-    split_metrics: Arc<std::sync::Mutex<HashMap<String, f32>>>,
+    pub(crate) workspace: WorkspaceController,
+    pub(crate) split_drag: Option<SplitDrag>,
+    pub(crate) split_metrics: Arc<std::sync::Mutex<HashMap<String, f32>>>,
 
     // 终端缓存
     pub(crate) terms: HashMap<AgentId, Entity<TermView>>,
@@ -157,12 +151,17 @@ pub struct MuxlaneApp {
     pub(crate) settings_theme_menu: bool,
     pub(crate) settings_font_menu: bool,
     pub(crate) settings_language_menu: bool,
+    pub(crate) shortcut_bindings: muxlane_store::PersistedShortcutBindings,
+    pub(crate) shortcut_capture: Option<ShortcutAction>,
+    pub(crate) shortcut_capture_subscription: Option<Subscription>,
+    pub(crate) shortcut_error: Option<ShortcutError>,
 
     // 命令面板
     pub(crate) palette_open: bool,
     palette_index: usize,
     palette_scroll: ScrollHandle,
     pub(crate) palette_input: Entity<TextField>,
+    pub(crate) palette_project: Option<ProjectKey>,
     presets: Vec<muxlane_core::AgentPreset>,
     pub(crate) new_session_target: Option<NewSessionTarget>,
 
@@ -188,8 +187,12 @@ pub struct MuxlaneApp {
     pub(crate) delete_busy: bool,
     pub(crate) bootstrap_confirm: Option<BootstrapConfirm>,
     pub(crate) bootstrap_error: Option<String>,
+    pub(crate) pending_project_creation: Option<PendingProjectCreation>,
+    pub(crate) project_add_busy: bool,
 
     // 动画/侧栏
+    pub(crate) sidebar: SidebarState,
+    sidebar_frame_pending: bool,
     spinner_frame: usize,
     pulse_phase: usize,
     pub(crate) collapsed_machines: std::collections::HashSet<String>,
@@ -204,7 +207,7 @@ impl Focusable for MuxlaneApp {
 
 impl MuxlaneApp {
     pub fn new(
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
         server: Arc<MuxlaneServer>,
         initial_snapshot: Snapshot,
@@ -251,6 +254,7 @@ impl MuxlaneApp {
                 if this
                     .update(cx, |this, cx| {
                         this.last_snapshot = snap;
+                        this.persist();
                         cx.notify();
                     })
                     .is_err()
@@ -306,6 +310,7 @@ impl MuxlaneApp {
                     this.update(cx, |this, cx| {
                         match ev {
                             muxlane_client::ClientEvent::StateChanged { host, state } => {
+                                this.remote_states.insert(host.clone(), state.clone());
                                 if let muxlane_client::RemoteState::Online(snap) = &state {
                                     let mut snap = snap.clone();
                                     if let Some(active) = this.active.as_ref() {
@@ -313,13 +318,95 @@ impl MuxlaneApp {
                                             agent.seen = true;
                                         }
                                     }
+                                    let machine_id = snap
+                                        .machine
+                                        .as_ref()
+                                        .map(|machine| machine.machine_id.clone());
+                                    let remote = this
+                                        .remotes
+                                        .iter()
+                                        .find(|remote| remote.cfg.name == host)
+                                        .cloned();
+                                    let previous_machine_id =
+                                        remote.as_ref().and_then(|remote| remote.machine_id());
+                                    let machine_id_changed =
+                                        machine_id.as_deref().is_some_and(|id| {
+                                            remote.as_ref().is_some_and(|remote| {
+                                                remote.cache_machine_id(Some(id))
+                                            })
+                                        });
+                                    let replaced_machine_id = crate::remotes::replaced_machine_id(
+                                        previous_machine_id,
+                                        machine_id.as_deref(),
+                                    );
+                                    let valid_agents: std::collections::HashSet<_> =
+                                        snap.agents.iter().map(|agent| agent.id.clone()).collect();
+                                    let mut stale_agents = machine_id
+                                        .as_deref()
+                                        .map(|machine_id| {
+                                            let current = this.current_workspace_layout();
+                                            this.workspace.save_current(current);
+                                            let previously_known = this
+                                                .remote_snaps
+                                                .get(&host)
+                                                .filter(|previous| {
+                                                    previous.machine.as_ref().is_some_and(
+                                                        |known_machine| {
+                                                            known_machine.machine_id == machine_id
+                                                        },
+                                                    )
+                                                })
+                                                .into_iter()
+                                                .flat_map(|previous| {
+                                                    previous
+                                                        .agents
+                                                        .iter()
+                                                        .map(|agent| agent.id.clone())
+                                                });
+                                            this.workspace.stale_agents_for_machine(
+                                                machine_id,
+                                                &valid_agents,
+                                                previously_known,
+                                            )
+                                        })
+                                        .unwrap_or_default();
+                                    if let Some(previous) = replaced_machine_id.as_deref() {
+                                        stale_agents.extend(
+                                            this.workspace
+                                                .known_agents_for_machine(previous)
+                                                .difference(&valid_agents)
+                                                .cloned(),
+                                        );
+                                    }
+                                    let stale_agents: Vec<_> = stale_agents.into_iter().collect();
+                                    let valid_projects: std::collections::HashSet<_> = snap
+                                        .projects
+                                        .iter()
+                                        .map(|project| project.id.clone())
+                                        .collect();
                                     this.remote_snaps.insert(host.clone(), snap);
+                                    if let Some(previous) = replaced_machine_id.as_deref() {
+                                        this.remove_machine_workspaces(previous);
+                                    }
+                                    let workspaces_changed =
+                                        machine_id.as_deref().is_some_and(|id| {
+                                            this.reconcile_machine_workspaces(id, &valid_projects)
+                                        });
+                                    if !stale_agents.is_empty() {
+                                        this.cleanup_removed_agents(&stale_agents, cx);
+                                    }
+                                    this.ensure_active_terminal(cx);
+                                    if machine_id_changed
+                                        || workspaces_changed
+                                        || !stale_agents.is_empty()
+                                    {
+                                        this.persist();
+                                    }
                                 }
                                 // 到达稳态后清除进度显示
                                 if !matches!(state, muxlane_client::RemoteState::Connecting(_)) {
                                     this.bootstrap_progress.remove(&host);
                                 }
-                                this.remote_states.insert(host, state);
                             }
                             muxlane_client::ClientEvent::BootstrapProgress { host, progress } => {
                                 this.bootstrap_progress.insert(host, progress);
@@ -360,12 +447,59 @@ impl MuxlaneApp {
             .iter()
             .map(|a| a.id.clone())
             .collect();
-        let mut restored_tree = persisted.pane_tree.clone();
-        restored_tree.retain_agents(&valid);
-        let restored_active = persisted
-            .active_pane
-            .filter(|id| restored_tree.group(id).is_some())
-            .unwrap_or_else(|| restored_tree.first_pane_id());
+        let mut workspace = WorkspaceController::from_persisted(&persisted);
+        let local_machine_id = initial_snapshot
+            .machine
+            .as_ref()
+            .map(|machine| machine.machine_id.clone())
+            .unwrap_or_else(|| "local".into());
+        let mut missing_local: std::collections::HashSet<AgentId> = persisted
+            .sessions
+            .iter()
+            .map(|session| session.agent_id.clone())
+            .filter(|agent| !valid.contains(agent))
+            .collect();
+        missing_local.extend(
+            workspace
+                .known_agents_for_machine(&local_machine_id)
+                .difference(&valid)
+                .cloned(),
+        );
+        workspace.remove_agents(&missing_local);
+        let available_local_projects: Vec<_> = initial_snapshot
+            .projects
+            .iter()
+            .map(|project| project.id.clone())
+            .collect();
+        let fallback_agent_project = persisted
+            .pane_tree
+            .all_groups()
+            .into_iter()
+            .flat_map(|group| group.tabs.iter())
+            .find_map(|agent| initial_snapshot.agent(agent))
+            .map(|agent| agent.project.clone());
+        let selected_project = select_initial_project(
+            workspace.current_project().cloned(),
+            &local_machine_id,
+            &available_local_projects,
+            fallback_agent_project,
+        );
+        let project_agents: std::collections::HashSet<_> = selected_project
+            .as_ref()
+            .map(|key| {
+                initial_snapshot
+                    .agents
+                    .iter()
+                    .filter(|agent| {
+                        key.machine_id == local_machine_id && agent.project == key.project_id
+                    })
+                    .map(|agent| agent.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let restored_layout = workspace.initial_layout(selected_project, &project_agents);
+        let restored_tree = restored_layout.pane_tree;
+        let restored_active = restored_layout.active_pane;
         let theme_mode = persisted
             .theme
             .as_deref()
@@ -451,6 +585,7 @@ impl MuxlaneApp {
             terms: HashMap::new(),
             mirror_cancel: HashMap::new(),
             active: None,
+            workspace,
             last_snapshot: initial_snapshot,
             remotes,
             remote_snaps: HashMap::new(),
@@ -462,13 +597,21 @@ impl MuxlaneApp {
             settings_theme_menu: false,
             settings_font_menu: false,
             settings_language_menu: false,
+            shortcut_bindings: crate::shortcuts::normalize(&persisted.shortcut_bindings)
+                .unwrap_or_default(),
+            shortcut_capture: None,
+            shortcut_capture_subscription: None,
+            shortcut_error: None,
             sound_enabled: persisted.sound_enabled.unwrap_or(true),
-            osc52_clipboard_enabled: persisted.osc52_clipboard_enabled.unwrap_or(false),
+            // Default on: tmux mouse-selection copy relies on OSC52 reaching the
+            // system clipboard. Users can still disable it in settings.
+            osc52_clipboard_enabled: persisted.osc52_clipboard_enabled.unwrap_or(true),
             language,
             palette_open: false,
             palette_index: 0,
             palette_scroll: ScrollHandle::new(),
             palette_input,
+            palette_project: None,
             presets: muxlane_core::builtin_presets(muxlane_term::default_shell_program()),
             connect_dialog: false,
             connect_input,
@@ -491,11 +634,15 @@ impl MuxlaneApp {
             delete_busy: false,
             bootstrap_confirm: None,
             bootstrap_error: None,
+            pending_project_creation: None,
+            project_add_busy: false,
             store_path,
             split_drag: None,
             split_metrics: Arc::new(std::sync::Mutex::new(HashMap::new())),
             spinner_frame: 0,
             pulse_phase: 0,
+            sidebar: SidebarState::new(persisted.sidebar_visible, persisted.sidebar_width),
+            sidebar_frame_pending: false,
             collapsed_machines: std::collections::HashSet::new(),
             collapsed_projects: std::collections::HashSet::new(),
             bootstrap_progress: HashMap::new(),
@@ -504,14 +651,11 @@ impl MuxlaneApp {
             .pane_tree
             .group(&app.active_pane)
             .and_then(|group| group.active.clone());
-        let opened: Vec<_> = app
-            .last_snapshot
-            .agents
-            .iter()
-            .filter(|agent| app.pane_tree.pane_for_agent(&agent.id).is_some())
-            .map(|agent| agent.id.clone())
-            .collect();
-        for agent in opened {
+        if let Some(agent) = app
+            .active
+            .clone()
+            .filter(|agent| app.last_snapshot.agent(agent).is_some())
+        {
             let server = Arc::clone(&app.server);
             let session_agent = agent.clone();
             cx.spawn(async move |this, cx| {
@@ -538,9 +682,10 @@ impl MuxlaneApp {
         // 仅 UI 自动化使用；真实交互仍由用户点击 agent 打开 tab。
         if std::env::var("MUXLANE_TEST_AUTO_OPEN").as_deref() == Ok("1") {
             if let Some(id) = first_agent {
-                app.open_agent(&id, cx);
+                app.open_agent(&id, window, cx);
             }
         }
+        app.persist();
         app
     }
 
@@ -557,7 +702,11 @@ impl MuxlaneApp {
                     muxlane_client::Target::Ssh { host, socket } => format!("{host}:{socket}"),
                 };
                 let auth = host.cfg.auth.clone().into();
-                muxlane_store::PersistedRemote { target, auth }
+                muxlane_store::PersistedRemote {
+                    target,
+                    auth,
+                    machine_id: host.machine_id(),
+                }
             })
             .collect();
         let mut app = muxlane_store::PersistedApp::from_snapshot(&self.last_snapshot);
@@ -566,8 +715,11 @@ impl MuxlaneApp {
             .map(|remote| remote.target.clone())
             .collect();
         app.remote_configs = remote_configs;
-        app.pane_tree = self.pane_tree.clone();
-        app.active_pane = Some(self.active_pane.clone());
+        self.workspace
+            .write_persisted(&mut app, self.current_workspace_layout());
+        app.sidebar_visible = self.sidebar.visible;
+        app.sidebar_width = self.sidebar.width;
+        app.shortcut_bindings = self.shortcut_bindings.clone();
         app.dark_mode = Some(self.theme_mode.is_dark());
         app.theme = Some(self.theme_mode.id().into());
         app.font_family = Some(self.font_family.clone());
@@ -655,9 +807,46 @@ impl MuxlaneApp {
     }
 }
 
+impl MuxlaneApp {
+    pub(crate) fn set_sidebar_visible(
+        &mut self,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar
+            .set_visible(visible, Instant::now(), cx.reduce_motion());
+        self.persist();
+        cx.notify();
+        self.schedule_sidebar_frame(window, cx);
+    }
+
+    fn schedule_sidebar_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_frame_pending || !self.sidebar.is_transitioning() {
+            return;
+        }
+        self.sidebar_frame_pending = true;
+        cx.on_next_frame(window, |this, window, cx| {
+            this.sidebar_frame_pending = false;
+            let now = Instant::now();
+            let changed = if cx.reduce_motion() {
+                this.sidebar.set_visible(this.sidebar.visible, now, true);
+                true
+            } else {
+                this.sidebar.advance_transition(now)
+            };
+            if changed {
+                cx.notify();
+            }
+            this.schedule_sidebar_frame(window, cx);
+        });
+    }
+}
+
 impl Render for MuxlaneApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_mode(self.theme_mode);
+        self.schedule_sidebar_frame(window, cx);
         // ── 终端网格：PaneTree 递归渲染。
         let render_tree = if let Some(max) = &self.maximized_pane {
             self.pane_tree
@@ -669,6 +858,7 @@ impl Render for MuxlaneApp {
             self.pane_tree.clone()
         };
         let grid = div()
+            .relative()
             .flex()
             .flex_1()
             .min_w_0()
@@ -685,6 +875,11 @@ impl Render for MuxlaneApp {
                 this.palette_open = !this.palette_open;
                 this.new_session_target = None;
                 if this.palette_open {
+                    if let Some(key) = this.default_palette_project(window, cx) {
+                        this.select_palette_project(key, cx);
+                    } else {
+                        this.palette_project = None;
+                    }
                     this.palette_index = 0;
                     this.palette_scroll.scroll_to_item(0);
                     dismiss_context_menus(&mut this.session_menu, &mut this.tree_menu);
@@ -703,6 +898,12 @@ impl Render for MuxlaneApp {
                     this.close_tab(&pane, &agent, window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &PreviousWorkspace, window, cx| {
+                this.cycle_project_workspace(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextWorkspace, window, cx| {
+                this.cycle_project_workspace(true, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &NewShellTab, window, cx| {
                 let pane = this.active_pane.clone();
                 this.new_shell_tab(&pane, window, cx);
@@ -710,7 +911,7 @@ impl Render for MuxlaneApp {
             .on_action(cx.listener(|this, _: &NextTab, window, cx| {
                 this.next_tab(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+            .on_action(cx.listener(|this, _: &PreviousTab, window, cx| {
                 this.prev_tab(window, cx);
             }))
             .on_action(cx.listener(|this, _: &SelectTab1, window, cx| {
@@ -753,10 +954,8 @@ impl Render for MuxlaneApp {
                     }
                 } else if this.settings_open {
                     if ev.keystroke.key.as_str() == "escape" {
-                        this.settings_open = false;
-                        this.focus.focus(window, cx);
+                        this.close_settings(window, cx);
                         cx.stop_propagation();
-                        cx.notify();
                     }
                 } else if this.palette_open {
                     // 只拦截 palette 真正消费的导航/确认键；普通字符必须放行，
@@ -780,56 +979,136 @@ impl Render for MuxlaneApp {
                     }
                 },
             ))
+            .on_drag_move::<SidebarDividerDrag>(cx.listener(
+                |this, ev: &gpui::DragMoveEvent<SidebarDividerDrag>, _window, cx| {
+                    if this.sidebar.update_drag(f32::from(ev.event.position.x)) {
+                        cx.notify();
+                    }
+                },
+            ))
             .on_drop::<DividerDrag>(cx.listener(|this, _drag, _window, _cx| {
                 this.end_split_drag();
+            }))
+            .on_drop::<SidebarDividerDrag>(cx.listener(|this, _drag, _window, _cx| {
+                if this.sidebar.end_drag() {
+                    this.persist();
+                }
             }))
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _window, cx| {
                 if this.split_drag.is_some() {
                     this.update_split_drag(ev.position, cx);
                 }
+                if this.sidebar.update_drag(f32::from(ev.position.x)) {
+                    cx.notify();
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _ev, _window, _cx| this.end_split_drag()),
+                cx.listener(|this, _ev, _window, _cx| {
+                    this.end_split_drag();
+                    if this.sidebar.end_drag() {
+                        this.persist();
+                    }
+                }),
             )
             .flex()
             .size_full()
             .bg(rgba(theme.bg0))
             .text_color(rgba(theme.fg0))
-            .font_family("Noto Sans")
-            .child(
-                div()
-                    .w(px(230.))
-                    .flex()
-                    .flex_col()
-                    .bg(rgba(theme.bg1))
-                    .border_r_1()
-                    .border_color(rgba(theme.line))
-                    .child(
+            .font_family("Noto Sans");
+        let sidebar_width = self.sidebar.width;
+        let sidebar_progress = self.sidebar.reveal_progress;
+        let displayed_sidebar_width = self.sidebar.displayed_width();
+        let sidebar_can_resize = self.sidebar.visible && !self.sidebar.is_transitioning();
+        root = root.child(
+            div()
+                .id("sidebar-shell")
+                .relative()
+                .w(px(displayed_sidebar_width))
+                .h_full()
+                .flex_none()
+                .child(
+                    div().size_full().overflow_hidden().child(
                         div()
-                            .id("sidebar-tree-scroll")
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .child(self.render_machine_tree(theme, cx)),
-                    )
-                    .child(self.render_sidebar_footer(theme, cx)),
-            )
-            .child(grid);
-        if self.split_drag.is_some() {
+                            .w(px(sidebar_width))
+                            .h_full()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .opacity(sidebar_progress)
+                            .bg(rgba(theme.bg1))
+                            .child(
+                                div()
+                                    .id("sidebar-tree-scroll")
+                                    .flex_1()
+                                    .overflow_y_scroll()
+                                    .child(self.render_machine_tree(theme, cx)),
+                            )
+                            .child(self.render_sidebar_footer(theme, cx)),
+                    ),
+                )
+                .child(
+                    div()
+                        .id("sidebar-rail")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .w(px(SIDEBAR_RAIL_WIDTH))
+                        .h_full()
+                        .bg(rgba(Theme::with_alpha(theme.line, 0x80)))
+                        .hover(|style| style.bg(rgba(Theme::with_alpha(theme.accent, 0x70))))
+                        .when(!sidebar_can_resize, |rail| {
+                            rail.tooltip(hover_tip(i18n::text(self.language, "sidebar.show")))
+                        })
+                        .when(sidebar_can_resize, |rail| {
+                            rail.cursor_col_resize().on_drag(
+                                SidebarDividerDrag,
+                                |_, _offset, _window, cx| {
+                                    cx.new(|_| crate::widgets::DividerDragGhost)
+                                },
+                            )
+                        })
+                        .when(!sidebar_can_resize, |rail| rail.cursor_pointer())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                if sidebar_can_resize {
+                                    this.sidebar.start_drag(f32::from(event.position.x));
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                } else {
+                                    this.set_sidebar_visible(true, window, cx);
+                                }
+                            }),
+                        ),
+                ),
+        );
+        root = root.child(grid);
+        if self.split_drag.is_some() || self.sidebar.drag.is_some() {
             let mut overlay = div()
-                .id("split-drag-overlay")
+                .id("layout-drag-overlay")
                 .absolute()
                 .size_full()
                 .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _window, cx| {
                     if this.split_drag.is_some() {
                         this.update_split_drag(ev.position, cx);
                     }
+                    if this.sidebar.update_drag(f32::from(ev.position.x)) {
+                        cx.notify();
+                    }
                 }))
                 .on_mouse_up(
                     MouseButton::Left,
-                    cx.listener(|this, _ev, _window, _cx| this.end_split_drag()),
+                    cx.listener(|this, _ev, _window, _cx| {
+                        this.end_split_drag();
+                        if this.sidebar.end_drag() {
+                            this.persist();
+                        }
+                    }),
                 );
-            if self.split_drag.as_ref().map(|d| d.axis) == Some(SplitAxis::Horizontal) {
+            if self.sidebar.drag.is_some()
+                || self.split_drag.as_ref().map(|drag| drag.axis) == Some(SplitAxis::Horizontal)
+            {
                 overlay = overlay.cursor_col_resize();
             } else {
                 overlay = overlay.cursor_row_resize();
@@ -878,6 +1157,9 @@ impl Render for MuxlaneApp {
         if self.delete_confirm.is_some() {
             root = root.child(self.render_delete_confirm(cx));
         }
+        if self.pending_project_creation.is_some() {
+            root = root.child(self.render_project_create_confirm(cx));
+        }
         if self.bootstrap_confirm.is_some() {
             root = root.child(self.render_bootstrap_confirm(cx));
         }
@@ -886,5 +1168,49 @@ impl Render for MuxlaneApp {
             root = root.child(self.render_settings(cx));
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_rejects_stale_local_current_and_uses_valid_agent_project() {
+        let selected = select_initial_project(
+            Some(ProjectKey::new("local", "deleted")),
+            "local",
+            &["first".into(), "agent".into()],
+            Some("agent".into()),
+        );
+
+        assert_eq!(selected, Some(ProjectKey::new("local", "agent")));
+    }
+
+    #[test]
+    fn startup_falls_back_to_first_local_project_when_agent_project_is_invalid() {
+        let selected = select_initial_project(
+            Some(ProjectKey::new("local", "deleted")),
+            "local",
+            &["first".into()],
+            Some("also-deleted".into()),
+        );
+
+        assert_eq!(selected, Some(ProjectKey::new("local", "first")));
+    }
+
+    #[test]
+    fn startup_keeps_valid_local_and_offline_remote_currents() {
+        let local = ProjectKey::new("local", "kept");
+        assert_eq!(
+            select_initial_project(Some(local.clone()), "local", &["kept".into()], None,),
+            Some(local)
+        );
+
+        let remote = ProjectKey::new("remote-machine", "offline-project");
+        assert_eq!(
+            select_initial_project(Some(remote.clone()), "local", &["first".into()], None,),
+            Some(remote)
+        );
     }
 }

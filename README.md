@@ -17,9 +17,9 @@
 - **灵动胶囊通知浮岛（Dynamic Capsule Popover）**：
   - 侧栏底部轻盈的通知入口，实时呈现未读计数与呼吸微光状态（Working 脉冲 / Blocked 高警示微光）；
   - 浮层式通知中心，记录各 Agent 任务流转（执行中、等待输入、任务完成）与相对时间，支持一键点击直达对应终端窗格。
-- **命令面板（Command Palette）**：全局 `Ctrl+K` 极速唤起，秒级检索并启动预设 Agent（Claude Code、Codex、Pi、Agy、OpenCode、Qwen 等）或快速分屏。
+- **命令面板（Command Palette）**：全局 `Win/Cmd+K` 极速唤起，秒级检索并启动预设 Agent（Claude Code、Codex、Pi、Agy、OpenCode、Qwen 等）或快速分屏。
 
-| 全局命令面板 (Ctrl+K) | 会话交互与菜单管理 |
+| 全局命令面板 (Win/Cmd+K) | 会话交互与菜单管理 |
 |:---:|:---:|
 | ![Command Palette](docs/images/command-palette.png) | ![Session Menu](docs/images/session-menu.png) |
 
@@ -142,13 +142,18 @@ scripts/ui-smoke.sh
 
 | 快捷键 | 功能描述 |
 | :--- | :--- |
-| `Ctrl + K` | 唤起全局命令面板（启动 Agent / 分屏命令） |
+| `Platform + K` | 唤起全局命令面板（启动 Agent / 分屏命令） |
+| `Ctrl + W` | 关闭当前活动标签页并结束其会话（可配置） |
+| `Platform + ←` / `Platform + →` | 切换当前窗格标签页；到边界时按侧栏顺序切换相邻项目工作区（可配置） |
+| `Platform + ↑` / `Platform + ↓` | 按侧栏顺序循环切换项目工作区，并恢复各自标签页（可配置） |
 | `Ctrl + Shift + T` | 在当前窗格新建 Shell 标签页 |
 | `Ctrl + C` (选区存在时) | 复制选中文本到系统剪贴板 |
 | `Ctrl + C` (无选区时) | 向终端进程发送原生中断信号 (`SIGINT`) |
 | `Ctrl + V` | 将剪贴板内容安全粘贴至当前终端（带 Bracketed Paste 保护） |
 | `Shift + 鼠标左键拖拽` | 强制使用本地终端文本划词，松开自动复制（即使在 Vim/Htop 等应用内） |
 | `Esc` | 快速退出通知中心浮层、下拉菜单或弹出层 |
+
+设置页的“快捷键”区域可录入单个组合键、清空以禁用单项，或整组恢复默认；修改会立即生效并在重启后保留。应用级快捷键优先于终端输入，清空或改绑 Platform + 方向键后，对应按键会恢复为终端输入。
 
 ---
 

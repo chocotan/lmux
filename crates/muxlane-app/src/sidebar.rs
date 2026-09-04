@@ -7,11 +7,15 @@ use crate::icons::*;
 use crate::menus::{dismiss_context_menus, BootstrapConfirm, DeleteTarget, SessionMenu, TreeMenu};
 use crate::theme::Theme;
 use crate::widgets::*;
+use crate::workspace::ProjectKey;
 use gpui::{
     div, prelude::*, px, relative, rgba, Context, Focusable, MouseButton, ParentElement, Render,
     SharedString, Styled, Window,
 };
 use std::sync::Arc;
+
+#[derive(Clone)]
+pub(super) struct SidebarDividerDrag;
 
 struct HoverTip {
     text: SharedString,
@@ -22,7 +26,6 @@ impl Render for HoverTip {
         div()
             .px_2()
             .py_1()
-            .rounded_sm()
             .bg(rgba(0x1a1d24f2))
             .border_1()
             .border_color(rgba(0x00000066))
@@ -32,7 +35,7 @@ impl Render for HoverTip {
     }
 }
 
-fn hover_tip(
+pub(super) fn hover_tip(
     text: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView {
     let text = text.into();
@@ -47,41 +50,61 @@ impl MuxlaneApp {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (row_id, add_id, project_key, project_group, branch, delete_target, new_session_target) =
-            if let Some(host) = remote_host {
-                (
-                    format!("remote-project-row-{host}-{}", project.id),
-                    format!("remote-session-add-{host}-{}", project.id),
-                    format!("remote:{host}:{}", project.id),
-                    format!("remote-project-hover-{host}-{}", project.id),
-                    project.branch.clone(),
-                    DeleteTarget::RemoteProject {
-                        host: host.to_string(),
-                        project: project.id.clone(),
-                        label: project.name.clone(),
-                    },
-                    NewSessionTarget::Remote {
-                        host: host.to_string(),
-                        project: project.id.clone(),
-                    },
-                )
-            } else {
-                (
-                    format!("project-row-{}", project.id),
-                    format!("project-add-{}", project.id),
-                    format!("local:{}", project.id),
-                    format!("project-hover-{}", project.id),
-                    project
-                        .branch
-                        .clone()
-                        .filter(|branch| !branch.trim().is_empty()),
-                    DeleteTarget::LocalProject {
-                        project: project.id.clone(),
-                        label: project.name.clone(),
-                    },
-                    NewSessionTarget::Local(project.id.clone()),
-                )
-            };
+        let (
+            row_id,
+            add_id,
+            collapse_key,
+            project_group,
+            branch,
+            delete_target,
+            new_session_target,
+            workspace_key,
+        ) = if let Some(host) = remote_host {
+            let workspace_key = self.remote_snaps.get(host).and_then(|snapshot| {
+                snapshot
+                    .machine
+                    .as_ref()
+                    .map(|machine| ProjectKey::new(machine.machine_id.clone(), project.id.clone()))
+            });
+            (
+                format!("remote-project-row-{host}-{}", project.id),
+                format!("remote-session-add-{host}-{}", project.id),
+                format!("remote:{host}:{}", project.id),
+                format!("remote-project-hover-{host}-{}", project.id),
+                project.branch.clone(),
+                DeleteTarget::RemoteProject {
+                    host: host.to_string(),
+                    project: project.id.clone(),
+                    label: project.name.clone(),
+                },
+                NewSessionTarget::Remote {
+                    host: host.to_string(),
+                    project: project.id.clone(),
+                },
+                workspace_key,
+            )
+        } else {
+            (
+                format!("project-row-{}", project.id),
+                format!("project-add-{}", project.id),
+                format!("local:{}", project.id),
+                format!("project-hover-{}", project.id),
+                project
+                    .branch
+                    .clone()
+                    .filter(|branch| !branch.trim().is_empty()),
+                DeleteTarget::LocalProject {
+                    project: project.id.clone(),
+                    label: project.name.clone(),
+                },
+                NewSessionTarget::Local(project.id.clone()),
+                Some(ProjectKey::new(self.local_machine_id(), project.id.clone())),
+            )
+        };
+        let project_name = project.name.clone();
+        let project_path = project.path.display().to_string();
+        let collapse_key_for_click = collapse_key.clone();
+        let palette_key = workspace_key.clone();
         div()
             .id(gpui::ElementId::Name(row_id.into()))
             .flex()
@@ -95,9 +118,15 @@ impl MuxlaneApp {
             .text_color(rgba(theme.fg0))
             .group(project_group.clone())
             .hover(|style| style.bg(rgba(theme.bg2)))
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                if !this.collapsed_projects.remove(&project_key) {
-                    this.collapsed_projects.insert(project_key.clone());
+            .tooltip(hover_tip(project_path))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                if let Some(workspace_key) = workspace_key.clone() {
+                    let is_current = this.workspace.current_project() == Some(&workspace_key);
+                    if is_current && !this.collapsed_projects.remove(&collapse_key_for_click) {
+                        this.collapsed_projects
+                            .insert(collapse_key_for_click.clone());
+                    }
+                    this.select_project_workspace(workspace_key, window, cx);
                 }
                 cx.notify();
             }))
@@ -115,16 +144,28 @@ impl MuxlaneApp {
                     cx.notify();
                 }),
             )
-            .child(project.name.clone())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(project_name),
+            )
             .child(
                 div()
                     .ml_auto()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_1()
                     .when_some(branch, |controls, branch| {
                         controls.child(
                             div()
+                                .flex_none()
+                                .max_w(px(90.))
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .px_1()
                                 .bg(rgba(theme.bg2))
                                 .text_size(px(9.))
@@ -138,6 +179,7 @@ impl MuxlaneApp {
                             .id(gpui::ElementId::Name(add_id.into()))
                             .w(px(20.))
                             .h(px(20.))
+                            .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -150,6 +192,7 @@ impl MuxlaneApp {
                             .on_click(cx.listener(move |this, _event, window, cx| {
                                 cx.stop_propagation();
                                 this.new_session_target = Some(new_session_target.clone());
+                                this.palette_project = palette_key.clone();
                                 this.palette_open = true;
                                 this.palette_index = 0;
                                 this.palette_scroll.scroll_to_item(0);
@@ -173,6 +216,7 @@ impl MuxlaneApp {
         let id = agent.id.clone();
         let active = self.active.as_deref() == Some(&id);
         let status = agent.status;
+        let project_key = self.project_key_for_agent(&id);
         let is_error = agent.title.contains("异常") || agent.title.contains("错误");
         let attention = compute_attention_style(
             status,
@@ -208,12 +252,10 @@ impl MuxlaneApp {
             .on_click(cx.listener({
                 let id = id.clone();
                 move |this, _event, window, cx| {
-                    if remote {
-                        this.open_remote_agent(&id, cx);
-                    } else {
-                        this.open_agent(&id, cx);
+                    if let Some(project_key) = project_key.clone() {
+                        this.select_project_workspace_inner(project_key, cx);
                     }
-                    this.focus_agent(&id, window, cx);
+                    this.open_agent(&id, window, cx);
                 }
             }))
             .on_mouse_down(
@@ -242,7 +284,8 @@ impl MuxlaneApp {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(truncate(&agent.title, 20)),
+                    .text_ellipsis()
+                    .child(agent.title.clone()),
             )
     }
 }
@@ -273,17 +316,24 @@ impl MuxlaneApp {
                 .text_size(px(10.))
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(rgba(theme.fg1))
-                .child("MACHINES")
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child("MACHINES"),
+                )
                 .child(
                     div()
                         .id("connect-machine")
                         .ml_auto()
                         .w(px(20.))
                         .h(px(20.))
+                        .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded_sm()
                         .cursor_pointer()
                         .text_color(rgba(theme.fg1))
                         .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
@@ -296,6 +346,25 @@ impl MuxlaneApp {
                             this.open_connect_dialog(window, cx);
                         }))
                         .child(panel_icon(PLUS_ICON, theme.fg1)),
+                )
+                .child(
+                    div()
+                        .id("sidebar-hide-button")
+                        .w(px(20.))
+                        .h(px(20.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_color(rgba(theme.fg1))
+                        .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
+                        .active(|s| s.bg(rgba(theme.bg3)))
+                        .tooltip(hover_tip(i18n::text(self.language, "sidebar.hide")))
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.set_sidebar_visible(false, window, cx);
+                        }))
+                        .child(panel_icon(SIDEBAR_COLLAPSE_ICON, theme.fg1)),
                 ),
         );
         tree = tree.child(
@@ -321,10 +390,18 @@ impl MuxlaneApp {
                         cx.notify();
                     }
                 }))
-                .child(machine_name.clone())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(machine_name.clone()),
+                )
                 .child(
                     div()
                         .ml_auto()
+                        .flex_none()
                         .px_1()
                         .bg(rgba(theme.bg2))
                         .text_size(px(9.))
@@ -337,6 +414,7 @@ impl MuxlaneApp {
                         .id("add-local-project")
                         .w(px(20.))
                         .h(px(20.))
+                        .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
@@ -531,13 +609,21 @@ impl MuxlaneApp {
                             }
                         }),
                     )
-                    .child(name.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(name.clone()),
+                    )
                     .child(
                         div()
                             .id(gpui::ElementId::Name(
                                 format!("remote-reconnect-{name}").into(),
                             ))
                             .ml_auto()
+                            .flex_none()
                             .px_1()
                             .bg(rgba(theme.bg2))
                             .text_size(px(9.))
@@ -632,6 +718,7 @@ impl MuxlaneApp {
                             ))
                             .w(px(20.))
                             .h(px(20.))
+                            .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -658,6 +745,7 @@ impl MuxlaneApp {
                                 .id(gpui::ElementId::Name(
                                     format!("remote-remediate-{remediation_host}").into(),
                                 ))
+                                .flex_none()
                                 .px_2()
                                 .py_1()
                                 .text_size(px(10.))
@@ -789,7 +877,6 @@ impl MuxlaneApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_sm()
                     .cursor_pointer()
                     .hover(|s| s.bg(rgba(theme.bg2)))
                     .active(|s| s.bg(rgba(theme.bg3)))
@@ -823,7 +910,6 @@ impl MuxlaneApp {
                                 .min_w(px(14.))
                                 .h(px(14.))
                                 .px(px(3.))
-                                .rounded_full()
                                 .bg(rgba(badge_color))
                                 .when_some(badge_glow, |b, glow| {
                                     b.border_1().border_color(rgba(glow))
@@ -847,7 +933,6 @@ impl MuxlaneApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_sm()
                     .cursor_pointer()
                     .hover(|s| s.bg(rgba(theme.bg2)))
                     .active(|s| s.bg(rgba(theme.bg3)))

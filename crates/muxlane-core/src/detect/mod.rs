@@ -87,6 +87,12 @@ pub struct DetectionEngine {
 /// hook 权威窗口：hook 上报后该时长内 hook 独占状态判定
 const HOOK_AUTHORITY_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+/// 静默兜底阈值：屏幕规则全部失配且当前被认为是 working 时，
+/// 输出静默超过该时长则回落 idle。
+/// TUI agent（pi/claude 等）工作时会持续重绘 spinner，不会真正静默；
+/// 该兜底专用于修复「误标 working / hook 漏报 done」后的状态卡死。
+const SILENCE_IDLE_FALLBACK_SECS: f64 = 10.0;
+
 impl DetectionEngine {
     pub fn new() -> Self {
         DetectionEngine {
@@ -200,10 +206,21 @@ impl DetectionEngine {
         }
 
         // 2) 屏幕规则推导候选状态
-        let candidate = self.screen_candidate(agent_type, input);
+        let mut candidate = self.screen_candidate(agent_type, input);
         let need = self.debounce_ticks;
 
         let st = self.state_mut(agent, current);
+        // 2b) 静默兜底：规则全失配 + 当前 stuck 在 working + 输出长时间静默
+        // → 候选 idle。只兜 working→idle，不覆盖 blocked（避免掩掉等待确认）。
+        if candidate.is_none() && matches!(st.status, AgentStatus::Working) {
+            let silent_long = input
+                .secs_since_output
+                .map(|s| s >= SILENCE_IDLE_FALLBACK_SECS)
+                .unwrap_or(false);
+            if silent_long {
+                candidate = Some(AgentStatus::Idle);
+            }
+        }
         let Some(candidate) = candidate else {
             st.pending = None;
             return None;
@@ -453,6 +470,97 @@ mod tests {
             e.observe(&a, AgentType::Unknown, AgentStatus::Working, &prompt),
             None
         );
+    }
+
+    /// 当前 pi 空闲底栏：不匹配任何现有屏幕规则
+    fn pi_idle_screen(secs: f64) -> ScreenInput {
+        ScreenInput {
+            bottom_lines: vec![
+                "────────────────────────".into(),
+                "~/Downloads/some-proj".into(),
+                "↑216k ↓23k R2.4M CH96.3% 13.2%/600k (auto)".into(),
+            ],
+            osc_title: None,
+            secs_since_output: Some(secs),
+            bell: false,
+        }
+    }
+
+    #[test]
+    fn stuck_working_recovers_via_silence() {
+        // 回归：空回车误标 working，pi 屏幕规则全失配，hook 无事件；
+        // 输出静默超过阈值后，防抖两拍应回落 idle（修复状态永久卡死）。
+        let mut e = engine();
+        let a: AgentId = "pi_P01".into();
+        assert_eq!(
+            e.observe(
+                &a,
+                AgentType::Pi,
+                AgentStatus::Working,
+                &pi_idle_screen(30.0)
+            ),
+            None
+        ); // 防抖第一拍
+        let upd = e
+            .observe(
+                &a,
+                AgentType::Pi,
+                AgentStatus::Working,
+                &pi_idle_screen(31.0),
+            )
+            .unwrap();
+        assert_eq!(upd.to, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn silence_fallback_requires_real_silence() {
+        // 静默时长不足阈值（spinner 仍在重绘）→ 不触发回落
+        let mut e = engine();
+        let a: AgentId = "pi_P02".into();
+        for secs in [0.5, 1.0, 2.0] {
+            assert_eq!(
+                e.observe(
+                    &a,
+                    AgentType::Pi,
+                    AgentStatus::Working,
+                    &pi_idle_screen(secs)
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn silence_fallback_needs_output_timestamp() {
+        // 拿不到输出时间戳（None）→ 保守不回落
+        let mut e = engine();
+        let a: AgentId = "pi_P03".into();
+        let mut screen = pi_idle_screen(0.0);
+        screen.secs_since_output = None;
+        for _ in 0..3 {
+            assert_eq!(
+                e.observe(&a, AgentType::Pi, AgentStatus::Working, &screen),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn silence_fallback_does_not_override_blocked() {
+        // blocked（等待确认）同样长时间静默，但不能被静默兜底掩掉
+        let mut e = engine();
+        let a: AgentId = "pi_P04".into();
+        for _ in 0..3 {
+            assert_eq!(
+                e.observe(
+                    &a,
+                    AgentType::Pi,
+                    AgentStatus::Blocked,
+                    &pi_idle_screen(60.0)
+                ),
+                None
+            );
+        }
     }
 
     #[test]

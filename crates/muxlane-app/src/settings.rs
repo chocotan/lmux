@@ -1,8 +1,11 @@
 //! Settings page and appearance controls.
 use crate::app::MuxlaneApp;
 use crate::i18n::{self, Language};
+use crate::shortcuts::{self, ShortcutAction, ShortcutError};
 use crate::theme::{Theme, ThemeMode};
-use gpui::{deferred, div, prelude::*, px, rgba, Context, MouseButton, ParentElement, Styled};
+use gpui::{
+    deferred, div, prelude::*, px, rgba, Context, MouseButton, ParentElement, Styled, Window,
+};
 
 pub(crate) const FONT_FAMILIES: &[&str] = &[
     "Noto Sans Mono",
@@ -101,8 +104,98 @@ impl MuxlaneApp {
         cx.notify();
     }
 
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_shortcut_capture();
+        self.settings_open = false;
+        self.dismiss_settings_menus();
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_shortcut_capture(&mut self) {
+        self.shortcut_capture_subscription.take();
+        self.shortcut_capture = None;
+    }
+
+    fn start_shortcut_capture(&mut self, action: ShortcutAction, cx: &mut Context<Self>) {
+        self.cancel_shortcut_capture();
+        self.shortcut_capture = Some(action);
+        self.shortcut_error = None;
+        let listener = cx.listener(|this, event: &gpui::KeystrokeEvent, _window, cx| {
+            cx.stop_propagation();
+            if event.keystroke.key.as_str() == "escape" {
+                this.cancel_shortcut_capture();
+                cx.notify();
+                return;
+            }
+            let Some(action) = this.shortcut_capture else {
+                return;
+            };
+            match shortcuts::captured_chord(&event.keystroke) {
+                Ok(chord) => this.apply_shortcut_binding(action, Some(chord), cx),
+                Err(error) => {
+                    this.shortcut_error = Some(error);
+                    cx.notify();
+                }
+            }
+        });
+        self.shortcut_capture_subscription = Some(cx.intercept_keystrokes(listener));
+        cx.notify();
+    }
+
+    fn apply_shortcut_binding(
+        &mut self,
+        action: ShortcutAction,
+        binding: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match shortcuts::install_binding(cx, &self.shortcut_bindings, action, binding) {
+            Ok(normalized) => {
+                self.shortcut_bindings = normalized;
+                self.shortcut_error = None;
+                self.cancel_shortcut_capture();
+                self.persist();
+            }
+            Err(error) => self.shortcut_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn restore_default_shortcuts(&mut self, cx: &mut Context<Self>) {
+        self.cancel_shortcut_capture();
+        let defaults = muxlane_store::PersistedShortcutBindings::default();
+        match shortcuts::install_keymap(cx, &defaults) {
+            Ok(normalized) => {
+                self.shortcut_bindings = normalized;
+                self.shortcut_error = None;
+                self.persist();
+            }
+            Err(error) => self.shortcut_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn shortcut_error_text(&self) -> Option<String> {
+        self.shortcut_error.as_ref().map(|error| match error {
+            ShortcutError::Invalid => {
+                i18n::text(self.language, "settings.shortcut_error_invalid").into()
+            }
+            ShortcutError::MultipleChords => {
+                i18n::text(self.language, "settings.shortcut_error_multiple").into()
+            }
+            ShortcutError::Conflict(chord) => {
+                i18n::text(self.language, "settings.shortcut_error_conflict")
+                    .replace("{shortcut}", chord)
+            }
+        })
+    }
+
     pub(crate) fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
+        let project_workspaces_enabled = self.workspace.enabled();
+        let shortcut_bindings = self.shortcut_bindings.clone();
+        let shortcut_capture = self.shortcut_capture;
+        let shortcut_error = self.shortcut_error_text();
         div()
             .id("settings-backdrop")
             .absolute()
@@ -115,9 +208,8 @@ impl MuxlaneApp {
             .bg(rgba(theme.overlay()))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    this.settings_open = false;
-                    cx.notify();
+                cx.listener(|this, _event, window, cx| {
+                    this.close_settings(window, cx);
                 }),
             )
             .child(
@@ -126,6 +218,8 @@ impl MuxlaneApp {
                     .relative()
                     .occlude()
                     .w(px(560.))
+                    .max_h(px(700.))
+                    .overflow_y_scroll()
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
@@ -136,14 +230,11 @@ impl MuxlaneApp {
                             cx.stop_propagation();
                         }),
                     )
-                    .on_key_down(
-                        cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
-                            if event.keystroke.key.as_str() == "escape" {
-                                this.settings_open = false;
-                                cx.notify();
-                            }
-                        }),
-                    )
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                        if event.keystroke.key.as_str() == "escape" {
+                            this.close_settings(window, cx);
+                        }
+                    }))
                     .child(
                         div()
                             .flex()
@@ -171,13 +262,208 @@ impl MuxlaneApp {
                                     .text_size(px(16.))
                                     .text_color(rgba(theme.fg1))
                                     .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.settings_open = false;
-                                        cx.notify();
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.close_settings(window, cx);
                                     }))
                                     .child("×"),
                             ),
                     )
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_4()
+                            .pb_2()
+                            .text_size(px(10.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(theme.fg2))
+                            .child(i18n::text(self.language, "settings.workspaces")),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pb_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div().text_size(px(12.)).text_color(rgba(theme.fg0)).child(
+                                            i18n::text(
+                                                self.language,
+                                                "settings.project_workspaces",
+                                            ),
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_size(px(10.))
+                                            .text_color(rgba(theme.fg2))
+                                            .child(i18n::text(
+                                                self.language,
+                                                "settings.project_workspaces_help",
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-project-workspaces-toggle")
+                                    .h(px(30.))
+                                    .px_2()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .border_1()
+                                    .border_color(rgba(if project_workspaces_enabled {
+                                        theme.accent
+                                    } else {
+                                        theme.line
+                                    }))
+                                    .text_size(px(11.))
+                                    .text_color(rgba(if project_workspaces_enabled {
+                                        theme.accent
+                                    } else {
+                                        theme.fg2
+                                    }))
+                                    .hover(|style| style.bg(rgba(theme.bg2)))
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.set_project_workspaces_enabled(
+                                            !this.workspace.enabled(),
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                                    .child(if project_workspaces_enabled {
+                                        i18n::text(self.language, "common.enabled")
+                                    } else {
+                                        i18n::text(self.language, "common.disabled")
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_4()
+                            .pb_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(theme.fg2))
+                                    .child(i18n::text(self.language, "settings.shortcuts")),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-shortcuts-restore")
+                                    .h(px(28.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .border_1()
+                                    .border_color(rgba(theme.line))
+                                    .text_size(px(10.))
+                                    .text_color(rgba(theme.fg1))
+                                    .hover(|style| style.bg(rgba(theme.bg2)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.restore_default_shortcuts(cx);
+                                    }))
+                                    .child(i18n::text(self.language, "settings.shortcuts_restore")),
+                            ),
+                    )
+                    .children(ShortcutAction::ALL.into_iter().map(|action| {
+                        let recording = shortcut_capture == Some(action);
+                        let binding = action.binding(&shortcut_bindings).clone();
+                        let record_id = format!("settings-shortcut-record-{action:?}");
+                        let clear_id = format!("settings-shortcut-clear-{action:?}");
+                        div()
+                            .px_4()
+                            .pb_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(11.))
+                                    .text_color(rgba(theme.fg0))
+                                    .child(i18n::text(self.language, action.label_key())),
+                            )
+                            .child(
+                                div()
+                                    .id(gpui::ElementId::Name(record_id.into()))
+                                    .w(px(170.))
+                                    .h(px(30.))
+                                    .px_2()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .border_1()
+                                    .border_color(rgba(if recording {
+                                        theme.accent
+                                    } else {
+                                        theme.line
+                                    }))
+                                    .bg(rgba(theme.bg0))
+                                    .text_size(px(10.))
+                                    .text_color(rgba(if recording {
+                                        theme.accent
+                                    } else {
+                                        theme.fg1
+                                    }))
+                                    .hover(|style| style.bg(rgba(theme.bg2)))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.start_shortcut_capture(action, cx);
+                                    }))
+                                    .child(if recording {
+                                        i18n::text(self.language, "settings.shortcut_recording")
+                                            .to_string()
+                                    } else {
+                                        binding.unwrap_or_else(|| {
+                                            i18n::text(self.language, "settings.shortcut_disabled")
+                                                .into()
+                                        })
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(gpui::ElementId::Name(clear_id.into()))
+                                    .w(px(58.))
+                                    .h(px(30.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .border_1()
+                                    .border_color(rgba(theme.line))
+                                    .text_size(px(10.))
+                                    .text_color(rgba(theme.fg2))
+                                    .hover(|style| style.bg(rgba(theme.bg2)))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.cancel_shortcut_capture();
+                                        this.apply_shortcut_binding(action, None, cx);
+                                    }))
+                                    .child(i18n::text(self.language, "common.clear")),
+                            )
+                    }))
+                    .when_some(shortcut_error, |page, error| {
+                        page.child(
+                            div()
+                                .px_4()
+                                .pb_2()
+                                .text_size(px(10.))
+                                .text_color(rgba(theme.red))
+                                .child(error),
+                        )
+                    })
                     .child(
                         div()
                             .px_4()

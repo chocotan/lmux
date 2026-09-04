@@ -3,7 +3,6 @@ use anyhow::Context as _;
 use muxlane_core::detect::ScreenInput;
 use muxlane_core::model::{AgentId, AgentInstance, AgentStatus, Project};
 use muxlane_store::PersistedApp;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,18 +45,6 @@ impl MuxlaneServer {
         }
     }
 
-    pub async fn run_headless_persistence(&self, path: PathBuf, mut previous: PersistedApp) {
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let persisted =
-                PersistedApp::from_snapshot(&self.snapshot().await).with_ui_prefs_from(&previous);
-            if let Err(error) = muxlane_store::save(&path, &persisted) {
-                tracing::warn!(%error, "persist headless state failed");
-            }
-            previous = persisted;
-        }
-    }
-
     pub async fn maintain_sessions(&self) {
         let sessions: Vec<_> = self
             .sessions
@@ -92,7 +79,7 @@ impl MuxlaneServer {
                 ScreenInput {
                     bottom_lines: lines,
                     osc_title: muxlane_core::protocol::extract_osc_title(tail),
-                    secs_since_output: None,
+                    secs_since_output: session.secs_since_output(),
                     bell: tail.last() == Some(&0x07),
                 },
             ));
@@ -201,6 +188,9 @@ impl MuxlaneServer {
         }
         drop(state);
         self.dirty.bump();
+        if let Err(error) = self.persist_runtime_state().await {
+            tracing::warn!(%error, "persist exited sessions failed");
+        }
     }
 
     async fn observe_screens(&self, screens: &[(AgentId, ScreenInput)]) {

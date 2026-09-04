@@ -54,6 +54,18 @@ pub(crate) struct DeleteConfirm {
 }
 
 #[derive(Clone)]
+pub(crate) enum ProjectCreationTarget {
+    Local { path: String },
+    Remote { host: String, path: String },
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingProjectCreation {
+    pub(crate) target: ProjectCreationTarget,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone)]
 pub(crate) struct BootstrapConfirm {
     pub(crate) host: String,
     pub(crate) install: bool,
@@ -86,7 +98,6 @@ impl MuxlaneApp {
             .bg(rgba(theme.bg1))
             .border_1()
             .border_color(rgba(theme.line))
-            .rounded_md()
             .shadow_lg()
             .child(
                 div()
@@ -126,7 +137,6 @@ impl MuxlaneApp {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_lg()
                     .child(
                         div()
@@ -241,7 +251,6 @@ impl MuxlaneApp {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_lg()
                     .child(
                         div()
@@ -314,7 +323,6 @@ impl MuxlaneApp {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_lg()
                     .child(
                         div()
@@ -356,7 +364,6 @@ impl MuxlaneApp {
                                     .id("delete-confirm-cancel")
                                     .px_3()
                                     .py_1()
-                                    .rounded_sm()
                                     .text_color(rgba(theme.fg0))
                                     .hover(|style| style.bg(rgba(theme.bg2)))
                                     .cursor_pointer()
@@ -374,7 +381,6 @@ impl MuxlaneApp {
                                     .id("delete-confirm-submit")
                                     .px_3()
                                     .py_1()
-                                    .rounded_sm()
                                     .bg(rgba(theme.red))
                                     .text_color(rgba(theme.on_accent))
                                     .cursor_pointer()
@@ -397,6 +403,144 @@ impl MuxlaneApp {
                                         i18n::text(self.language, "menu.confirm_delete")
                                     })
                             }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn cancel_project_create(&mut self, cx: &mut Context<Self>) {
+        if self.project_add_busy {
+            return;
+        }
+        self.pending_project_creation = None;
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_project_create(&mut self, cx: &mut Context<Self>) {
+        if self.project_add_busy {
+            return;
+        }
+        let Some(pending) = self.pending_project_creation.as_mut() else {
+            return;
+        };
+        pending.error = None;
+        match pending.target.clone() {
+            ProjectCreationTarget::Local { path } => self.submit_local_project(path, true, cx),
+            ProjectCreationTarget::Remote { host, path } => {
+                self.submit_remote_project_with_create(host, path, true, cx)
+            }
+        }
+    }
+
+    pub(crate) fn render_project_create_confirm(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = Theme::for_mode(self.theme_mode);
+        let Some(pending) = self.pending_project_creation.clone() else {
+            return div().into_any_element();
+        };
+        let path = match &pending.target {
+            ProjectCreationTarget::Local { path } | ProjectCreationTarget::Remote { path, .. } => {
+                path
+            }
+        };
+        let busy = self.project_add_busy;
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(theme.overlay()))
+            .on_any_mouse_down(
+                cx.listener(|_this, _event: &gpui::MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(460.))
+                    .bg(rgba(theme.bg1))
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgba(theme.line))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(theme.fg0))
+                            .child(i18n::text(self.language, "confirm.create_directory_title")),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_3()
+                            .text_size(px(12.))
+                            .text_color(rgba(theme.fg1))
+                            .child(
+                                i18n::text(self.language, "confirm.create_directory_copy")
+                                    .replace("{path}", path),
+                            ),
+                    )
+                    .when_some(pending.error, |dialog, error| {
+                        dialog.child(
+                            div()
+                                .px_4()
+                                .pt_2()
+                                .text_size(px(11.))
+                                .text_color(rgba(theme.red))
+                                .child(error),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .px_4()
+                            .py_3()
+                            .child(
+                                div()
+                                    .id("project-create-cancel")
+                                    .px_3()
+                                    .py_1()
+                                    .text_color(rgba(theme.fg0))
+                                    .when(!busy, |button| {
+                                        button
+                                            .hover(|style| style.bg(rgba(theme.bg2)))
+                                            .cursor_pointer()
+                                    })
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.cancel_project_create(cx);
+                                    }))
+                                    .child(i18n::text(self.language, "common.cancel")),
+                            )
+                            .child(
+                                div()
+                                    .id("project-create-submit")
+                                    .px_3()
+                                    .py_1()
+                                    .bg(rgba(theme.accent))
+                                    .text_color(rgba(theme.on_accent))
+                                    .when(!busy, |button| {
+                                        button.cursor_pointer().hover(|style| {
+                                            style.bg(rgba(Theme::with_alpha(theme.accent, 0xcc)))
+                                        })
+                                    })
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.confirm_project_create(cx);
+                                    }))
+                                    .child(if busy {
+                                        i18n::text(self.language, "confirm.creating")
+                                    } else {
+                                        i18n::text(self.language, "confirm.create")
+                                    }),
+                            ),
                     ),
             )
             .into_any_element()
@@ -435,7 +579,6 @@ impl MuxlaneApp {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_lg()
                     .child(
                         div()

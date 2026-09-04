@@ -4,6 +4,7 @@ use crate::i18n;
 use crate::icons::*;
 use crate::theme::Theme;
 use crate::widgets::*;
+use crate::workspace::ProjectKey;
 use gpui::{
     canvas, div, prelude::*, px, relative, rgba, Context, MouseButton, Pixels, Point, SharedString,
     Window,
@@ -22,7 +23,7 @@ struct DragTab {
 pub(super) struct DividerDrag;
 
 #[derive(Clone)]
-pub(super) struct SplitDrag {
+pub(crate) struct SplitDrag {
     split_id: String,
     divider: usize,
     pub(super) axis: SplitAxis,
@@ -73,54 +74,102 @@ impl MuxlaneApp {
         if let Some(group) = self.pane_tree.group(&self.active_pane) {
             if let Some(agent) = group.tabs.get(index).cloned() {
                 let pane = self.active_pane.clone();
-                self.activate_tab(&pane, &agent, cx);
-                self.focus_agent(&agent, window, cx);
-                cx.notify();
+                self.activate_agent(&pane, &agent, window, cx);
             }
         }
     }
 
     pub(super) fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(group) = self.pane_tree.group(&self.active_pane) {
-            if group.tabs.is_empty() {
-                return;
-            }
-            let cur = group
-                .active
-                .as_ref()
-                .and_then(|a| group.tabs.iter().position(|t| t == a))
-                .unwrap_or(0);
-            let next = (cur + 1) % group.tabs.len();
-            if let Some(agent) = group.tabs.get(next).cloned() {
+        let Some((cur, len)) = self.pane_tree.group(&self.active_pane).map(|group| {
+            (
+                group
+                    .active
+                    .as_ref()
+                    .and_then(|agent| group.tabs.iter().position(|tab| tab == agent))
+                    .unwrap_or(0),
+                group.tabs.len(),
+            )
+        }) else {
+            return;
+        };
+        if len == 0 {
+            return;
+        }
+        if cur + 1 < len {
+            if let Some(agent) = self
+                .pane_tree
+                .group(&self.active_pane)
+                .and_then(|group| group.tabs.get(cur + 1))
+                .cloned()
+            {
                 let pane = self.active_pane.clone();
-                self.activate_tab(&pane, &agent, cx);
-                self.focus_agent(&agent, window, cx);
-                cx.notify();
+                self.activate_agent(&pane, &agent, window, cx);
             }
+            return;
+        }
+
+        let target = crate::workspace::adjacent_project_target(
+            &self.available_project_keys(),
+            self.workspace.current_project(),
+            true,
+        );
+        if let Some(target) = target {
+            self.select_project_workspace(target, window, cx);
+        } else if let Some(agent) = self
+            .pane_tree
+            .group(&self.active_pane)
+            .and_then(|group| group.tabs.first())
+            .cloned()
+        {
+            let pane = self.active_pane.clone();
+            self.activate_agent(&pane, &agent, window, cx);
         }
     }
 
     pub(super) fn prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(group) = self.pane_tree.group(&self.active_pane) {
-            if group.tabs.is_empty() {
-                return;
-            }
-            let cur = group
-                .active
-                .as_ref()
-                .and_then(|a| group.tabs.iter().position(|t| t == a))
-                .unwrap_or(0);
-            let prev = if cur == 0 {
-                group.tabs.len().saturating_sub(1)
-            } else {
-                cur - 1
-            };
-            if let Some(agent) = group.tabs.get(prev).cloned() {
+        let Some((cur, len)) = self.pane_tree.group(&self.active_pane).map(|group| {
+            (
+                group
+                    .active
+                    .as_ref()
+                    .and_then(|agent| group.tabs.iter().position(|tab| tab == agent))
+                    .unwrap_or(0),
+                group.tabs.len(),
+            )
+        }) else {
+            return;
+        };
+        if len == 0 {
+            return;
+        }
+        if cur > 0 {
+            if let Some(agent) = self
+                .pane_tree
+                .group(&self.active_pane)
+                .and_then(|group| group.tabs.get(cur - 1))
+                .cloned()
+            {
                 let pane = self.active_pane.clone();
-                self.activate_tab(&pane, &agent, cx);
-                self.focus_agent(&agent, window, cx);
-                cx.notify();
+                self.activate_agent(&pane, &agent, window, cx);
             }
+            return;
+        }
+
+        let target = crate::workspace::adjacent_project_target(
+            &self.available_project_keys(),
+            self.workspace.current_project(),
+            false,
+        );
+        if let Some(target) = target {
+            self.select_project_workspace(target, window, cx);
+        } else if let Some(agent) = self
+            .pane_tree
+            .group(&self.active_pane)
+            .and_then(|group| group.tabs.last())
+            .cloned()
+        {
+            let pane = self.active_pane.clone();
+            self.activate_agent(&pane, &agent, window, cx);
         }
     }
 
@@ -155,16 +204,14 @@ impl MuxlaneApp {
         drag: &DragTab,
         target_pane: &PaneId,
         target_index: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self
             .pane_tree
             .move_tab(&drag.from_pane, target_pane, &drag.agent, target_index)
         {
-            self.active_pane = target_pane.clone();
-            self.active = Some(drag.agent.clone());
-            self.persist();
-            cx.notify();
+            self.activate_agent(target_pane, &drag.agent, window, cx);
         }
     }
 
@@ -175,15 +222,52 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let project = self
+        let pane_agent = self
             .pane_tree
             .group(pane)
-            .and_then(|group| group.active.clone().or_else(|| group.tabs.first().cloned()))
-            .and_then(|id| self.last_snapshot.agent(&id))
-            .and_then(|agent| self.last_snapshot.project(&agent.project))
+            .and_then(|group| group.active.clone().or_else(|| group.tabs.first().cloned()));
+        let target_key = self
+            .workspace
+            .current_project()
+            .filter(|_| self.workspace.enabled())
             .cloned()
-            .or_else(|| self.last_snapshot.projects.first().cloned());
-        let Some(project) = project else { return };
+            .or_else(|| {
+                pane_agent
+                    .as_ref()
+                    .and_then(|agent| self.project_key_for_agent(agent))
+            })
+            .or_else(|| {
+                self.active
+                    .as_ref()
+                    .and_then(|agent| self.project_key_for_agent(agent))
+            })
+            .or_else(|| {
+                self.last_snapshot
+                    .projects
+                    .first()
+                    .map(|project| ProjectKey::new(self.local_machine_id(), project.id.clone()))
+            });
+        let Some(target_key) = target_key else { return };
+        if target_key.machine_id != self.local_machine_id() {
+            let Some(host) = self.remote_host_for_key(&target_key) else {
+                return;
+            };
+            self.spawn_remote_agent(
+                crate::remotes::RemoteAgentSpawnRequest {
+                    host,
+                    project: target_key.project_id,
+                    preset: None,
+                    preferred_pane: Some(pane.clone()),
+                    split_axis,
+                },
+                window,
+                cx,
+            );
+            return;
+        }
+        let Some(project) = self.last_snapshot.project(&target_key.project_id).cloned() else {
+            return;
+        };
         let params = muxlane_core::protocol::AgentSpawnParams {
             project: project.id.clone(),
             agent_type: Some(muxlane_core::model::AgentType::Shell),
@@ -193,8 +277,8 @@ impl MuxlaneApp {
             preset_name: None,
         };
         let server = Arc::clone(&self.server);
-        let pane = pane.clone();
-        let project_key = format!("local:{}", project.id);
+        let pane = self.capture_spawn_target(&target_key, Some(pane));
+        let collapse_key = format!("local:{}", project.id);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -217,22 +301,16 @@ impl MuxlaneApp {
                         this.osc52_clipboard_enabled,
                         cx,
                     );
-                    this.collapsed_projects.remove(&project_key);
+                    this.collapsed_projects.remove(&collapse_key);
                     this.terms.insert(agent_id.clone(), term);
-                    if let Some(axis) = split_axis {
-                        if let Some(new_pane) = this.pane_tree.split(&pane, axis, agent_id.clone())
-                        {
-                            this.active_pane = new_pane;
-                            this.active = Some(agent_id.clone());
-                            this.maximized_pane = None;
-                        }
-                    } else {
-                        this.pane_tree.open_tab(&pane, agent_id.clone());
-                        this.activate_tab(&pane, &agent_id, cx);
-                    }
-                    this.focus_agent(&agent_id, window, cx);
-                    this.persist();
-                    cx.notify();
+                    this.place_async_agent(
+                        &target_key,
+                        agent_id,
+                        Some(pane),
+                        split_axis,
+                        window,
+                        cx,
+                    );
                 }
                 Err(error) => {
                     this.notifications.update(cx, |center, cx| {
@@ -314,7 +392,8 @@ impl MuxlaneApp {
                 .group(&self.active_pane)
                 .and_then(|g| g.active.clone());
             if let Some(active) = self.active.clone() {
-                self.focus_agent(&active, window, cx);
+                let pane = self.active_pane.clone();
+                self.activate_agent(&pane, &active, window, cx);
             }
             self.persist();
             cx.notify();
@@ -581,9 +660,7 @@ impl MuxlaneApp {
                             let id = tab_id.clone();
                             let pane = pane_for_tab.clone();
                             move |this, _ev, window, cx| {
-                                this.activate_tab(&pane, &id, cx);
-                                this.focus_agent(&id, window, cx);
-                                cx.notify();
+                                this.activate_agent(&pane, &id, window, cx);
                             }
                         }))
                         // 鼠标中键直接关闭 Tab
@@ -619,8 +696,8 @@ impl MuxlaneApp {
                         .on_drop::<DragTab>(cx.listener({
                             let pane = pane_id.clone();
                             let slot = group.tabs.iter().position(|a| a == &tab_id).unwrap_or(0);
-                            move |this, drag: &DragTab, _window, cx| {
-                                this.move_dragged_tab(drag, &pane, slot, cx)
+                            move |this, drag: &DragTab, window, cx| {
+                                this.move_dragged_tab(drag, &pane, slot, window, cx)
                             }
                         }))
                         .child(render_status_indicator(
@@ -634,7 +711,6 @@ impl MuxlaneApp {
                             div()
                                 .id(gpui::ElementId::Name(format!("tab-close-{tab_id}").into()))
                                 .text_color(rgba(theme.fg2))
-                                .rounded_sm()
                                 .px_1()
                                 .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
                                 .on_click(cx.listener({
@@ -824,8 +900,7 @@ impl MuxlaneApp {
                                 || this.active.as_ref() != active_id.as_ref()
                             {
                                 if let Some(agent_id) = &active_id {
-                                    this.activate_tab(&pane_id, agent_id, cx);
-                                    this.focus_agent(agent_id, window, cx);
+                                    this.activate_agent(&pane_id, agent_id, window, cx);
                                 } else {
                                     this.active_pane = pane_id.clone();
                                 }
@@ -840,8 +915,7 @@ impl MuxlaneApp {
                             let active_id = pane_click_active.clone();
                             move |this, _ev: &gpui::MouseDownEvent, window, cx| {
                                 if let Some(agent_id) = &active_id {
-                                    this.activate_tab(&pane_id, agent_id, cx);
-                                    this.focus_agent(agent_id, window, cx);
+                                    this.activate_agent(&pane_id, agent_id, window, cx);
                                 } else {
                                     this.active_pane = pane_id.clone();
                                 }
@@ -849,8 +923,8 @@ impl MuxlaneApp {
                             }
                         }),
                     )
-                    .on_drop::<DragTab>(cx.listener(move |this, drag: &DragTab, _window, cx| {
-                        this.move_dragged_tab(drag, &target_pane, tab_count, cx)
+                    .on_drop::<DragTab>(cx.listener(move |this, drag: &DragTab, window, cx| {
+                        this.move_dragged_tab(drag, &target_pane, tab_count, window, cx)
                     }))
                     .drag_over::<DragTab>(move |s, _, _, _| s.bg(rgba(pane_drop_bg)))
                     .child(tabs);

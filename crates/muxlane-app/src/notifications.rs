@@ -294,7 +294,6 @@ impl NotificationCenter {
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .rounded_md()
                     .shadow_xl()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -330,7 +329,6 @@ impl NotificationCenter {
                                             div()
                                                 .px_1p5()
                                                 .py(px(1.))
-                                                .rounded_full()
                                                 .bg(rgba(theme.accent))
                                                 .text_color(rgba(theme.on_accent))
                                                 .text_size(px(9.))
@@ -351,7 +349,6 @@ impl NotificationCenter {
                                                 .cursor_pointer()
                                                 .px_1p5()
                                                 .py_0p5()
-                                                .rounded_xs()
                                                 .text_size(px(10.))
                                                 .text_color(rgba(theme.fg2))
                                                 .hover(|s| {
@@ -470,7 +467,6 @@ impl NotificationCenter {
                                                         div()
                                                             .w(px(6.))
                                                             .h(px(6.))
-                                                            .rounded_full()
                                                             .bg(rgba(dot_color)),
                                                     )
                                                     .child(
@@ -519,7 +515,7 @@ impl NotificationCenter {
 impl Render for NotificationCenter {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_mode(self.theme_mode);
-        let mut root = div();
+        let mut root = div().absolute().size_full();
 
         if !self.toasts.is_empty() {
             root = root.child(
@@ -552,7 +548,6 @@ impl Render for NotificationCenter {
                             .bg(rgba(theme.bg2))
                             .border_1()
                             .border_color(rgba(theme.line))
-                            .rounded_md()
                             .shadow_lg()
                             .cursor_pointer()
                             .child(
@@ -577,13 +572,7 @@ impl Render for NotificationCenter {
                                             .flex()
                                             .items_center()
                                             .gap_1p5()
-                                            .child(
-                                                div()
-                                                    .w(px(7.))
-                                                    .h(px(7.))
-                                                    .rounded_full()
-                                                    .bg(rgba(dot_color)),
-                                            )
+                                            .child(div().w(px(7.)).h(px(7.)).bg(rgba(dot_color)))
                                             .child(
                                                 div()
                                                     .text_size(px(12.))

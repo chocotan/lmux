@@ -1,5 +1,6 @@
 //! RemoteHost：一台远端 muxlane 实例的连接管理（含 SSH 隧道与重连）
 use muxlane_core::model::Snapshot;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock as StdRwLock;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -357,6 +358,10 @@ pub struct RemoteHost {
     /// 完整进度快照；访问极短，不跨 await。
     progress: StdMutex<Option<BootstrapProgress>>,
     bootstrap_cancel: Arc<AtomicBool>,
+    /// Stable machine identity learned from an authoritative Online snapshot.
+    machine_id: StdRwLock<Option<String>>,
+    /// Capabilities advertised by the latest successful system.hello.
+    capabilities: StdRwLock<HashSet<String>>,
 }
 
 impl RemoteHost {
@@ -372,6 +377,8 @@ impl RemoteHost {
             rpc: Mutex::new(None),
             progress: StdMutex::new(None),
             bootstrap_cancel: Arc::new(AtomicBool::new(false)),
+            machine_id: StdRwLock::new(None),
+            capabilities: StdRwLock::new(HashSet::new()),
         })
     }
 
@@ -472,12 +479,28 @@ impl RemoteHost {
         self.retry.notify_one();
     }
 
+    fn rpc_error_requires_reconnect(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<crate::RpcCallError>().is_none()
+            && error.downcast_ref::<crate::RemoteCompatError>().is_none()
+    }
+
+    fn handle_rpc_result<T>(
+        &self,
+        rpc: &mut Option<crate::Connection>,
+        result: &anyhow::Result<T>,
+    ) {
+        if result
+            .as_ref()
+            .is_err_and(Self::rpc_error_requires_reconnect)
+        {
+            self.rpc_failed(rpc);
+        }
+    }
+
     pub async fn fetch_snapshot(&self) -> anyhow::Result<Snapshot> {
         let mut rpc = self.rpc().await?;
         let result = crate::fetch_snapshot(rpc.as_mut().expect("RPC initialized")).await;
-        if result.is_err() {
-            self.rpc_failed(&mut rpc);
-        }
+        self.handle_rpc_result(&mut rpc, &result);
         result
     }
 
@@ -489,9 +512,7 @@ impl RemoteHost {
         let mut rpc = self.rpc().await?;
         let result =
             crate::send_term_input(rpc.as_mut().expect("RPC initialized"), agent, data).await;
-        if result.is_err() {
-            self.rpc_failed(&mut rpc);
-        }
+        self.handle_rpc_result(&mut rpc, &result);
         result
     }
 
@@ -504,9 +525,7 @@ impl RemoteHost {
         let mut rpc = self.rpc().await?;
         let result =
             crate::resize_term(rpc.as_mut().expect("RPC initialized"), agent, cols, rows).await;
-        if result.is_err() {
-            self.rpc_failed(&mut rpc);
-        }
+        self.handle_rpc_result(&mut rpc, &result);
         result
     }
 
@@ -518,27 +537,67 @@ impl RemoteHost {
         let mut rpc = self.rpc().await?;
         let result =
             crate::spawn_agent(rpc.as_mut().expect("RPC initialized"), project, preset).await;
-        if result.is_err() {
-            self.rpc_failed(&mut rpc);
-        }
+        self.handle_rpc_result(&mut rpc, &result);
         result
     }
 
     pub async fn delete_agent(&self, agent: &muxlane_core::model::AgentId) -> anyhow::Result<()> {
         let mut rpc = self.rpc().await?;
         let result = crate::delete_agent(rpc.as_mut().expect("RPC initialized"), agent).await;
-        if result.is_err() {
-            self.rpc_failed(&mut rpc);
-        }
+        self.handle_rpc_result(&mut rpc, &result);
         result
     }
 
-    pub async fn add_project(&self, path: &str) -> anyhow::Result<muxlane_core::model::Project> {
-        let mut rpc = self.rpc().await?;
-        let result = crate::add_project(rpc.as_mut().expect("RPC initialized"), path).await;
-        if result.is_err() {
-            self.rpc_failed(&mut rpc);
+    pub fn machine_id(&self) -> Option<String> {
+        self.machine_id.read().ok().and_then(|value| value.clone())
+    }
+
+    /// Returns true when the cached identity changed and should be persisted.
+    pub fn cache_machine_id(&self, machine_id: Option<&str>) -> bool {
+        let Some(machine_id) = machine_id else {
+            return false;
+        };
+        let Ok(mut current) = self.machine_id.write() else {
+            return false;
+        };
+        if current.as_deref() == Some(machine_id) {
+            return false;
         }
+        *current = Some(machine_id.to_string());
+        true
+    }
+
+    pub fn restore_machine_id(&self, machine_id: Option<String>) {
+        if let Some(machine_id) = machine_id {
+            let _ = self.cache_machine_id(Some(&machine_id));
+        }
+    }
+
+    pub fn supports(&self, feature: &str) -> bool {
+        self.capabilities
+            .read()
+            .is_ok_and(|features| features.contains(feature))
+    }
+
+    pub async fn add_project(
+        &self,
+        path: &str,
+        create_if_missing: bool,
+    ) -> anyhow::Result<muxlane_core::model::Project> {
+        if create_if_missing && !self.supports(muxlane_core::protocol::features::PROJECT_CREATE) {
+            return Err(crate::RemoteCompatError::FeatureUnsupported {
+                feature: muxlane_core::protocol::features::PROJECT_CREATE.into(),
+            }
+            .into());
+        }
+        let mut rpc = self.rpc().await?;
+        let result = crate::add_project(
+            rpc.as_mut().expect("RPC initialized"),
+            path,
+            create_if_missing,
+        )
+        .await;
+        self.handle_rpc_result(&mut rpc, &result);
         result
     }
 
@@ -548,9 +607,7 @@ impl RemoteHost {
     ) -> anyhow::Result<muxlane_core::protocol::DeleteScopeResult> {
         let mut rpc = self.rpc().await?;
         let result = crate::delete_project(rpc.as_mut().expect("RPC initialized"), project).await;
-        if result.is_err() {
-            self.rpc_failed(&mut rpc);
-        }
+        self.handle_rpc_result(&mut rpc, &result);
         result
     }
 
@@ -746,6 +803,12 @@ impl RemoteHost {
                             serde_json::from_value::<muxlane_core::protocol::HelloResult>(value)
                                 .map_err(Into::into)
                         });
+                    if let Ok(mut capabilities) = this.capabilities.write() {
+                        capabilities.clear();
+                        if let Ok(hello) = &hello {
+                            capabilities.extend(hello.features.iter().cloned());
+                        }
+                    }
                     let compatible = hello.as_ref().is_ok_and(|hello| {
                         hello.protocol >= muxlane_core::protocol::PROTOCOL_VERSION
                             && hello.features.iter().any(|feature| {
@@ -906,6 +969,166 @@ impl RemoteHost {
 #[cfg(test)]
 mod progress_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_create_capability_only_blocks_creation_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("old-server.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = tokio::io::split(stream);
+            let mut read = tokio::io::BufReader::new(read);
+            let request: muxlane_core::protocol::Request = serde_json::from_value(
+                muxlane_core::protocol::read_frame(&mut read).await.unwrap(),
+            )
+            .unwrap();
+            let params: muxlane_core::protocol::ProjectAddParams =
+                serde_json::from_value(request.params).unwrap();
+            assert!(!params.create_if_missing);
+            let project = muxlane_core::model::Project {
+                id: "existing".into(),
+                name: "existing".into(),
+                path: "/existing".into(),
+                branch: None,
+                agents: vec![],
+            };
+            muxlane_core::protocol::write_frame(
+                &mut write,
+                &muxlane_core::protocol::Response::ok(
+                    request.id,
+                    serde_json::to_value(project).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let (events_tx, _events_rx) = mpsc::channel(1);
+        let host = RemoteHost::new(
+            HostCfg {
+                name: "old".into(),
+                target: Target::Socket(socket.display().to_string()),
+                auth: SshAuth::default(),
+                retry_base_ms: 200,
+            },
+            events_tx,
+        );
+
+        let existing = host.add_project("/existing", false).await.unwrap();
+        assert_eq!(existing.id, "existing");
+        let error = host.add_project("/missing", true).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<crate::RemoteCompatError>(),
+            Some(crate::RemoteCompatError::FeatureUnsupported { feature })
+                if feature == muxlane_core::protocol::features::PROJECT_CREATE
+        ));
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rpc_business_error_keeps_connection_and_does_not_wake_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("server.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = tokio::io::split(stream);
+            let mut read = tokio::io::BufReader::new(read);
+
+            let request: muxlane_core::protocol::Request = serde_json::from_value(
+                muxlane_core::protocol::read_frame(&mut read).await.unwrap(),
+            )
+            .unwrap();
+            let params: muxlane_core::protocol::ProjectAddParams =
+                serde_json::from_value(request.params).unwrap();
+            assert!(!params.create_if_missing);
+            muxlane_core::protocol::write_frame(
+                &mut write,
+                &muxlane_core::protocol::Response::err(
+                    request.id,
+                    muxlane_core::protocol::error_codes::PATH_NOT_FOUND,
+                    "missing directory",
+                ),
+            )
+            .await
+            .unwrap();
+
+            let request: muxlane_core::protocol::Request = serde_json::from_value(
+                muxlane_core::protocol::read_frame(&mut read).await.unwrap(),
+            )
+            .unwrap();
+            let params: muxlane_core::protocol::ProjectAddParams =
+                serde_json::from_value(request.params).unwrap();
+            assert!(params.create_if_missing);
+            let project = muxlane_core::model::Project {
+                id: "created".into(),
+                name: "created".into(),
+                path: "/created".into(),
+                branch: None,
+                agents: vec![],
+            };
+            muxlane_core::protocol::write_frame(
+                &mut write,
+                &muxlane_core::protocol::Response::ok(
+                    request.id,
+                    serde_json::to_value(project).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let (events_tx, _events_rx) = mpsc::channel(1);
+        let host = RemoteHost::new(
+            HostCfg {
+                name: "server".into(),
+                target: Target::Socket(socket.display().to_string()),
+                auth: SshAuth::default(),
+                retry_base_ms: 200,
+            },
+            events_tx,
+        );
+        host.capabilities
+            .write()
+            .unwrap()
+            .insert(muxlane_core::protocol::features::PROJECT_CREATE.into());
+
+        let error = host.add_project("/missing", false).await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<crate::RpcCallError>().unwrap().code,
+            muxlane_core::protocol::error_codes::PATH_NOT_FOUND
+        );
+        assert!(host.rpc.lock().await.is_some());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), host.retry.notified())
+                .await
+                .is_err(),
+            "business errors must not wake the reconnect loop"
+        );
+
+        let project = host.add_project("/created", true).await.unwrap();
+        assert_eq!(project.id, "created");
+        peer.await.unwrap();
+    }
+
+    #[test]
+    fn machine_identity_can_be_restored_and_updated() {
+        let (events_tx, _events_rx) = mpsc::channel(1);
+        let host = RemoteHost::new(
+            HostCfg {
+                name: "test".into(),
+                target: Target::Socket("/tmp/unused.sock".into()),
+                auth: SshAuth::default(),
+                retry_base_ms: 200,
+            },
+            events_tx,
+        );
+        assert_eq!(host.machine_id(), None);
+        host.restore_machine_id(Some("machine-old".into()));
+        assert_eq!(host.machine_id().as_deref(), Some("machine-old"));
+        assert!(!host.cache_machine_id(Some("machine-old")));
+        assert!(host.cache_machine_id(Some("machine-new")));
+        assert_eq!(host.machine_id().as_deref(), Some("machine-new"));
+    }
 
     #[test]
     fn progress_snapshot_preserves_byte_counts() {

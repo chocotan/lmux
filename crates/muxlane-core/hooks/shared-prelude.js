@@ -11,7 +11,8 @@ function muxlaneEnv(name = "") {
 }
 
 function report(event = "", message = "") {
-  if (typeof isSubagentProcess !== "undefined" && isSubagentProcess) return Promise.resolve()
+  if ((typeof isLegacySubagentProcess !== "undefined" && isLegacySubagentProcess)
+    || (typeof isSubagentProcess !== "undefined" && isSubagentProcess)) return Promise.resolve()
   const socket = muxlaneEnv("MUXLANE_SOCKET")
   const agent = muxlaneEnv("MUXLANE_AGENT_ID")
   const token = muxlaneEnv("MUXLANE_HOOK_TOKEN")
