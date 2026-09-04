@@ -1,6 +1,7 @@
 //! Agent session opening, focus, deletion, and terminal caching.
 use crate::app::palette::NewSessionTarget;
 use crate::app::MuxlaneApp;
+use crate::i18n;
 use crate::term_view::TermView;
 use crate::theme::Theme;
 use gpui::{AppContext, Context, Entity, Focusable, Window};
@@ -136,7 +137,13 @@ impl MuxlaneApp {
         }
         if !self.terms.contains_key(agent) {
             let (vterm, clipboard_rx) = VTerm::new_with_clipboard(120, 32);
-            vterm.feed("\u{1b}[2m正在 attach 远程终端…\u{1b}[0m\r\n".as_bytes());
+            vterm.feed(
+                format!(
+                    "\u{1b}[2m{}\u{1b}[0m\r\n",
+                    i18n::text(self.language, "terminal.attaching")
+                )
+                .as_bytes(),
+            );
             let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
             let term = Self::create_remote_term(
                 agent.clone(),
@@ -210,6 +217,7 @@ impl MuxlaneApp {
                     .insert(agent.clone(), Arc::clone(&cancelled));
                 let agent2 = agent.clone();
                 let vterm2 = vterm.clone();
+                let language = self.language;
                 self.server.rt_spawn(async move {
                     let mut backoff = 250u64;
                     loop {
@@ -237,7 +245,13 @@ impl MuxlaneApp {
                         if result.is_ok() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
                             break;
                         }
-                        vterm2.feed("\u{1b}[31m镜像流断开，正在重连…\u{1b}[0m\r\n".as_bytes());
+                        vterm2.feed(
+                            format!(
+                                "\u{1b}[31m{}\u{1b}[0m\r\n",
+                                i18n::text(language, "terminal.reconnecting")
+                            )
+                            .as_bytes(),
+                        );
                         tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                         backoff = (backoff * 2).min(5_000);
                     }
@@ -364,10 +378,8 @@ impl MuxlaneApp {
                     Ok(result) => {
                         this.notifications.update(cx, |center, cx| {
                             center.show_error(
-                                format!(
-                                    "{} 个 tmux 会话未能销毁，会话仍保留",
-                                    result.failed_agents.len()
-                                ),
+                                i18n::text(this.language, "error.delete_sessions_session")
+                                    .replace("{count}", &result.failed_agents.len().to_string()),
                                 cx,
                             )
                         });
@@ -378,7 +390,11 @@ impl MuxlaneApp {
                             this.finish_delete_session(&agent, window, cx);
                         }
                         this.notifications.update(cx, |center, cx| {
-                            center.show_error(format!("删除会话失败：{error}"), cx)
+                            center.show_error(
+                                i18n::text(this.language, "error.delete_session")
+                                    .replace("{error}", &error.to_string()),
+                                cx,
+                            )
                         });
                         cx.notify();
                     }
@@ -542,7 +558,11 @@ impl MuxlaneApp {
                 }
                 Err(error) => {
                     this.notifications.update(cx, |center, cx| {
-                        center.show_error(format!("创建会话失败：{error}"), cx)
+                        center.show_error(
+                            i18n::text(this.language, "error.create_session")
+                                .replace("{error}", &error.to_string()),
+                            cx,
+                        )
                     });
                     cx.notify();
                 }

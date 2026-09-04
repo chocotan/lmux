@@ -85,6 +85,17 @@ impl MuxlaneApp {
         self.notifications.update(cx, |center, cx| {
             center.set_appearance(self.theme_mode, language, cx)
         });
+        for (input, key) in [
+            (&self.palette_input, "palette.placeholder"),
+            (&self.connect_input, "placeholder.remote_target"),
+            (&self.connect_username, "placeholder.username"),
+            (&self.connect_password, "placeholder.password"),
+            (&self.connect_key_path, "placeholder.private_key"),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(i18n::text(language, key), cx)
+            });
+        }
         self.dismiss_settings_menus();
         self.persist();
         cx.notify();
@@ -147,7 +158,7 @@ impl MuxlaneApp {
                                     .text_size(px(15.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgba(theme.fg0))
-                                    .child(i18n::text(self.language, "设置", "Settings")),
+                                    .child(i18n::text(self.language, "common.settings")),
                             )
                             .child(
                                 div()
@@ -175,7 +186,7 @@ impl MuxlaneApp {
                             .text_size(px(10.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg2))
-                            .child(i18n::text(self.language, "主题", "Theme")),
+                            .child(i18n::text(self.language, "settings.theme")),
                     )
                     .child(
                         div()
@@ -184,9 +195,10 @@ impl MuxlaneApp {
                             .items_center()
                             .justify_between()
                             .child(
-                                div().text_size(px(12.)).text_color(rgba(theme.fg0)).child(
-                                    i18n::text(self.language, "界面主题", "Interface theme"),
-                                ),
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgba(theme.fg0))
+                                    .child(i18n::text(self.language, "settings.interface_theme")),
                             )
                             .child({
                                 let selected = Theme::for_mode(self.theme_mode);
@@ -226,11 +238,7 @@ impl MuxlaneApp {
                                                     .flex_1()
                                                     .text_size(px(11.))
                                                     .text_color(rgba(theme.fg0))
-                                                    .child(if self.language == Language::English {
-                                                        self.theme_mode.label_en()
-                                                    } else {
-                                                        self.theme_mode.label()
-                                                    }),
+                                                    .child(self.theme_mode.label(self.language)),
                                             )
                                             .child(
                                                 div()
@@ -298,14 +306,7 @@ impl MuxlaneApp {
                                                                 .flex_1()
                                                                 .text_size(px(11.))
                                                                 .text_color(rgba(theme.fg0))
-                                                                .child(
-                                                                    if language == Language::English
-                                                                    {
-                                                                        mode.label_en()
-                                                                    } else {
-                                                                        mode.label()
-                                                                    },
-                                                                ),
+                                                                .child(mode.label(language)),
                                                         )
                                                         .child(if selected { "✓" } else { "" })
                                                         },
@@ -324,7 +325,7 @@ impl MuxlaneApp {
                             .text_size(px(10.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg2))
-                            .child(i18n::text(self.language, "终端字体", "Terminal font")),
+                            .child(i18n::text(self.language, "settings.terminal_font")),
                     )
                     .child(div().px_4().pb_4().flex().justify_end().child({
                         let current_font = self.font_family.clone();
@@ -433,7 +434,7 @@ impl MuxlaneApp {
                                 div()
                                     .text_size(px(12.))
                                     .text_color(rgba(theme.fg0))
-                                    .child(i18n::text(self.language, "语言", "Language")),
+                                    .child(i18n::text(self.language, "settings.language")),
                             )
                             .child({
                                 let current_language = self.language;
@@ -534,7 +535,7 @@ impl MuxlaneApp {
                             .justify_between()
                             .child(
                                 div().text_size(px(12.)).text_color(rgba(theme.fg0)).child(
-                                    i18n::text(self.language, "通知声音", "Notification sound"),
+                                    i18n::text(self.language, "settings.notification_sound"),
                                 ),
                             )
                             .child(
@@ -563,9 +564,9 @@ impl MuxlaneApp {
                                         cx.notify();
                                     }))
                                     .child(if self.sound_enabled {
-                                        i18n::text(self.language, "已开启", "Enabled")
+                                        i18n::text(self.language, "common.enabled")
                                     } else {
-                                        i18n::text(self.language, "已关闭", "Disabled")
+                                        i18n::text(self.language, "common.disabled")
                                     }),
                             ),
                     )
@@ -576,13 +577,12 @@ impl MuxlaneApp {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child(div().text_size(px(12.)).text_color(rgba(theme.fg0)).child(
-                                i18n::text(
-                                    self.language,
-                                    "允许终端写入剪贴板 (OSC52)",
-                                    "Allow terminal clipboard writes (OSC52)",
-                                ),
-                            ))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgba(theme.fg0))
+                                    .child(i18n::text(self.language, "settings.osc52")),
+                            )
                             .child(
                                 div()
                                     .id("settings-osc52-toggle")
@@ -607,9 +607,9 @@ impl MuxlaneApp {
                                         this.toggle_osc52_clipboard(cx);
                                     }))
                                     .child(if self.osc52_clipboard_enabled {
-                                        i18n::text(self.language, "已开启", "Enabled")
+                                        i18n::text(self.language, "common.enabled")
                                     } else {
-                                        i18n::text(self.language, "已关闭", "Disabled")
+                                        i18n::text(self.language, "common.disabled")
                                     }),
                             ),
                     ),

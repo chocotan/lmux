@@ -1,5 +1,6 @@
 //! Context menus and confirmation dialogs.
 use crate::app::MuxlaneApp;
+use crate::i18n;
 use crate::theme::Theme;
 use crate::widgets::format_upload_phase;
 use gpui::{
@@ -101,9 +102,9 @@ impl MuxlaneApp {
                         move |this, _ev, window, cx| this.delete_session(&id, remote, window, cx)
                     }))
                     .child(if menu.remote {
-                        "删除远程会话"
+                        i18n::text(self.language, "menu.delete_remote_session")
                     } else {
-                        "删除会话"
+                        i18n::text(self.language, "menu.delete_session")
                     }),
             )
             .into_any_element()
@@ -143,7 +144,7 @@ impl MuxlaneApp {
                                 this.tree_menu = None;
                                 cx.notify();
                             }))
-                            .child("重新连接"),
+                            .child(i18n::text(self.language, "menu.reconnect")),
                     )
                     .child(
                         div()
@@ -162,7 +163,7 @@ impl MuxlaneApp {
                                 this.remote_project_input.focus_handle(cx).focus(window, cx);
                                 cx.notify();
                             }))
-                            .child("添加远程项目…"),
+                            .child(i18n::text(self.language, "menu.add_remote_project")),
                     )
                     .child(
                         div()
@@ -183,7 +184,7 @@ impl MuxlaneApp {
                                 });
                                 cx.notify();
                             }))
-                            .child("更新远端 Muxlane…"),
+                            .child(i18n::text(self.language, "menu.upgrade_remote")),
                     )
                     .child(
                         div()
@@ -204,7 +205,7 @@ impl MuxlaneApp {
                                 });
                                 cx.notify();
                             }))
-                            .child("重新部署 / 安装远端 Muxlane…"),
+                            .child(i18n::text(self.language, "menu.reinstall_remote")),
                     )
                     .child(div().h(px(1.)).bg(rgba(theme.line)).my_1())
                     .child(
@@ -222,13 +223,17 @@ impl MuxlaneApp {
                                     this.begin_delete(target.clone(), cx);
                                 }
                             }))
-                            .child("删除远程机器…"),
+                            .child(i18n::text(self.language, "menu.delete_remote_machine")),
                     )
             }
             DeleteTarget::LocalProject { .. } | DeleteTarget::RemoteProject { .. } => {
                 let label = match &menu.target {
-                    DeleteTarget::LocalProject { .. } => "删除项目…",
-                    DeleteTarget::RemoteProject { .. } => "删除远程项目…",
+                    DeleteTarget::LocalProject { .. } => {
+                        i18n::text(self.language, "menu.delete_project_ellipsis")
+                    }
+                    DeleteTarget::RemoteProject { .. } => {
+                        i18n::text(self.language, "menu.delete_remote_project")
+                    }
                     _ => unreachable!(),
                 };
                 div()
@@ -284,18 +289,15 @@ impl MuxlaneApp {
         let (title, label, destructive_copy) = match &confirm.target {
             DeleteTarget::LocalProject { label, .. }
             | DeleteTarget::RemoteProject { label, .. } => (
-                "删除项目",
+                i18n::text(self.language, "menu.delete_project"),
                 label.clone(),
-                format!(
-                    "将结束 {} 个 muxlane tmux 会话。项目文件和用户默认 tmux 不会删除。",
-                    confirm.affected_sessions
-                ),
+                i18n::text(self.language, "confirm.delete_project_copy")
+                    .replace("{count}", &confirm.affected_sessions.to_string()),
             ),
             DeleteTarget::RemoteMachine { host } => (
-                "删除远程机器连接",
+                i18n::text(self.language, "menu.delete_remote_machine_title"),
                 host.clone(),
-                "只删除本地连接、镜像和 tunnel；目标机器上的项目、session 与 tmux 全部保留。"
-                    .into(),
+                i18n::text(self.language, "confirm.delete_remote_copy").into(),
             ),
         };
         div()
@@ -364,7 +366,7 @@ impl MuxlaneApp {
                                         this.delete_busy = false;
                                         cx.notify();
                                     }))
-                                    .child("取消"),
+                                    .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child({
                                 let busy = self.delete_busy;
@@ -389,7 +391,11 @@ impl MuxlaneApp {
                                             this.confirm_delete(cx);
                                         }
                                     }))
-                                    .child(if busy { "删除中…" } else { "确认删除" })
+                                    .child(if busy {
+                                        i18n::text(self.language, "menu.deleting")
+                                    } else {
+                                        i18n::text(self.language, "menu.confirm_delete")
+                                    })
                             }),
                     ),
             )
@@ -402,11 +408,18 @@ impl MuxlaneApp {
             return div().into_any_element();
         };
         let action = if confirm.upgrade {
-            "更新并重启"
+            i18n::text(self.language, "bootstrap.action.upgrade")
         } else if confirm.install {
-            "安装并启动"
+            i18n::text(self.language, "bootstrap.action.install")
         } else {
-            "启动并重连"
+            i18n::text(self.language, "bootstrap.action.start")
+        };
+        let description_key = if confirm.upgrade {
+            "bootstrap.description.upgrade"
+        } else if confirm.install {
+            "bootstrap.description.install"
+        } else {
+            "bootstrap.description.start"
         };
         div()
             .absolute()
@@ -432,7 +445,10 @@ impl MuxlaneApp {
                             .border_color(rgba(theme.line))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg0))
-                            .child(format!("{}远端 Muxlane", action)),
+                            .child(
+                                i18n::text(self.language, "bootstrap.confirm_title")
+                                    .replace("{action}", action),
+                            ),
                     )
                     .child(
                         div()
@@ -440,17 +456,10 @@ impl MuxlaneApp {
                             .pt_3()
                             .text_size(px(12.))
                             .text_color(rgba(theme.fg1))
-                            .child(format!(
-                                "SSH 已连接到 {}。将使用当前认证方式{} headless 进程。",
-                                confirm.host,
-                                if confirm.upgrade {
-                                    "上传新版本并重启"
-                                } else if confirm.install {
-                                    "上传当前 Muxlane 并启动"
-                                } else {
-                                    "启动"
-                                }
-                            )),
+                            .child(
+                                i18n::text(self.language, description_key)
+                                    .replace("{host}", &confirm.host),
+                            ),
                     )
                     .when_some(self.bootstrap_error.clone(), |dialog, error| {
                         dialog.child(
@@ -466,7 +475,7 @@ impl MuxlaneApp {
                         self.bootstrap_progress.get(&confirm.host).cloned(),
                         |dialog, progress| {
                             let overall = progress.phase.overall(progress.percent);
-                            let phase_text = format_upload_phase(&progress);
+                            let phase_text = format_upload_phase(&progress, self.language);
                             dialog
                                 .child(
                                     div()
@@ -506,7 +515,7 @@ impl MuxlaneApp {
                                             this.cancel_bootstrap_for_host(&host, cx);
                                         }
                                     }))
-                                    .child("取消"),
+                                    .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child(
                                 div()

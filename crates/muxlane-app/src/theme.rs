@@ -1,5 +1,6 @@
 //! muxlane 主题系统：参考 pocket-studio 的浅色、暖色与深色主题。
 
+use crate::i18n::{self, Language};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -45,30 +46,20 @@ impl ThemeMode {
         Self::ALL.into_iter().find(|mode| mode.id() == value)
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Light => "雾白瓷",
-            Self::Paper => "纸暖",
-            Self::Sky => "霁蓝",
-            Self::Jade => "竹青",
-            Self::Sakura => "樱粉",
-            Self::Dark => "墨渊",
-            Self::Synthwave => "夜霓",
-            Self::OneDark => "代码墨",
-        }
-    }
-
-    pub fn label_en(self) -> &'static str {
-        match self {
-            Self::Light => "Porcelain",
-            Self::Paper => "Paper Warm",
-            Self::Sky => "Clear Sky",
-            Self::Jade => "Jade",
-            Self::Sakura => "Sakura",
-            Self::Dark => "Ink",
-            Self::Synthwave => "Synthwave",
-            Self::OneDark => "One Dark",
-        }
+    pub fn label(self, language: Language) -> &'static str {
+        i18n::text(
+            language,
+            match self {
+                Self::Light => "theme.light",
+                Self::Paper => "theme.paper",
+                Self::Sky => "theme.sky",
+                Self::Jade => "theme.jade",
+                Self::Sakura => "theme.sakura",
+                Self::Dark => "theme.dark",
+                Self::Synthwave => "theme.synthwave",
+                Self::OneDark => "theme.one_dark",
+            },
+        )
     }
 
     pub fn is_dark(self) -> bool {

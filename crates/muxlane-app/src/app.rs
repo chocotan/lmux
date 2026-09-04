@@ -6,7 +6,7 @@ mod panes;
 #[path = "sidebar.rs"]
 mod sidebar;
 use crate::dialogs::ConnectAuthMode;
-use crate::i18n::Language;
+use crate::i18n::{self, Language};
 use crate::icons::svg_asset;
 use crate::menus::{dismiss_context_menus, BootstrapConfirm, DeleteConfirm, SessionMenu, TreeMenu};
 use crate::notifications::{NotificationCenter, NotificationCenterEvent, NotificationDraft};
@@ -396,31 +396,31 @@ impl MuxlaneApp {
         )
         .detach();
         let palette_input = cx.new(|cx| {
-            let mut field = TextField::new("输入命令、项目名或 Agent 名…", cx);
+            let mut field = TextField::new(i18n::text(language, "palette.placeholder"), cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_input = cx.new(|cx| {
-            let mut field = TextField::new("nuc 或 192.168.1.20", cx);
+            let mut field = TextField::new(i18n::text(language, "placeholder.remote_target"), cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_username = cx.new(|cx| {
-            let mut field = TextField::new("用户名（可选）", cx);
+            let mut field = TextField::new(i18n::text(language, "placeholder.username"), cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_password = cx.new(|cx| {
-            let mut field = TextField::new_secure("密码", cx);
+            let mut field = TextField::new_secure(i18n::text(language, "placeholder.password"), cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });
 
         let connect_key_path = cx.new(|cx| {
-            let mut field = TextField::new("私钥路径（可选）", cx);
+            let mut field = TextField::new(i18n::text(language, "placeholder.private_key"), cx);
             field.set_theme_mode(theme_mode, cx);
             field
         });

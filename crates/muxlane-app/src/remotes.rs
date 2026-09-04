@@ -1,6 +1,7 @@
 //! Remote host connection, bootstrap, deletion, and agent/project flows.
 use crate::app::MuxlaneApp;
 use crate::dialogs::ConnectAuthMode;
+use crate::i18n;
 use crate::menus::{DeleteConfirm, DeleteTarget};
 use gpui::{AppContext, Context, Window};
 use std::sync::Arc;
@@ -70,7 +71,7 @@ impl MuxlaneApp {
     pub(crate) fn add_remote_target(&mut self, target: String, cx: &mut Context<Self>) {
         let target = target.trim().to_string();
         if target.is_empty() {
-            self.dialog_error = Some("请输入 SSH host 或别名".into());
+            self.dialog_error = Some(i18n::text(self.language, "error.ssh_target_required").into());
             cx.notify();
             return;
         }
@@ -104,7 +105,9 @@ impl MuxlaneApp {
             ConnectAuthMode::Password => {
                 let password = self.connect_password.read(cx).text();
                 if username.trim().is_empty() || password.is_empty() {
-                    self.dialog_error = Some("密码连接需要用户名和密码".into());
+                    self.dialog_error = Some(
+                        i18n::text(self.language, "error.password_credentials_required").into(),
+                    );
                     cx.notify();
                     return;
                 }
@@ -203,10 +206,13 @@ impl MuxlaneApp {
                                 if result.failed_agents.is_empty() {
                                     this.delete_confirm = None;
                                 } else {
-                                    this.delete_error = Some(format!(
-                                        "{} 个 tmux 会话未能销毁，项目仍保留",
-                                        result.failed_agents.len()
-                                    ));
+                                    this.delete_error = Some(
+                                        i18n::text(this.language, "error.delete_sessions_project")
+                                            .replace(
+                                                "{count}",
+                                                &result.failed_agents.len().to_string(),
+                                            ),
+                                    );
                                 }
                             }
                             Err(error) => {
@@ -233,7 +239,9 @@ impl MuxlaneApp {
                     .find(|remote| remote.cfg.name == host)
                     .cloned();
                 let Some(remote) = remote else {
-                    self.delete_error = Some("远端当前不可连接，未执行删除".into());
+                    self.delete_error = Some(
+                        i18n::text(self.language, "error.remote_unavailable_for_delete").into(),
+                    );
                     self.delete_busy = false;
                     cx.notify();
                     return;
@@ -259,10 +267,13 @@ impl MuxlaneApp {
                             if result.failed_agents.is_empty() {
                                 this.delete_confirm = None;
                             } else {
-                                this.delete_error = Some(format!(
-                                    "{} 个远端 tmux 会话未能销毁，项目仍保留",
-                                    result.failed_agents.len()
-                                ));
+                                this.delete_error = Some(
+                                    i18n::text(this.language, "error.delete_remote_sessions")
+                                        .replace(
+                                            "{count}",
+                                            &result.failed_agents.len().to_string(),
+                                        ),
+                                );
                             }
                             this.delete_busy = false;
                             this.persist();
@@ -335,7 +346,8 @@ impl MuxlaneApp {
             .find(|remote| remote.cfg.name == confirm.host)
             .cloned()
         else {
-            self.bootstrap_error = Some("远程机器已不存在".into());
+            self.bootstrap_error =
+                Some(i18n::text(self.language, "error.remote_machine_missing").into());
             cx.notify();
             return;
         };
@@ -426,7 +438,11 @@ impl MuxlaneApp {
                 Err(error) => {
                     let text = error.to_string();
                     this.notifications.update(cx, |center, cx| {
-                        center.show_error(format!("远程创建会话失败：{text}"), cx)
+                        center.show_error(
+                            i18n::text(this.language, "error.remote_create_session")
+                                .replace("{error}", &text),
+                            cx,
+                        )
                     });
                     // 类型不匹配通常意味着远端仍在运行旧版 Muxlane，
                     // 直接切换到已有的更新引导状态。
@@ -465,12 +481,14 @@ impl MuxlaneApp {
             .find(|remote| remote.cfg.name == host)
             .cloned();
         let Some(remote) = remote else {
-            self.dialog_error = Some("远端尚未连接".into());
+            self.dialog_error =
+                Some(i18n::text(self.language, "error.remote_not_connected").into());
             cx.notify();
             return;
         };
         if path.trim().is_empty() {
-            self.dialog_error = Some("请输入远端已有目录".into());
+            self.dialog_error =
+                Some(i18n::text(self.language, "error.remote_project_required").into());
             cx.notify();
             return;
         }

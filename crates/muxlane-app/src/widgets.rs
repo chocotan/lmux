@@ -38,34 +38,15 @@ pub(crate) fn format_relative_time(then: u64, lang: Language) -> String {
     let now = muxlane_core::model::now_secs();
     let diff = now.saturating_sub(then);
     if diff < 10 {
-        i18n::text(lang, "刚刚", "just now").to_string()
+        i18n::text(lang, "relative.just_now").to_string()
     } else if diff < 60 {
-        if lang == Language::English {
-            format!("{diff}s ago")
-        } else {
-            format!("{diff}秒前")
-        }
+        i18n::text(lang, "relative.seconds_ago").replace("{count}", &diff.to_string())
     } else if diff < 3600 {
-        let m = diff / 60;
-        if lang == Language::English {
-            format!("{m}m ago")
-        } else {
-            format!("{m}分钟前")
-        }
+        i18n::text(lang, "relative.minutes_ago").replace("{count}", &(diff / 60).to_string())
     } else if diff < 86400 {
-        let h = diff / 3600;
-        if lang == Language::English {
-            format!("{h}h ago")
-        } else {
-            format!("{h}小时前")
-        }
+        i18n::text(lang, "relative.hours_ago").replace("{count}", &(diff / 3600).to_string())
     } else {
-        let d = diff / 86400;
-        if lang == Language::English {
-            format!("{d}d ago")
-        } else {
-            format!("{d}天前")
-        }
+        i18n::text(lang, "relative.days_ago").replace("{count}", &(diff / 86400).to_string())
     }
 }
 
@@ -223,8 +204,18 @@ fn format_bytes(bytes: u64) -> String {
 
 /// 上传阶段进度文本：如「上传二进制 12.3 MB / 45.6 MB (27%)」；
 /// 无字节数时退化为「上传二进制 27%」/「上传二进制…」
-pub(crate) fn format_upload_phase(progress: &muxlane_client::BootstrapProgress) -> String {
-    let label = progress.phase.label();
+pub(crate) fn format_upload_phase(
+    progress: &muxlane_client::BootstrapProgress,
+    language: Language,
+) -> String {
+    let label = i18n::text(
+        language,
+        match progress.phase {
+            muxlane_client::BootstrapPhase::Upload => "bootstrap.phase.upload",
+            muxlane_client::BootstrapPhase::Install => "bootstrap.phase.install",
+            muxlane_client::BootstrapPhase::Restart => "bootstrap.phase.restart",
+        },
+    );
     match (progress.done_bytes, progress.total_bytes, progress.percent) {
         (Some(done), Some(total), Some(percent)) if total > 0 => {
             format!(
@@ -251,25 +242,31 @@ mod tests {
             done_bytes: Some(12 * 1024 * 1024 + 300 * 1024),
             total_bytes: Some(45 * 1024 * 1024),
         };
-        let text = format_upload_phase(&progress);
+        let text = format_upload_phase(&progress, Language::English);
         assert!(text.contains("12.3 MB"), "{text}");
         assert!(text.contains("45.0 MB"), "{text}");
         assert!(text.contains("27%"), "{text}");
         // 无字节数时退化为纯百分比
-        let text = format_upload_phase(&muxlane_client::BootstrapProgress {
-            phase: BootstrapPhase::Install,
-            percent: Some(50),
-            done_bytes: None,
-            total_bytes: None,
-        });
-        assert_eq!(text, "安装 50%");
+        let text = format_upload_phase(
+            &muxlane_client::BootstrapProgress {
+                phase: BootstrapPhase::Install,
+                percent: Some(50),
+                done_bytes: None,
+                total_bytes: None,
+            },
+            Language::English,
+        );
+        assert_eq!(text, "Installing 50%");
         // 无细分进度
-        let text = format_upload_phase(&muxlane_client::BootstrapProgress {
-            phase: BootstrapPhase::Restart,
-            percent: None,
-            done_bytes: None,
-            total_bytes: None,
-        });
-        assert_eq!(text, "重启服务…");
+        let text = format_upload_phase(
+            &muxlane_client::BootstrapProgress {
+                phase: BootstrapPhase::Restart,
+                percent: None,
+                done_bytes: None,
+                total_bytes: None,
+            },
+            Language::English,
+        );
+        assert_eq!(text, "Restarting Service…");
     }
 }
