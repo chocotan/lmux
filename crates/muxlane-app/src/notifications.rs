@@ -519,7 +519,7 @@ impl NotificationCenter {
 impl Render for NotificationCenter {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_mode(self.theme_mode);
-        let mut root = div();
+        let mut root = div().absolute().size_full();
 
         if !self.toasts.is_empty() {
             root = root.child(

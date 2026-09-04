@@ -173,6 +173,65 @@ assert status=='done', status
 print('✓ hook event reached done state with notification message content')
 PY
 
+# 通知入口必须打开可见的左下弹层，不能只切换内部 open 状态。
+# 从截图检测默认 230px 侧栏的实际像素宽度，避免依赖 WM 最大化时机或 HiDPI 配置。
+read -r X_NOTIFICATIONS Y_FOOTER UI_SCALE < <(SCREENSHOT="$ARTIFACTS/02-done-notification.png" python3 - <<'PY'
+import os
+from PIL import Image
+im=Image.open(os.environ['SCREENSHOT']).convert('RGB')
+y=im.height//2
+sidebar=im.getpixel((10,y))
+def distance(pixel): return max(abs(a-b) for a,b in zip(pixel,sidebar))
+edge=next(x for x in range(20,im.width//2) if all(distance(im.getpixel((x+i,y)))>12 for i in range(8)))
+scale=edge/230
+print(round(170*scale), round(im.height-20*scale), f'{scale:.4f}')
+PY
+)
+xdotool windowactivate --sync "$WID"
+click_at "$X_NOTIFICATIONS" "$Y_FOOTER" 1
+sleep .25
+import -window "$WID" "$ARTIFACTS/02-notification-center.png"
+BEFORE="$ARTIFACTS/02-done-notification.png" AFTER="$ARTIFACTS/02-notification-center.png" UI_SCALE="$UI_SCALE" python3 - <<'PY'
+import os
+from PIL import Image, ImageChops
+before=Image.open(os.environ['BEFORE']).convert('RGB')
+after=Image.open(os.environ['AFTER']).convert('RGB')
+assert before.size==after.size, (before.size,after.size)
+scale=float(os.environ['UI_SCALE'])
+w,h=before.size
+left=round(8*scale); right=round((8+320)*scale); bottom=round(h-40*scale)
+top=max(0,round(bottom-220*scale))
+diff=ImageChops.difference(before.crop((left,top,right,bottom)),after.crop((left,top,right,bottom)))
+bbox=diff.getbbox()
+changed=sum(1 for pixel in diff.getdata() if max(pixel)>4)
+assert bbox is not None, 'notification center did not become visible'
+width=bbox[2]-bbox[0]; height=bbox[3]-bbox[1]
+assert changed>1000*scale*scale, f'notification center diff too small: changed={changed}'
+assert width>250*scale and height>60*scale, f'unexpected notification center bounds: {bbox}'
+assert abs(bbox[2]-round(320*scale))<8*scale, f'unexpected notification center right edge: {bbox}'
+assert abs(bbox[3]-round(220*scale))<8*scale, f'unexpected notification center bottom edge: {bbox}'
+print(f'✓ notification center opened visibly: changed={changed} bounds={bbox}')
+PY
+xdotool windowactivate --sync "$WID"
+xdotool key Escape
+sleep .15
+import -window "$WID" "$ARTIFACTS/02-notification-center-closed.png"
+BEFORE="$ARTIFACTS/02-done-notification.png" CLOSED="$ARTIFACTS/02-notification-center-closed.png" UI_SCALE="$UI_SCALE" python3 - <<'PY'
+import os
+from PIL import Image, ImageChops
+before=Image.open(os.environ['BEFORE']).convert('RGB')
+closed=Image.open(os.environ['CLOSED']).convert('RGB')
+assert before.size==closed.size, (before.size,closed.size)
+scale=float(os.environ['UI_SCALE'])
+w,h=before.size
+left=round(8*scale); right=round((8+320)*scale); bottom=round(h-40*scale)
+top=max(0,round(bottom-220*scale))
+diff=ImageChops.difference(before.crop((left,top,right,bottom)),closed.crop((left,top,right,bottom)))
+changed=sum(1 for pixel in diff.getdata() if max(pixel)>4)
+assert changed<250*scale*scale, f'notification center did not close cleanly: changed={changed}'
+print(f'✓ notification center closed cleanly: changed={changed}')
+PY
+
 # 2. Ctrl+K 命令面板。
 xdotool key ctrl+k; sleep .35
 import -window "$WID" "$ARTIFACTS/02-command-palette.png"
