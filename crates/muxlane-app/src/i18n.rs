@@ -350,6 +350,8 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("status.remote_ssh_probe", "SSH 探测", "Checking SSH"),
     ("status.remote_subscribe", "订阅状态", "Subscribing"),
     ("status.remote_tunnel", "建立 tunnel", "Opening Tunnel"),
+    ("settings.general", "通用", "General"),
+    ("settings.appearance", "外观", "Appearance"),
     ("settings.workspaces", "工作区", "Workspaces"),
     (
         "settings.project_workspaces",
@@ -362,6 +364,11 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "Keep panes and tabs separate for each project. Disabled mode uses a shared layout.",
     ),
     ("settings.shortcuts", "快捷键", "Shortcuts"),
+    (
+        "settings.shortcuts_help",
+        "点击输入框后按下新快捷键，Esc 取消",
+        "Click a field and press the new shortcut; Esc cancels",
+    ),
     ("settings.shortcuts_restore", "恢复默认", "Restore Defaults"),
     (
         "settings.shortcut.close_tab",
@@ -410,18 +417,43 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "Shortcut {shortcut} is already assigned.",
     ),
     ("settings.interface_theme", "界面主题", "Interface Theme"),
+    (
+        "settings.interface_theme_help",
+        "选择界面配色方案",
+        "Choose the interface color scheme",
+    ),
     ("settings.language", "语言", "Language"),
+    (
+        "settings.language_help",
+        "界面显示语言",
+        "Interface display language",
+    ),
     (
         "settings.notification_sound",
         "通知声音",
         "Notification Sound",
     ),
     (
+        "settings.notification_sound_help",
+        "任务完成或有通知时播放提示音",
+        "Play a sound when tasks finish or notify",
+    ),
+    (
         "settings.osc52",
         "允许终端写入剪贴板 (OSC52)",
         "Allow Terminal Clipboard Writes (OSC52)",
     ),
+    (
+        "settings.osc52_help",
+        "允许终端内程序读写系统剪贴板",
+        "Allow terminal programs to use the system clipboard",
+    ),
     ("settings.terminal_font", "终端字体", "Terminal Font"),
+    (
+        "settings.terminal_font_help",
+        "终端使用的等宽字体",
+        "Monospace font used in terminals",
+    ),
     ("settings.theme", "主题", "Theme"),
     (
         "terminal.attaching",

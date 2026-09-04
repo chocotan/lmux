@@ -15,7 +15,7 @@ use crate::menus::{
     TreeMenu,
 };
 use crate::notifications::{NotificationCenter, NotificationCenterEvent, NotificationDraft};
-use crate::settings::{DEFAULT_FONT_FAMILY, FONT_FAMILIES};
+use crate::settings::{SettingsPage, DEFAULT_FONT_FAMILY, FONT_FAMILIES};
 use crate::shortcuts::{ShortcutAction, ShortcutError};
 use crate::sidebar_state::{SidebarState, SIDEBAR_RAIL_WIDTH};
 use crate::term_view::TermView;
@@ -148,6 +148,7 @@ pub struct MuxlaneApp {
 
     // 设置面板
     pub(crate) settings_open: bool,
+    pub(crate) settings_page: SettingsPage,
     pub(crate) settings_theme_menu: bool,
     pub(crate) settings_font_menu: bool,
     pub(crate) settings_language_menu: bool,
@@ -594,6 +595,7 @@ impl MuxlaneApp {
             theme_mode,
             font_family,
             settings_open: false,
+            settings_page: SettingsPage::General,
             settings_theme_menu: false,
             settings_font_menu: false,
             settings_language_menu: false,
