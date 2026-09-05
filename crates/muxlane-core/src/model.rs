@@ -83,17 +83,23 @@ pub enum AgentStatus {
     Blocked,
     Idle,
     Done,
+    Failed,
     #[serde(other)]
     Unknown,
 }
 
 impl AgentStatus {
+    pub fn is_finished(self) -> bool {
+        matches!(self, Self::Done | Self::Failed)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentStatus::Working => "working",
             AgentStatus::Blocked => "blocked",
             AgentStatus::Idle => "idle",
             AgentStatus::Done => "done",
+            AgentStatus::Failed => "failed",
             AgentStatus::Unknown => "unknown",
         }
     }

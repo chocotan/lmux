@@ -1,5 +1,5 @@
 // muxlane hook reporter (ESM, zero dependencies).
-// 用法：node report.mjs done|blocked|working
+// 用法：node report.mjs done|failed|blocked|working
 // 身份和密钥来自 PTY env：MUXLANE_SOCKET / MUXLANE_AGENT_ID / MUXLANE_HOOK_TOKEN。
 import { readFileSync } from "node:fs"
 

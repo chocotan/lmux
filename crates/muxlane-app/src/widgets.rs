@@ -1,7 +1,12 @@
 use crate::i18n::{self, Language};
 use crate::theme::Theme;
-use gpui::{div, prelude::*, px, rgba, Context, Pixels, Point, Render, SharedString, Window};
+use crate::ui_scale::px as ui_px;
+use gpui::{
+    div, prelude::*, pulsating_between, rgba, Animation, AnimationExt, Context, ElementId, Pixels,
+    Point, Render, Role, SharedString, Window,
+};
 
+use std::time::Duration;
 pub(crate) struct DragGhost {
     pub(crate) label: SharedString,
     pub(crate) offset: Point<Pixels>,
@@ -10,8 +15,8 @@ pub(crate) struct DragGhost {
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .pl(self.offset.x.max(px(0.0)))
-            .pt(self.offset.y.max(px(0.0)))
+            .pl(self.offset.x.max(ui_px(0.0)))
+            .pt(self.offset.y.max(ui_px(0.0)))
             .child(
                 div()
                     .px_2()
@@ -19,7 +24,7 @@ impl Render for DragGhost {
                     .bg(rgba(self.theme.bg2))
                     .border_1()
                     .border_color(rgba(self.theme.line))
-                    .text_size(px(11.))
+                    .text_size(ui_px(11.))
                     .text_color(rgba(self.theme.fg0))
                     .child(self.label.clone()),
             )
@@ -30,10 +35,50 @@ pub(crate) struct DividerDragGhost;
 
 impl Render for DividerDragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(1.)).h(px(1.))
+        div().w(ui_px(1.)).h(ui_px(1.))
     }
 }
 
+pub(crate) fn semantic_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    theme: Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .focusable()
+        .tab_stop(true)
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(label)
+        .focus_visible(|style| style.border_1().border_color(rgba(theme.accent)))
+        .active(|style| style.bg(rgba(theme.bg3)))
+}
+
+struct HoverTip {
+    text: SharedString,
+}
+
+impl Render for HoverTip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .bg(rgba(0x1a1d24f2))
+            .border_1()
+            .border_color(rgba(0x00000066))
+            .text_size(ui_px(11.))
+            .text_color(rgba(0xffffffff))
+            .child(self.text.clone())
+    }
+}
+
+pub(crate) fn hover_tip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView {
+    let text = text.into();
+    move |_, cx| cx.new(|_| HoverTip { text: text.clone() }).into()
+}
 pub(crate) fn format_relative_time(then: u64, lang: Language) -> String {
     let now = muxlane_core::model::now_secs();
     let diff = now.saturating_sub(then);
@@ -50,45 +95,29 @@ pub(crate) fn format_relative_time(then: u64, lang: Language) -> String {
     }
 }
 
-fn render_pi_loading_spinner(frame: usize, theme: Theme) -> gpui::Div {
-    let empty_index = frame % 8;
-    // 顺时针 8 点阵索引：左列 [0, 7, 6, 5]，右列 [1, 2, 3, 4]
-    let left_indices = [0, 7, 6, 5];
-    let right_indices = [1, 2, 3, 4];
-
+fn render_pi_loading_spinner(animation_id: impl Into<ElementId>, theme: Theme) -> impl IntoElement {
     let render_col = |indices: [usize; 4]| {
-        let mut col = div().flex().flex_col().gap(px(1.5));
-        for idx in indices {
-            let is_filled = idx != empty_index;
-            col = col.child(
-                div()
-                    .w(px(2.5))
-                    .h(px(2.5))
-                    .when(is_filled, |el| el.bg(rgba(theme.accent)))
-                    .when(!is_filled, |el| {
-                        el.bg(rgba(Theme::with_alpha(theme.accent, 0x25)))
-                    }),
-            );
+        let mut col = div().flex().flex_col().gap(ui_px(1.5));
+        for _ in indices {
+            col = col.child(div().w(ui_px(2.5)).h(ui_px(2.5)).bg(rgba(theme.accent)));
         }
         col
     };
 
     div()
-        .w(px(14.))
-        .h(px(14.))
-        .flex_none()
         .flex()
+        .flex_row()
+        .gap(ui_px(2.5))
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(2.5))
-                .items_center()
-                .justify_center()
-                .child(render_col(left_indices))
-                .child(render_col(right_indices)),
+        .child(render_col([0, 1, 2, 3]))
+        .child(render_col([4, 5, 6, 7]))
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(1200))
+                .repeat()
+                .with_easing(pulsating_between(0.55, 1.0)),
+            |this, opacity| this.opacity(opacity),
         )
 }
 
@@ -103,32 +132,33 @@ pub(crate) struct AttentionStyle {
 pub(crate) fn compute_attention_style(
     status: muxlane_core::model::AgentStatus,
     seen: bool,
-    is_error: bool,
-    pulse_phase: usize,
     theme: Theme,
 ) -> AttentionStyle {
-    // 36 步采样的平滑余弦缓动（10 FPS，3.6 秒一周期）。
-    let pulse = (1.0 - (pulse_phase as f32 * std::f32::consts::TAU / 36.0).cos()) * 0.5;
     match status {
         muxlane_core::model::AgentStatus::Blocked => {
             let base_color = theme.yellow;
-            let alpha = (0x0e as f32 + pulse * 0x28 as f32) as u32;
-            let border_alpha = (0x40 as f32 + pulse * 0x80 as f32) as u32;
             AttentionStyle {
-                bg_color: Some(Theme::with_alpha(base_color, alpha as u8)),
+                bg_color: Some(Theme::with_alpha(base_color, 0x22)),
                 text_color: Some(base_color),
-                border_color: Some(Theme::with_alpha(base_color, border_alpha as u8)),
+                border_color: Some(Theme::with_alpha(base_color, 0xa0)),
                 is_alerting: true,
             }
         }
         muxlane_core::model::AgentStatus::Done if !seen => {
-            let base_color = if is_error { theme.red } else { theme.green };
-            let alpha = (0x0c as f32 + pulse * 0x24 as f32) as u32;
-            let border_alpha = (0x35 as f32 + pulse * 0x75 as f32) as u32;
+            let base_color = theme.green;
             AttentionStyle {
-                bg_color: Some(Theme::with_alpha(base_color, alpha as u8)),
+                bg_color: Some(Theme::with_alpha(base_color, 0x1e)),
                 text_color: Some(base_color),
-                border_color: Some(Theme::with_alpha(base_color, border_alpha as u8)),
+                border_color: Some(Theme::with_alpha(base_color, 0x70)),
+                is_alerting: true,
+            }
+        }
+        muxlane_core::model::AgentStatus::Failed if !seen => {
+            let base_color = theme.red;
+            AttentionStyle {
+                bg_color: Some(Theme::with_alpha(base_color, 0x1e)),
+                text_color: Some(base_color),
+                border_color: Some(Theme::with_alpha(base_color, 0x70)),
                 is_alerting: true,
             }
         }
@@ -138,13 +168,12 @@ pub(crate) fn compute_attention_style(
 
 pub(crate) fn render_status_indicator(
     status: muxlane_core::model::AgentStatus,
-    is_error: bool,
-    spinner_frame: usize,
+    animation_id: impl Into<ElementId>,
     theme: Theme,
 ) -> gpui::Div {
     let container = div()
-        .w(px(14.))
-        .h(px(14.))
+        .w(ui_px(14.))
+        .h(ui_px(14.))
         .flex_none()
         .flex()
         .items_center()
@@ -152,19 +181,19 @@ pub(crate) fn render_status_indicator(
 
     match status {
         muxlane_core::model::AgentStatus::Working => {
-            render_pi_loading_spinner(spinner_frame, theme)
+            container.child(render_pi_loading_spinner(animation_id, theme))
         }
         muxlane_core::model::AgentStatus::Blocked => {
-            container.child(div().w(px(6.)).h(px(6.)).bg(rgba(theme.yellow)))
-        }
-        muxlane_core::model::AgentStatus::Done if is_error => {
-            container.child(div().w(px(6.)).h(px(6.)).bg(rgba(theme.red)))
+            container.child(div().w(ui_px(6.)).h(ui_px(6.)).bg(rgba(theme.yellow)))
         }
         muxlane_core::model::AgentStatus::Done => {
-            container.child(div().w(px(6.)).h(px(6.)).bg(rgba(theme.green)))
+            container.child(div().w(ui_px(6.)).h(ui_px(6.)).bg(rgba(theme.green)))
+        }
+        muxlane_core::model::AgentStatus::Failed => {
+            container.child(div().w(ui_px(6.)).h(ui_px(6.)).bg(rgba(theme.red)))
         }
         muxlane_core::model::AgentStatus::Idle | muxlane_core::model::AgentStatus::Unknown => {
-            container.child(div().w(px(5.)).h(px(5.)).bg(rgba(theme.fg2)))
+            container.child(div().w(ui_px(5.)).h(ui_px(5.)).bg(rgba(theme.fg2)))
         }
     }
 }

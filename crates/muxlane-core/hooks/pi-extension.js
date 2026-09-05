@@ -91,9 +91,10 @@ export default function (pi) {
     let msg = latestAssistant
     if (event?.error || ctx?.error) {
       const err = shortText(event?.error || ctx?.error || "执行出错")
-      msg = `任务异常: ${err}`
+      await report("failed", `任务异常: ${err}`)
+    } else {
+      await report("done", msg || "任务已完成")
     }
-    await report("done", msg || "任务已完成")
     latestAssistant = ""
   })
 
@@ -105,9 +106,10 @@ export default function (pi) {
     let msg = latestAssistant
     if (event?.error || ctx?.error) {
       const err = shortText(event?.error || ctx?.error || "执行出错")
-      msg = `任务异常: ${err}`
+      await report("failed", `任务异常: ${err}`)
+    } else {
+      await report("done", msg || "任务已完成")
     }
-    await report("done", msg || "任务已完成")
     latestAssistant = ""
   })
 }

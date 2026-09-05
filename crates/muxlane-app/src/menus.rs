@@ -2,11 +2,35 @@
 use crate::app::MuxlaneApp;
 use crate::i18n;
 use crate::theme::Theme;
-use crate::widgets::format_upload_phase;
+use crate::ui_scale::px as ui_px;
+use crate::widgets::{format_upload_phase, semantic_button};
 use gpui::{
-    div, prelude::*, px, relative, rgba, Context, Focusable, ParentElement, Pixels, Point, Styled,
+    div, prelude::*, relative, rgba, Context, Focusable, ParentElement, Pixels, Point, Styled,
 };
 use muxlane_core::model::AgentId;
+
+pub(crate) fn clamp_menu_position(
+    anchor: Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    menu_size: gpui::Size<Pixels>,
+) -> Point<Pixels> {
+    let x = if anchor.x + menu_size.width > viewport.width {
+        anchor.x - menu_size.width
+    } else {
+        anchor.x
+    };
+    let y = if anchor.y + menu_size.height > viewport.height {
+        anchor.y - menu_size.height
+    } else {
+        anchor.y
+    };
+    Point::new(
+        x.max(Pixels::ZERO)
+            .min((viewport.width - menu_size.width).max(Pixels::ZERO)),
+        y.max(Pixels::ZERO)
+            .min((viewport.height - menu_size.height).max(Pixels::ZERO)),
+    )
+}
 
 #[derive(Clone)]
 pub(crate) struct SessionMenu {
@@ -94,29 +118,36 @@ impl MuxlaneApp {
             )
             .left(menu.position.x)
             .top(menu.position.y)
-            .w(px(180.))
+            .w(ui_px(180.))
             .bg(rgba(theme.bg1))
             .border_1()
             .border_color(rgba(theme.line))
             .shadow_lg()
             .child(
-                div()
-                    .id("session-delete")
-                    .px_3()
-                    .py_2()
-                    .text_size(px(12.))
-                    .text_color(rgba(theme.red))
-                    .hover(|s| s.bg(rgba(theme.bg2)))
-                    .on_click(cx.listener({
-                        let id = menu.agent.clone();
-                        let remote = menu.remote;
-                        move |this, _ev, window, cx| this.delete_session(&id, remote, window, cx)
-                    }))
-                    .child(if menu.remote {
+                semantic_button(
+                    "session-delete",
+                    if menu.remote {
                         i18n::text(self.language, "menu.delete_remote_session")
                     } else {
                         i18n::text(self.language, "menu.delete_session")
-                    }),
+                    },
+                    theme,
+                )
+                .px_3()
+                .py_2()
+                .text_size(ui_px(12.))
+                .text_color(rgba(theme.red))
+                .hover(|s| s.bg(rgba(theme.bg2)))
+                .on_click(cx.listener({
+                    let id = menu.agent.clone();
+                    let remote = menu.remote;
+                    move |this, _ev, window, cx| this.delete_session(&id, remote, window, cx)
+                }))
+                .child(if menu.remote {
+                    i18n::text(self.language, "menu.delete_remote_session")
+                } else {
+                    i18n::text(self.language, "menu.delete_session")
+                }),
             )
             .into_any_element()
     }
@@ -133,107 +164,122 @@ impl MuxlaneApp {
                 let host_name_3 = host.clone();
                 let host_obj = self.remotes.iter().find(|r| r.cfg.name == *host).cloned();
                 div()
-                    .w(px(200.))
+                    .w(ui_px(200.))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
                     .shadow_lg()
                     .child(
-                        div()
-                            .id("tree-reconnect")
-                            .px_3()
-                            .py_2()
-                            .text_size(px(12.))
-                            .text_color(rgba(theme.fg0))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                if let Some(h) = &host_obj {
-                                    h.reconnect();
-                                    this.focus.focus(window, cx);
-                                }
-                                this.tree_menu = None;
-                                cx.notify();
-                            }))
-                            .child(i18n::text(self.language, "menu.reconnect")),
+                        semantic_button(
+                            "tree-reconnect",
+                            i18n::text(self.language, "menu.reconnect"),
+                            theme,
+                        )
+                        .px_3()
+                        .py_2()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.fg0))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener(move |this, _event, window, cx| {
+                            if let Some(h) = &host_obj {
+                                h.reconnect();
+                                this.focus.focus(window, cx);
+                            }
+                            this.tree_menu = None;
+                            cx.notify();
+                        }))
+                        .child(i18n::text(self.language, "menu.reconnect")),
                     )
                     .child(
-                        div()
-                            .id("tree-add-project")
-                            .px_3()
-                            .py_2()
-                            .text_size(px(12.))
-                            .text_color(rgba(theme.fg0))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.tree_menu = None;
-                                this.remote_project_dialog = Some(host_name.clone());
-                                this.dialog_error = None;
-                                this.remote_project_input
-                                    .update(cx, |input, cx| input.reset(cx));
-                                this.remote_project_input.focus_handle(cx).focus(window, cx);
-                                cx.notify();
-                            }))
-                            .child(i18n::text(self.language, "menu.add_remote_project")),
+                        semantic_button(
+                            "tree-add-project",
+                            i18n::text(self.language, "menu.add_remote_project"),
+                            theme,
+                        )
+                        .px_3()
+                        .py_2()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.fg0))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener(move |this, _event, window, cx| {
+                            this.tree_menu = None;
+                            this.remote_project_dialog = Some(host_name.clone());
+                            this.dialog_error = None;
+                            this.remote_project_input
+                                .update(cx, |input, cx| input.reset(cx));
+                            this.remote_project_input.focus_handle(cx).focus(window, cx);
+                            cx.notify();
+                        }))
+                        .child(i18n::text(self.language, "menu.add_remote_project")),
                     )
                     .child(
-                        div()
-                            .id("tree-upgrade-muxlane")
-                            .px_3()
-                            .py_2()
-                            .text_size(px(12.))
-                            .text_color(rgba(theme.accent))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.tree_menu = None;
-                                this.bootstrap_error = None;
-                                this.bootstrap_confirm = Some(BootstrapConfirm {
-                                    host: host_name_2.clone(),
-                                    install: false,
-                                    upgrade: true,
-                                    binary: None,
-                                });
-                                cx.notify();
-                            }))
-                            .child(i18n::text(self.language, "menu.upgrade_remote")),
+                        semantic_button(
+                            "tree-upgrade-muxlane",
+                            i18n::text(self.language, "menu.upgrade_remote"),
+                            theme,
+                        )
+                        .px_3()
+                        .py_2()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.accent))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.tree_menu = None;
+                            this.bootstrap_error = None;
+                            this.bootstrap_confirm = Some(BootstrapConfirm {
+                                host: host_name_2.clone(),
+                                install: false,
+                                upgrade: true,
+                                binary: None,
+                            });
+                            cx.notify();
+                        }))
+                        .child(i18n::text(self.language, "menu.upgrade_remote")),
                     )
                     .child(
-                        div()
-                            .id("tree-reinstall-muxlane")
-                            .px_3()
-                            .py_2()
-                            .text_size(px(12.))
-                            .text_color(rgba(theme.fg1))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.tree_menu = None;
-                                this.bootstrap_error = None;
-                                this.bootstrap_confirm = Some(BootstrapConfirm {
-                                    host: host_name_3.clone(),
-                                    install: true,
-                                    upgrade: false,
-                                    binary: None,
-                                });
-                                cx.notify();
-                            }))
-                            .child(i18n::text(self.language, "menu.reinstall_remote")),
+                        semantic_button(
+                            "tree-reinstall-muxlane",
+                            i18n::text(self.language, "menu.reinstall_remote"),
+                            theme,
+                        )
+                        .px_3()
+                        .py_2()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.fg1))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.tree_menu = None;
+                            this.bootstrap_error = None;
+                            this.bootstrap_confirm = Some(BootstrapConfirm {
+                                host: host_name_3.clone(),
+                                install: true,
+                                upgrade: false,
+                                binary: None,
+                            });
+                            cx.notify();
+                        }))
+                        .child(i18n::text(self.language, "menu.reinstall_remote")),
                     )
-                    .child(div().h(px(1.)).bg(rgba(theme.line)).my_1())
+                    .child(div().h(ui_px(1.)).bg(rgba(theme.line)).my_1())
                     .child(
-                        div()
-                            .id("tree-delete")
-                            .px_3()
-                            .py_2()
-                            .text_size(px(12.))
-                            .text_color(rgba(theme.red))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener({
-                                let target = menu.target.clone();
-                                move |this, _event, _window, cx| {
-                                    this.tree_menu = None;
-                                    this.begin_delete(target.clone(), cx);
-                                }
-                            }))
-                            .child(i18n::text(self.language, "menu.delete_remote_machine")),
+                        semantic_button(
+                            "tree-delete-machine",
+                            i18n::text(self.language, "menu.delete_remote_machine"),
+                            theme,
+                        )
+                        .px_3()
+                        .py_2()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.red))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener({
+                            let target = menu.target.clone();
+                            move |this, _event, _window, cx| {
+                                this.tree_menu = None;
+                                this.begin_delete(target.clone(), cx);
+                            }
+                        }))
+                        .child(i18n::text(self.language, "menu.delete_remote_machine")),
                     )
             }
             DeleteTarget::LocalProject { .. } | DeleteTarget::RemoteProject { .. } => {
@@ -247,17 +293,16 @@ impl MuxlaneApp {
                     _ => unreachable!(),
                 };
                 div()
-                    .w(px(190.))
+                    .w(ui_px(190.))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
                     .shadow_lg()
                     .child(
-                        div()
-                            .id("tree-delete")
+                        semantic_button("tree-delete-project", label, theme)
                             .px_3()
                             .py_2()
-                            .text_size(px(12.))
+                            .text_size(ui_px(12.))
                             .text_color(rgba(theme.red))
                             .hover(|style| style.bg(rgba(theme.bg2)))
                             .on_click(cx.listener({
@@ -319,7 +364,8 @@ impl MuxlaneApp {
             .bg(rgba(theme.overlay()))
             .child(
                 div()
-                    .w(px(460.))
+                    .w(ui_px(460.))
+                    .max_w(relative(0.92))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
@@ -338,7 +384,7 @@ impl MuxlaneApp {
                         div()
                             .px_4()
                             .pt_3()
-                            .text_size(px(12.))
+                            .text_size(ui_px(12.))
                             .text_color(rgba(theme.fg1))
                             .child(format!("{} · {}", label, destructive_copy)),
                     )
@@ -347,7 +393,7 @@ impl MuxlaneApp {
                             div()
                                 .px_4()
                                 .pt_2()
-                                .text_size(px(11.))
+                                .text_size(ui_px(11.))
                                 .text_color(rgba(theme.red))
                                 .child(error),
                         )
@@ -360,48 +406,54 @@ impl MuxlaneApp {
                             .px_4()
                             .py_3()
                             .child(
-                                div()
-                                    .id("delete-confirm-cancel")
-                                    .px_3()
-                                    .py_1()
-                                    .text_color(rgba(theme.fg0))
-                                    .hover(|style| style.bg(rgba(theme.bg2)))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.delete_confirm = None;
-                                        this.delete_error = None;
-                                        this.delete_busy = false;
-                                        cx.notify();
-                                    }))
-                                    .child(i18n::text(self.language, "common.cancel")),
+                                semantic_button(
+                                    "delete-confirm-cancel",
+                                    i18n::text(self.language, "common.cancel"),
+                                    theme,
+                                )
+                                .px_3()
+                                .py_1()
+                                .text_color(rgba(theme.fg0))
+                                .hover(|style| style.bg(rgba(theme.bg2)))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.delete_confirm = None;
+                                    this.delete_error = None;
+                                    this.delete_busy = false;
+                                    cx.notify();
+                                }))
+                                .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child({
                                 let busy = self.delete_busy;
-                                div()
-                                    .id("delete-confirm-submit")
-                                    .px_3()
-                                    .py_1()
-                                    .bg(rgba(theme.red))
-                                    .text_color(rgba(theme.on_accent))
-                                    .cursor_pointer()
-                                    .when(!busy, |el| {
-                                        el.hover(|style| {
-                                            style.bg(rgba(Theme::with_alpha(theme.red, 0xcc)))
-                                        })
-                                        .active(|style| {
-                                            style.bg(rgba(Theme::with_alpha(theme.red, 0x99)))
-                                        })
+                                semantic_button(
+                                    "delete-confirm-submit",
+                                    i18n::text(self.language, "menu.confirm_delete"),
+                                    theme,
+                                )
+                                .px_3()
+                                .py_1()
+                                .bg(rgba(theme.red))
+                                .text_color(rgba(theme.on_accent))
+                                .cursor_pointer()
+                                .when(!busy, |el| {
+                                    el.hover(|style| {
+                                        style.bg(rgba(Theme::with_alpha(theme.red, 0xcc)))
                                     })
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        if !this.delete_busy {
-                                            this.confirm_delete(cx);
-                                        }
-                                    }))
-                                    .child(if busy {
-                                        i18n::text(self.language, "menu.deleting")
-                                    } else {
-                                        i18n::text(self.language, "menu.confirm_delete")
+                                    .active(|style| {
+                                        style.bg(rgba(Theme::with_alpha(theme.red, 0x99)))
                                     })
+                                })
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    if !this.delete_busy {
+                                        this.confirm_delete(cx);
+                                    }
+                                }))
+                                .child(if busy {
+                                    i18n::text(self.language, "menu.deleting")
+                                } else {
+                                    i18n::text(self.language, "menu.confirm_delete")
+                                })
                             }),
                     ),
             )
@@ -461,7 +513,8 @@ impl MuxlaneApp {
             )
             .child(
                 div()
-                    .w(px(460.))
+                    .w(ui_px(460.))
+                    .max_w(relative(0.92))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
@@ -480,7 +533,7 @@ impl MuxlaneApp {
                         div()
                             .px_4()
                             .pt_3()
-                            .text_size(px(12.))
+                            .text_size(ui_px(12.))
                             .text_color(rgba(theme.fg1))
                             .child(
                                 i18n::text(self.language, "confirm.create_directory_copy")
@@ -492,7 +545,7 @@ impl MuxlaneApp {
                             div()
                                 .px_4()
                                 .pt_2()
-                                .text_size(px(11.))
+                                .text_size(ui_px(11.))
                                 .text_color(rgba(theme.red))
                                 .child(error),
                         )
@@ -505,41 +558,47 @@ impl MuxlaneApp {
                             .px_4()
                             .py_3()
                             .child(
-                                div()
-                                    .id("project-create-cancel")
-                                    .px_3()
-                                    .py_1()
-                                    .text_color(rgba(theme.fg0))
-                                    .when(!busy, |button| {
-                                        button
-                                            .hover(|style| style.bg(rgba(theme.bg2)))
-                                            .cursor_pointer()
-                                    })
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.cancel_project_create(cx);
-                                    }))
-                                    .child(i18n::text(self.language, "common.cancel")),
+                                semantic_button(
+                                    "project-create-cancel",
+                                    i18n::text(self.language, "common.cancel"),
+                                    theme,
+                                )
+                                .px_3()
+                                .py_1()
+                                .text_color(rgba(theme.fg0))
+                                .when(!busy, |button| {
+                                    button
+                                        .hover(|style| style.bg(rgba(theme.bg2)))
+                                        .cursor_pointer()
+                                })
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.cancel_project_create(cx);
+                                }))
+                                .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child(
-                                div()
-                                    .id("project-create-submit")
-                                    .px_3()
-                                    .py_1()
-                                    .bg(rgba(theme.accent))
-                                    .text_color(rgba(theme.on_accent))
-                                    .when(!busy, |button| {
-                                        button.cursor_pointer().hover(|style| {
-                                            style.bg(rgba(Theme::with_alpha(theme.accent, 0xcc)))
-                                        })
+                                semantic_button(
+                                    "project-create-submit",
+                                    i18n::text(self.language, "confirm.create"),
+                                    theme,
+                                )
+                                .px_3()
+                                .py_1()
+                                .bg(rgba(theme.accent))
+                                .text_color(rgba(theme.on_accent))
+                                .when(!busy, |button| {
+                                    button.cursor_pointer().hover(|style| {
+                                        style.bg(rgba(Theme::with_alpha(theme.accent, 0xcc)))
                                     })
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.confirm_project_create(cx);
-                                    }))
-                                    .child(if busy {
-                                        i18n::text(self.language, "confirm.creating")
-                                    } else {
-                                        i18n::text(self.language, "confirm.create")
-                                    }),
+                                })
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.confirm_project_create(cx);
+                                }))
+                                .child(if busy {
+                                    i18n::text(self.language, "confirm.creating")
+                                } else {
+                                    i18n::text(self.language, "confirm.create")
+                                }),
                             ),
                     ),
             )
@@ -575,7 +634,8 @@ impl MuxlaneApp {
             .bg(rgba(theme.overlay()))
             .child(
                 div()
-                    .w(px(480.))
+                    .w(ui_px(480.))
+                    .max_w(relative(0.92))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
@@ -597,7 +657,7 @@ impl MuxlaneApp {
                         div()
                             .px_4()
                             .pt_3()
-                            .text_size(px(12.))
+                            .text_size(ui_px(12.))
                             .text_color(rgba(theme.fg1))
                             .child(
                                 i18n::text(self.language, description_key)
@@ -609,7 +669,7 @@ impl MuxlaneApp {
                             div()
                                 .px_4()
                                 .pt_2()
-                                .text_size(px(11.))
+                                .text_size(ui_px(11.))
                                 .text_color(rgba(theme.red))
                                 .child(error),
                         )
@@ -624,12 +684,12 @@ impl MuxlaneApp {
                                     div()
                                         .px_4()
                                         .pt_3()
-                                        .text_size(px(11.))
+                                        .text_size(ui_px(11.))
                                         .text_color(rgba(theme.accent))
                                         .child(phase_text),
                                 )
                                 .child(
-                                    div().mx_4().mt_2().h(px(4.)).bg(rgba(theme.bg2)).child(
+                                    div().mx_4().mt_2().h(ui_px(4.)).bg(rgba(theme.bg2)).child(
                                         div()
                                             .w(relative(overall as f32 / 100.0))
                                             .h_full()
@@ -646,23 +706,25 @@ impl MuxlaneApp {
                             .px_4()
                             .py_3()
                             .child(
-                                div()
-                                    .id("bootstrap-cancel")
-                                    .px_3()
-                                    .py_1()
-                                    .text_color(rgba(theme.fg0))
-                                    .hover(|style| style.bg(rgba(theme.bg2)))
-                                    .on_click(cx.listener({
-                                        let host = confirm.host.clone();
-                                        move |this, _event, _window, cx| {
-                                            this.cancel_bootstrap_for_host(&host, cx);
-                                        }
-                                    }))
-                                    .child(i18n::text(self.language, "common.cancel")),
+                                semantic_button(
+                                    "bootstrap-cancel",
+                                    i18n::text(self.language, "common.cancel"),
+                                    theme,
+                                )
+                                .px_3()
+                                .py_1()
+                                .text_color(rgba(theme.fg0))
+                                .hover(|style| style.bg(rgba(theme.bg2)))
+                                .on_click(cx.listener({
+                                    let host = confirm.host.clone();
+                                    move |this, _event, _window, cx| {
+                                        this.cancel_bootstrap_for_host(&host, cx);
+                                    }
+                                }))
+                                .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child(
-                                div()
-                                    .id("bootstrap-submit")
+                                semantic_button("bootstrap-submit", action, theme)
                                     .px_3()
                                     .py_1()
                                     .bg(rgba(theme.accent))
@@ -683,10 +745,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn context_menu_position_flips_and_clamps_at_viewport_edges() {
+        let viewport = gpui::size(ui_px(800.), ui_px(600.));
+        let menu = gpui::size(ui_px(200.), ui_px(120.));
+        assert_eq!(
+            clamp_menu_position(Point::new(ui_px(100.), ui_px(100.)), viewport, menu),
+            Point::new(ui_px(100.), ui_px(100.))
+        );
+        assert_eq!(
+            clamp_menu_position(Point::new(ui_px(790.), ui_px(590.)), viewport, menu),
+            Point::new(ui_px(590.), ui_px(470.))
+        );
+        assert_eq!(
+            clamp_menu_position(Point::new(ui_px(-10.), ui_px(-20.)), viewport, menu),
+            Point::new(ui_px(0.), ui_px(0.))
+        );
+    }
+
+    #[test]
     fn dismissing_context_menus_clears_session_and_tree_menus() {
         let mut session_menu = Some(SessionMenu {
             agent: "agent-1".into(),
-            position: Point::new(px(10.), px(20.)),
+            position: Point::new(ui_px(10.), ui_px(20.)),
             remote: false,
         });
         let mut tree_menu = Some(TreeMenu {
@@ -694,7 +774,7 @@ mod tests {
                 project: "project-1".into(),
                 label: "demo".into(),
             },
-            position: Point::new(px(30.), px(40.)),
+            position: Point::new(ui_px(30.), ui_px(40.)),
         });
 
         assert!(dismiss_context_menus(&mut session_menu, &mut tree_menu));

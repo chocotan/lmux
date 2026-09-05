@@ -1,11 +1,12 @@
 //! MuxlaneApp：根组件。侧栏（机器树+通知）+ 贴边终端网格。
+use crate::ui_scale::px as ui_px;
 #[path = "palette.rs"]
 pub(crate) mod palette;
 #[path = "panes.rs"]
 mod panes;
 #[path = "sidebar.rs"]
 mod sidebar;
-use self::sidebar::{hover_tip, SidebarDividerDrag};
+use self::sidebar::SidebarDividerDrag;
 use crate::actions::*;
 use crate::dialogs::ConnectAuthMode;
 use crate::i18n::{self, Language};
@@ -21,6 +22,7 @@ use crate::sidebar_state::{SidebarState, SIDEBAR_RAIL_WIDTH};
 use crate::term_view::TermView;
 use crate::text_field::TextField;
 use crate::theme::{Theme, ThemeMode};
+use crate::widgets::{hover_tip, semantic_button};
 use crate::workspace::{ProjectKey, WorkspaceController};
 use gpui::{
     div, prelude::*, px, rgba, size, App, AssetSource, Bounds, Context, Entity, FocusHandle,
@@ -35,8 +37,53 @@ use panes::{DividerDrag, SplitDrag};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
 use std::time::Instant;
+
+struct PersistenceWriter {
+    sender: Option<mpsc::Sender<muxlane_store::PersistedApp>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl PersistenceWriter {
+    fn new(path: PathBuf) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            while let Ok(mut app) = receiver.recv() {
+                while let Ok(next) = receiver.try_recv() {
+                    app = next;
+                }
+                if let Err(error) = muxlane_store::save(&path, &app) {
+                    tracing::warn!(error = %error, "persist state failed");
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+        }
+    }
+
+    fn submit(&self, app: muxlane_store::PersistedApp) {
+        if let Some(sender) = &self.sender {
+            if let Err(error) = sender.send(app) {
+                tracing::warn!(error = %error, "persist state queue failed");
+            }
+        }
+    }
+}
+
+impl Drop for PersistenceWriter {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::warn!("persist state worker terminated unexpectedly");
+            }
+        }
+    }
+}
 
 struct Assets;
 
@@ -110,7 +157,7 @@ pub struct MuxlaneApp {
     // 环境/基础设施
     pub(crate) focus: FocusHandle,
     pub(crate) server: Arc<MuxlaneServer>,
-    store_path: std::path::PathBuf,
+    persistence: PersistenceWriter,
     pub(crate) remote_event_tx: tokio::sync::mpsc::Sender<muxlane_client::ClientEvent>,
 
     // Pane/Tab 布局
@@ -152,6 +199,7 @@ pub struct MuxlaneApp {
     pub(crate) settings_theme_menu: bool,
     pub(crate) settings_font_menu: bool,
     pub(crate) settings_language_menu: bool,
+    pub(crate) settings_scale_menu: bool,
     pub(crate) shortcut_bindings: muxlane_store::PersistedShortcutBindings,
     pub(crate) shortcut_capture: Option<ShortcutAction>,
     pub(crate) shortcut_capture_subscription: Option<Subscription>,
@@ -169,11 +217,16 @@ pub struct MuxlaneApp {
     presets: Vec<muxlane_core::AgentPreset>,
     pub(crate) new_session_target: Option<NewSessionTarget>,
 
+    // 退出确认
+    pub(crate) quit_confirm_open: bool,
+    pub(crate) quit_confirmed: bool,
+    pub(crate) quit_cancel_focus: FocusHandle,
+    pub(crate) quit_exit_focus: FocusHandle,
+
     // 对话框
     pub(crate) connect_dialog: bool,
     pub(crate) connect_input: Entity<TextField>,
     pub(crate) connect_auth_mode: ConnectAuthMode,
-    pub(crate) connect_focus_index: usize,
     pub(crate) connect_username: Entity<TextField>,
     pub(crate) connect_password: Entity<TextField>,
     pub(crate) connect_key_path: Entity<TextField>,
@@ -194,11 +247,9 @@ pub struct MuxlaneApp {
     pub(crate) pending_project_creation: Option<PendingProjectCreation>,
     pub(crate) project_add_busy: bool,
 
-    // 动画/侧栏
+    // 侧栏
     pub(crate) sidebar: SidebarState,
     sidebar_frame_pending: bool,
-    spinner_frame: usize,
-    pulse_phase: usize,
     pub(crate) collapsed_machines: std::collections::HashSet<String>,
     pub(crate) collapsed_projects: std::collections::HashSet<String>,
     /// 侧栏项目自定义排序：machine_id -> 按显示顺序排列的 project_id。
@@ -221,6 +272,7 @@ impl MuxlaneApp {
         persisted: muxlane_store::PersistedApp,
         store_path: std::path::PathBuf,
     ) -> Self {
+        crate::ui_scale::set_percent(persisted.ui_scale);
         // 本地状态事件 → 通知列表
         let mut local_rx = server.subscribe_events();
         cx.spawn(async move |this, cx| loop {
@@ -271,41 +323,10 @@ impl MuxlaneApp {
         })
         .detach();
 
-        // working spinner / attention pulse；通知浮层动画由 NotificationCenter 独立驱动。
-        cx.spawn(async move |this, cx| {
-            let mut anim_tick: usize = 0;
-            loop {
-                let should_animate = match this.update(cx, |this, _cx| this.has_attention()) {
-                    Ok(should_animate) => should_animate,
-                    Err(_) => break,
-                };
-                let delay = if should_animate {
-                    std::time::Duration::from_millis(100)
-                } else {
-                    std::time::Duration::from_millis(250)
-                };
-                cx.background_executor().timer(delay).await;
-                if !should_animate {
-                    continue;
-                }
-                if this
-                    .update(cx, |this, cx| {
-                        anim_tick = anim_tick.wrapping_add(1);
-                        this.spinner_frame = anim_tick % 8; // 100ms 每帧旋转
-                        this.pulse_phase = anim_tick % 36; // 3.6s 完整平滑呼吸周期
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-
         // ── 远程机器接入（socket 直连；SSH 隧道在 tunnel.rs）
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         let remotes = Self::restore_remotes(&server, &persisted, &connect_to, &tx);
+        let persistence = PersistenceWriter::new(store_path);
 
         // 远程事件泵：StateChanged(Online) 更新快照缓存并触发 UI 刷新
         {
@@ -428,7 +449,7 @@ impl MuxlaneApp {
                                     if let Some(a) = snap.agents.iter_mut().find(|a| a.id == agent)
                                     {
                                         a.status = to;
-                                        if to == muxlane_core::model::AgentStatus::Done {
+                                        if to.is_finished() {
                                             a.seen = this.active.as_ref() != Some(&agent);
                                         }
                                     }
@@ -598,6 +619,7 @@ impl MuxlaneApp {
             settings_theme_menu: false,
             settings_font_menu: false,
             settings_language_menu: false,
+            settings_scale_menu: false,
             shortcut_bindings: crate::shortcuts::normalize(&persisted.shortcut_bindings)
                 .unwrap_or_default(),
             shortcut_capture: None,
@@ -620,7 +642,6 @@ impl MuxlaneApp {
             connect_dialog: false,
             connect_input,
             connect_auth_mode: ConnectAuthMode::SshConfig,
-            connect_focus_index: 0,
             connect_username,
             connect_password,
             connect_key_path,
@@ -629,6 +650,10 @@ impl MuxlaneApp {
             remote_project_input,
             project_input,
             dialog_error: None,
+            quit_confirm_open: false,
+            quit_confirmed: false,
+            quit_cancel_focus: cx.focus_handle(),
+            quit_exit_focus: cx.focus_handle(),
             remote_event_tx: tx.clone(),
             new_session_target: None,
             session_menu: None,
@@ -640,11 +665,9 @@ impl MuxlaneApp {
             bootstrap_error: None,
             pending_project_creation: None,
             project_add_busy: false,
-            store_path,
+            persistence,
             split_drag: None,
             split_metrics: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            spinner_frame: 0,
-            pulse_phase: 0,
             sidebar: SidebarState::new(persisted.sidebar_visible, persisted.sidebar_width),
             sidebar_frame_pending: false,
             collapsed_machines: std::collections::HashSet::new(),
@@ -684,6 +707,19 @@ impl MuxlaneApp {
             })
             .detach();
         }
+        let app_handle = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            app_handle
+                .update(cx, |this, cx| {
+                    if this.quit_confirmed {
+                        true
+                    } else {
+                        this.show_quit_confirmation(window, cx);
+                        false
+                    }
+                })
+                .unwrap_or(true)
+        });
         // 仅 UI 自动化使用；真实交互仍由用户点击 agent 打开 tab。
         if std::env::var("MUXLANE_TEST_AUTO_OPEN").as_deref() == Ok("1") {
             if let Some(id) = first_agent {
@@ -726,15 +762,14 @@ impl MuxlaneApp {
         app.sidebar_width = self.sidebar.width;
         app.shortcut_bindings = self.shortcut_bindings.clone();
         app.dark_mode = Some(self.theme_mode.is_dark());
+        app.ui_scale = crate::ui_scale::percent();
         app.project_order = self.project_order.clone();
         app.theme = Some(self.theme_mode.id().into());
         app.font_family = Some(self.font_family.clone());
         app.sound_enabled = Some(self.sound_enabled);
         app.osc52_clipboard_enabled = Some(self.osc52_clipboard_enabled);
         app.language = Some(self.language.id().into());
-        if let Err(e) = muxlane_store::save(&self.store_path, &app) {
-            tracing::warn!(error = %e, "persist state failed");
-        }
+        self.persistence.submit(app);
     }
 
     fn find_agent(&self, agent: &AgentId) -> Option<muxlane_core::model::AgentInstance> {
@@ -747,20 +782,6 @@ impl MuxlaneApp {
             }
         }
         None
-    }
-
-    fn has_attention(&self) -> bool {
-        let attention = |snapshot: &Snapshot| {
-            snapshot.agents.iter().any(|agent| {
-                matches!(
-                    agent.status,
-                    muxlane_core::model::AgentStatus::Working
-                        | muxlane_core::model::AgentStatus::Blocked
-                ) || (agent.status == muxlane_core::model::AgentStatus::Done && !agent.seen)
-            })
-        };
-
-        attention(&self.last_snapshot) || self.remote_snaps.values().any(attention)
     }
 
     fn notification_draft(
@@ -851,6 +872,7 @@ impl MuxlaneApp {
 
 impl Render for MuxlaneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(ui_px(16.));
         self.sync_active_terminal_focus(window, cx);
         let theme = Theme::for_mode(self.theme_mode);
         self.schedule_sidebar_frame(window, cx);
@@ -945,8 +967,29 @@ impl Render for MuxlaneApp {
             .on_action(cx.listener(|this, _: &ToggleTheme, _window, cx| {
                 this.toggle_theme(cx);
             }))
+            .on_action(cx.listener(|_this, _: &FocusNextPart, window, cx| {
+                window.focus_next(cx);
+            }))
+            .on_action(cx.listener(|_this, _: &FocusPreviousPart, window, cx| {
+                window.focus_prev(cx);
+            }))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                if this.notifications.read(cx).summary().2 {
+                let terminal_is_focused = this
+                    .terms
+                    .values()
+                    .any(|term| term.focus_handle(cx).is_focused(window));
+                if this.quit_confirm_open {
+                    if this.handle_quit_confirmation_key(&ev.keystroke, window, cx) {
+                        cx.stop_propagation();
+                    }
+                } else if ev.keystroke.key.as_str() == "tab" && !terminal_is_focused {
+                    if ev.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                } else if this.notifications.read(cx).summary().2 {
                     if ev.keystroke.key.as_str() == "escape" {
                         this.notifications.update(cx, |center, cx| center.close(cx));
                         this.focus.focus(window, cx);
@@ -982,7 +1025,10 @@ impl Render for MuxlaneApp {
             ))
             .on_drag_move::<SidebarDividerDrag>(cx.listener(
                 |this, ev: &gpui::DragMoveEvent<SidebarDividerDrag>, _window, cx| {
-                    if this.sidebar.update_drag(f32::from(ev.event.position.x)) {
+                    if this
+                        .sidebar
+                        .update_drag(f32::from(ev.event.position.x) / crate::ui_scale::factor())
+                    {
                         cx.notify();
                     }
                 },
@@ -999,7 +1045,10 @@ impl Render for MuxlaneApp {
                 if this.split_drag.is_some() {
                     this.update_split_drag(ev.position, cx);
                 }
-                if this.sidebar.update_drag(f32::from(ev.position.x)) {
+                if this
+                    .sidebar
+                    .update_drag(f32::from(ev.position.x) / crate::ui_scale::factor())
+                {
                     cx.notify();
                 }
             }))
@@ -1025,13 +1074,13 @@ impl Render for MuxlaneApp {
             div()
                 .id("sidebar-shell")
                 .relative()
-                .w(px(displayed_sidebar_width))
+                .w(ui_px(displayed_sidebar_width))
                 .h_full()
                 .flex_none()
                 .child(
                     div().size_full().overflow_hidden().child(
                         div()
-                            .w(px(sidebar_width))
+                            .w(ui_px(sidebar_width))
                             .h_full()
                             .flex_none()
                             .flex()
@@ -1049,39 +1098,44 @@ impl Render for MuxlaneApp {
                     ),
                 )
                 .child(
-                    div()
-                        .id("sidebar-rail")
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .w(px(SIDEBAR_RAIL_WIDTH))
-                        .h_full()
-                        .bg(rgba(Theme::with_alpha(theme.line, 0x80)))
-                        .hover(|style| style.bg(rgba(Theme::with_alpha(theme.accent, 0x70))))
-                        .when(!sidebar_can_resize, |rail| {
-                            rail.tooltip(hover_tip(i18n::text(self.language, "sidebar.show")))
-                        })
-                        .when(sidebar_can_resize, |rail| {
-                            rail.cursor_col_resize().on_drag(
-                                SidebarDividerDrag,
-                                |_, _offset, _window, cx| {
-                                    cx.new(|_| crate::widgets::DividerDragGhost)
-                                },
+                    semantic_button(
+                        "sidebar-rail",
+                        i18n::text(self.language, "sidebar.show"),
+                        theme,
+                    )
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(ui_px(SIDEBAR_RAIL_WIDTH))
+                    .h_full()
+                    .bg(rgba(Theme::with_alpha(theme.line, 0x80)))
+                    .hover(|style| style.bg(rgba(Theme::with_alpha(theme.accent, 0x70))))
+                    .when(sidebar_can_resize, |rail| {
+                        rail.tab_stop(false)
+                            .cursor_col_resize()
+                            .on_drag(SidebarDividerDrag, |_, _offset, _window, cx| {
+                                cx.new(|_| crate::widgets::DividerDragGhost)
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(
+                                    move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                                        this.sidebar.start_drag(
+                                            f32::from(event.position.x) / crate::ui_scale::factor(),
+                                        );
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    },
+                                ),
                             )
-                        })
-                        .when(!sidebar_can_resize, |rail| rail.cursor_pointer())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                                if sidebar_can_resize {
-                                    this.sidebar.start_drag(f32::from(event.position.x));
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                } else {
-                                    this.set_sidebar_visible(true, window, cx);
-                                }
-                            }),
-                        ),
+                    })
+                    .when(!sidebar_can_resize, |rail| {
+                        rail.cursor_pointer()
+                            .tooltip(hover_tip(i18n::text(self.language, "sidebar.show")))
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.set_sidebar_visible(true, window, cx);
+                            }))
+                    }),
                 ),
         );
         root = root.child(grid);
@@ -1094,7 +1148,10 @@ impl Render for MuxlaneApp {
                     if this.split_drag.is_some() {
                         this.update_split_drag(ev.position, cx);
                     }
-                    if this.sidebar.update_drag(f32::from(ev.position.x)) {
+                    if this
+                        .sidebar
+                        .update_drag(f32::from(ev.position.x) / crate::ui_scale::factor())
+                    {
                         cx.notify();
                     }
                 }))
@@ -1168,6 +1225,9 @@ impl Render for MuxlaneApp {
         if self.settings_open {
             root = root.child(self.render_settings(cx));
         }
+        if self.quit_confirm_open {
+            root = root.child(self.render_quit_confirmation(cx));
+        }
         root
     }
 }
@@ -1176,6 +1236,25 @@ impl Render for MuxlaneApp {
 mod tests {
     use super::*;
 
+    #[test]
+    fn persistence_writer_flushes_latest_queued_state_on_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let first = muxlane_store::PersistedApp {
+            sidebar_width: 241.0,
+            ..Default::default()
+        };
+        let mut latest = first.clone();
+        latest.sidebar_width = 317.0;
+
+        let writer = PersistenceWriter::new(path.clone());
+        writer.submit(first);
+        writer.submit(latest);
+        drop(writer);
+
+        let saved = muxlane_store::load(&path).unwrap();
+        assert_eq!(saved.sidebar_width, 317.0);
+    }
     #[test]
     fn startup_rejects_stale_local_current_and_uses_valid_agent_project() {
         let selected = select_initial_project(

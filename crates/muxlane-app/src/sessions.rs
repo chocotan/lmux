@@ -401,7 +401,7 @@ impl MuxlaneApp {
             .update(cx, |center, cx| center.mark_agent_read(agent, cx));
         if let Some(a) = self.last_snapshot.agent_mut(agent) {
             a.seen = true;
-            if a.status == muxlane_core::model::AgentStatus::Done {
+            if a.status.is_finished() {
                 a.status = muxlane_core::model::AgentStatus::Idle;
             }
         } else {
@@ -409,7 +409,7 @@ impl MuxlaneApp {
             for snapshot in self.remote_snaps.values_mut() {
                 if let Some(a) = snapshot.agent_mut(agent) {
                     a.seen = true;
-                    if a.status == muxlane_core::model::AgentStatus::Done {
+                    if a.status.is_finished() {
                         a.status = muxlane_core::model::AgentStatus::Idle;
                     }
                     break;

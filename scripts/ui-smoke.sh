@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKSPACE="${MUXLANE_UI_WORKSPACE:-4}"
 DISPLAY="${DISPLAY:-:0}"
 export DISPLAY
+export MUXLANE_TEST_PALETTE_CTRL_K=1
 ARTIFACTS="$ROOT/artifacts/ui-smoke"
 mkdir -p "$ARTIFACTS"
 
@@ -77,12 +78,15 @@ click_at() {
   sleep .1
   xdotool mouseup "$button"
 }
+open_palette() {
+  xdotool key ctrl+k
+}
 state_matches() {
   EXPR="$1" STATE="$STATE" python3 - <<'PY'
 import json, os
 with open(os.environ['STATE']) as f:
     state = json.load(f)
-raise SystemExit(0 if eval(os.environ['EXPR'], {'__builtins__': {}}, {'d': state}) else 1)
+raise SystemExit(0 if eval(os.environ['EXPR'], {'__builtins__': {}}, {'d': state, 'len': len}) else 1)
 PY
 }
 wait_state() {
@@ -178,16 +182,18 @@ PY
 }
 X_TERM="$(px .30 "$WIDTH")"; Y_TERM="$(px .28 "$HEIGHT")"
 X_SESSION="$(px .05 "$WIDTH")"; Y_SESSION="$(px .14 "$HEIGHT")"
-X_PROJECT_ADD="$(px .135 "$WIDTH")"; Y_PROJECT_ADD="$(px .085 "$HEIGHT")"
+X_PROJECT_ADD="$(px .158 "$WIDTH")"; Y_PROJECT_ADD="$(px .085 "$HEIGHT")"
 X_PALETTE_ITEM="$(px .34 "$WIDTH")"; Y_PALETTE_ITEM="$(px .255 "$HEIGHT")"
 X_SPLIT="$(px .966 "$WIDTH")"; Y_HEADER="$(px .027 "$HEIGHT")"
 X_MAX="$(px .992 "$WIDTH")"
-X_SIDEBAR_HIDE="$(px .165 "$WIDTH")"; Y_SIDEBAR_HANDLE="$(px .03 "$HEIGHT")"
-X_SIDEBAR_HANDLE="$(px .012 "$WIDTH")"
+X_SIDEBAR_HIDE="$(px .019 "$WIDTH")"; Y_SIDEBAR_HANDLE="$(px .03 "$HEIGHT")"
+X_SIDEBAR_HANDLE="$(px .002 "$WIDTH")"
 X_SETTINGS="$(px .161 "$WIDTH")"; Y_SETTINGS="$(px .975 "$HEIGHT")"
-X_SHORTCUT_RECORD="$(px .582 "$WIDTH")"; X_SHORTCUT_CLEAR="$(px .677 "$WIDTH")"
-Y_CLOSE_TAB_SHORTCUT="$(px .295 "$HEIGHT")"
-X_SHORTCUT_RESTORE="$(px .68 "$WIDTH")"; Y_SHORTCUT_RESTORE="$(px .255 "$HEIGHT")"
+X_SETTINGS_APPEARANCE="$(px .226 "$WIDTH")"; Y_SETTINGS_APPEARANCE="$(px .175 "$HEIGHT")"
+X_SETTINGS_SHORTCUTS="$(px .226 "$WIDTH")"; Y_SETTINGS_SHORTCUTS="$(px .208 "$HEIGHT")"
+X_SHORTCUT_RECORD="$(px .712 "$WIDTH")"; X_SHORTCUT_CLEAR="$(px .805 "$WIDTH")"
+Y_CLOSE_TAB_SHORTCUT="$(px .242 "$HEIGHT")"
+X_SHORTCUT_RESTORE="$(px .805 "$WIDTH")"; Y_SHORTCUT_RESTORE="$(px .148 "$HEIGHT")"
 STATE="$XDG_DATA_HOME/muxlane/state.json"
 echo "geometry=${WIDTH}x${HEIGHT} palette=${X_PALETTE_ITEM},${Y_PALETTE_ITEM} project=${X_PROJECT_ADD},${Y_PROJECT_ADD}"
 
@@ -219,7 +225,7 @@ PY
 
 # Sidebar hide persists immediately, converges to the edge rail, and the 5px rail reopens it.
 import -window "$WID" "$ARTIFACTS/00-sidebar-expanded.png"
-click_at "$X_SIDEBAR_HIDE" "$Y_HEADER" 1
+click_at "$X_SIDEBAR_HIDE" "$Y_SETTINGS" 1
 wait_state "d.get('sidebar_visible') is False" "sidebar hidden"
 wait_sidebar_visual "$ARTIFACTS/00-sidebar-expanded.png" collapsed "$ARTIFACTS/00-sidebar-collapsed.png"
 click_at "$X_SIDEBAR_HANDLE" "$Y_SIDEBAR_HANDLE" 1
@@ -230,6 +236,9 @@ echo '✓ sidebar rail converged and the edge handle reopened it'
 # Live shortcut acceptance: capture, conflict rejection, disable/passthrough, and restore.
 click_at "$X_SETTINGS" "$Y_SETTINGS" 1
 wait_settings_open "$ARTIFACTS/00-sidebar-reopened.png" "$ARTIFACTS/00-settings-rebind.png"
+click_at "$X_SETTINGS_SHORTCUTS" "$Y_SETTINGS_SHORTCUTS" 1
+sleep .2
+import -window "$WID" "$ARTIFACTS/00-settings-shortcuts.png"
 click_at "$X_SHORTCUT_RECORD" "$Y_CLOSE_TAB_SHORTCUT" 1
 xdotool key ctrl+q
 wait_state "d['shortcut_bindings']['close_tab'] == 'ctrl-q'" "close-tab rebound to ctrl-q"
@@ -243,6 +252,8 @@ wait_state "len(d['pane_tree']['group']['tabs']) == 1" "live ctrl-q close withou
 echo '✓ ctrl-q capture was consumed and live binding closed a new tab'
 click_at "$X_SETTINGS" "$Y_SETTINGS" 1
 wait_settings_open "$ARTIFACTS/00-sidebar-reopened.png" "$ARTIFACTS/00-settings-conflict-open.png"
+click_at "$X_SETTINGS_SHORTCUTS" "$Y_SETTINGS_SHORTCUTS" 1
+sleep .2
 click_at "$X_SHORTCUT_RECORD" "$Y_CLOSE_TAB_SHORTCUT" 1
 xdotool key super+k
 wait_settings_error "$ARTIFACTS/00-shortcut-conflict.png"
@@ -257,6 +268,8 @@ assert_state_stable "len(d['pane_tree']['group']['tabs']) == 2" "disabled ctrl-w
 
 click_at "$X_SETTINGS" "$Y_SETTINGS" 1
 wait_settings_open "$ARTIFACTS/00-sidebar-reopened.png" "$ARTIFACTS/00-settings-restore-open.png"
+click_at "$X_SETTINGS_SHORTCUTS" "$Y_SETTINGS_SHORTCUTS" 1
+sleep .2
 click_at "$X_SHORTCUT_RESTORE" "$Y_SHORTCUT_RESTORE" 1
 wait_state "d['shortcut_bindings']['close_tab'] == 'ctrl-w'" "default ctrl-w restored"
 xdotool key Escape
@@ -407,7 +420,7 @@ print(f'✓ notification center closed cleanly: changed={changed}')
 PY
 
 # 2. Ctrl+K 命令面板。
-xdotool key ctrl+k; sleep .35
+open_palette; sleep .35
 import -window "$WID" "$ARTIFACTS/02-command-palette.png"
 xdotool key Escape
 
@@ -418,7 +431,7 @@ xdotool key Escape
 
 # 4. 新建第二个 Shell 会话（Ctrl+K；项目 + 使用同一 preset action）。
 # 命令面板第一项是已有会话跳转，Down 一次选中「新建 Shell」preset。
-xdotool key ctrl+k; sleep .4
+open_palette; sleep .4
 import -window "$WID" "$ARTIFACTS/04-project-add-session.png"
 xdotool key Down; sleep .2
 xdotool key Return; sleep .8
@@ -479,8 +492,8 @@ echo '✓ new active tab accepted input without a click'
 xdotool key ctrl+w; sleep .2
 click_at "$X_TERM" "$Y_TERM" 1
 
-# 5. 显式分屏（Ctrl+K, h）。
-xdotool key ctrl+k; sleep .2; xdotool key h; sleep .8
+# 5. 显式分屏（单 pane header 的垂直分屏按钮）。
+click_at "$X_SPLIT" "$Y_HEADER" 1; sleep .8
 STATE="$XDG_DATA_HOME/muxlane/state.json" python3 - <<'PY'
 import os,json
 d=json.load(open(os.environ['STATE']))
@@ -494,7 +507,7 @@ import -window "$WID" "$ARTIFACTS/06-explicit-split.png"
 import -window "$WID" "$ARTIFACTS/07-split-stable.png"
 
 # 7. 关闭右侧 split 只折叠布局，不终止 agent。
-xdotool key ctrl+k; sleep .2; xdotool key x; sleep .4
+click_at "$X_MAX" "$Y_HEADER" 1; sleep .4
 STATE="$XDG_DATA_HOME/muxlane/state.json" MUXLANE_SOCKET="$XDG_DATA_HOME/muxlane/muxlane.sock" python3 - <<'PY'
 import os,json,socket
 d=json.load(open(os.environ['STATE']))
@@ -508,10 +521,10 @@ PY
 import -window "$WID" "$ARTIFACTS/08-split-closed.png"
 
 # 为最大化测试重新分屏。
-xdotool key ctrl+k; sleep .2; xdotool key h; sleep .5
+click_at "$X_SPLIT" "$Y_HEADER" 1; sleep .5
 
-# 8. 最大化（Ctrl+K, m）。
-xdotool key ctrl+k; sleep .2; xdotool key m; sleep .4
+# 8. 最大化（split 后右侧 pane 的最大化按钮）。
+click_at "$X_SPLIT" "$Y_HEADER" 1; sleep .4
 STATE="$XDG_DATA_HOME/muxlane/state.json" python3 - <<'PY'
 import os,json
 d=json.load(open(os.environ['STATE']))
@@ -521,6 +534,110 @@ assert leaves(d['pane_tree'])==2, d['pane_tree']
 print('✓ maximize action kept the split layout intact')
 PY
 import -window "$WID" "$ARTIFACTS/09-maximized.png"
+
+# 10. UI scale must resize the PTY and keep the newest terminal line at the bottom.
+SCALE_TMUX="$(python3 - "$STATE" <<'PY'
+import json,sys
+state=json.load(open(sys.argv[1]))
+active_pane=state['active_pane']
+def active_agent(node):
+    if node['kind']=='leaf':
+        group=node['group']
+        return group.get('active') if group['id']==active_pane else None
+    for child in node['children']:
+        agent=active_agent(child)
+        if agent: return agent
+active=active_agent(state['pane_tree'])
+assert active, (active_pane,state['pane_tree'])
+print(next(item['tmux_session'] for item in state['sessions'] if item['agent_id']==active))
+PY
+)"
+tmux -L muxlane send-keys -t "$SCALE_TMUX" -l -- 'for i in $(seq 1 120); do echo MUXLANE_SCALE_LINE_$i; done; printf "\033[42mMUXLANE_SCALE_BOTTOM\033[0m\n"'
+tmux -L muxlane send-keys -t "$SCALE_TMUX" Enter
+wait_tmux_text "$SCALE_TMUX" MUXLANE_SCALE_BOTTOM "scale smoke output"
+BASE_ROWS="$(tmux -L muxlane display-message -p -t "$SCALE_TMUX" '#{pane_height}')"
+import -window "$WID" "$ARTIFACTS/10-scale-before.png"
+click_at "$X_SETTINGS" "$Y_SETTINGS" 1
+wait_settings_open "$ARTIFACTS/09-maximized.png" "$ARTIFACTS/10-scale-settings.png"
+click_at "$X_SETTINGS_APPEARANCE" "$Y_SETTINGS_APPEARANCE" 1
+sleep .2
+import -window "$WID" "$ARTIFACTS/10-scale-appearance.png"
+SCALE_SELECT_X="${MUXLANE_UI_SCALE_SELECT_X:-$(px .75 "$WIDTH")}"
+SCALE_SELECT_Y="${MUXLANE_UI_SCALE_SELECT_Y:-$(px .37 "$HEIGHT")}"
+SCALE_150_X="${MUXLANE_UI_SCALE_150_X:-$SCALE_SELECT_X}"
+SCALE_150_Y="${MUXLANE_UI_SCALE_150_Y:-$(px .51 "$HEIGHT")}"
+click_at "$SCALE_SELECT_X" "$SCALE_SELECT_Y" 1
+sleep .2
+import -window "$WID" "$ARTIFACTS/10-scale-menu.png"
+click_at "$SCALE_150_X" "$SCALE_150_Y" 1
+wait_state "d['ui_scale'] == 150" "UI scale changed to 150%"
+for _ in {1..100}; do
+  CURRENT_ROWS="$(tmux -L muxlane display-message -p -t "$SCALE_TMUX" '#{pane_height}')"
+  if (( CURRENT_ROWS < BASE_ROWS )); then break; fi
+  sleep .05
+done
+(( CURRENT_ROWS < BASE_ROWS )) || {
+  echo "PTY rows did not shrink after UI scale: $BASE_ROWS -> $CURRENT_ROWS" >&2
+  tmux -L muxlane list-panes -a -F '#{session_name} rows=#{pane_height} cols=#{pane_width}' >&2 || true
+  exit 1
+}
+xdotool key Escape
+sleep .35
+import -window "$WID" "$ARTIFACTS/10-scale-after.png"
+BASE_ROWS="$BASE_ROWS" AFTER="$ARTIFACTS/10-scale-after.png" python3 - <<'PY'
+import os
+from PIL import Image
+im=Image.open(os.environ['AFTER']).convert('RGB')
+w,h=im.size
+crop=im.crop((round(w*.20), round(h*.70), round(w*.99), round(h*.97)))
+green=sum(1 for r,g,b in crop.getdata() if g > 80 and g > r*1.25 and g > b*1.15)
+assert green > 20, f'newest terminal line marker not visible near bottom: green_pixels={green}'
+print(f'✓ UI scale resized PTY rows {os.environ["BASE_ROWS"]} -> marker pixels={green}')
+PY
+wait_tmux_text "$SCALE_TMUX" MUXLANE_SCALE_BOTTOM "scale smoke remains at terminal bottom"
+echo "✓ UI scale 150% resized PTY rows $BASE_ROWS -> $CURRENT_ROWS and kept the newest line visible"
+
+# 11. Window close requires explicit confirmation. Enter on the default Cancel keeps the app open;
+# Tab then Enter activates Quit and closes it.
+wmctrl -i -c "$WID"
+sleep .3
+wmctrl -lp | awk -v id="$WID" '$1==id {found=1} END {exit !found}' || {
+  echo "window closed without confirmation" >&2
+  exit 1
+}
+import -window "$WID" "$ARTIFACTS/11-quit-confirm.png"
+BEFORE="$ARTIFACTS/10-scale-after.png" AFTER="$ARTIFACTS/11-quit-confirm.png" python3 - <<'PY'
+import os
+from PIL import Image, ImageChops
+before=Image.open(os.environ['BEFORE']).convert('RGB')
+after=Image.open(os.environ['AFTER']).convert('RGB')
+w,h=before.size
+crop=(round(w*.35),round(h*.32),round(w*.75),round(h*.68))
+diff=ImageChops.difference(before.crop(crop),after.crop(crop))
+changed=sum(1 for pixel in diff.getdata() if max(pixel)>4)
+assert changed>1000, f'quit confirmation not visible: changed={changed}'
+print(f'✓ window close displayed confirmation: changed={changed}')
+PY
+xdotool key Return
+sleep .2
+wmctrl -lp | awk -v id="$WID" '$1==id {found=1} END {exit !found}' || {
+  echo "default quit action was not Cancel" >&2
+  exit 1
+}
+wmctrl -i -c "$WID"
+sleep .2
+xdotool key Tab
+xdotool key Return
+for _ in {1..100}; do
+  if ! wmctrl -lp | awk -v id="$WID" '$1==id {found=1} END {exit !found}'; then break; fi
+  sleep .05
+done
+if wmctrl -lp | awk -v id="$WID" '$1==id {found=1} END {exit !found}'; then
+  echo "confirmed quit did not close the window" >&2
+  exit 1
+fi
+PID=""
+echo '✓ default Cancel prevented accidental close; explicit Quit closed the window'
 
 wmctrl -s "$ORIGINAL_WS"
 ORIGINAL_WS=""

@@ -3,9 +3,11 @@ use crate::app::MuxlaneApp;
 use crate::i18n::{self, Language};
 use crate::shortcuts::{self, ShortcutAction, ShortcutError};
 use crate::theme::{Theme, ThemeMode};
+use crate::ui_scale::px as ui_px;
+use crate::widgets::semantic_button;
 use gpui::{
-    deferred, div, prelude::*, px, relative, rgba, Context, Div, MouseButton, ParentElement,
-    Stateful, Styled, Window,
+    deferred, div, prelude::*, relative, rgba, Context, Div, MouseButton, ParentElement, Stateful,
+    Styled, Window,
 };
 
 pub(crate) const FONT_FAMILIES: &[&str] = &[
@@ -50,15 +52,15 @@ fn setting_row(
                 .min_w_0()
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(ui_px(12.))
                         .text_color(rgba(theme.fg0))
                         .child(title),
                 )
                 .when_some(description, |labels, description| {
                     labels.child(
                         div()
-                            .mt(px(2.))
-                            .text_size(px(10.))
+                            .mt(ui_px(2.))
+                            .text_size(ui_px(10.))
                             .text_color(rgba(theme.fg2))
                             .child(description),
                     )
@@ -67,11 +69,10 @@ fn setting_row(
         .child(div().flex_none().child(control))
 }
 
-fn render_switch(id: &'static str, on: bool, theme: Theme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .w(px(40.))
-        .h(px(32.))
+fn render_switch(id: &'static str, label: &'static str, on: bool, theme: Theme) -> Stateful<Div> {
+    semantic_button(id, label, theme)
+        .w(ui_px(40.))
+        .h(ui_px(32.))
         .flex_none()
         .flex()
         .items_center()
@@ -81,19 +82,19 @@ fn render_switch(id: &'static str, on: bool, theme: Theme) -> Stateful<Div> {
         .child(
             div()
                 .relative()
-                .w(px(28.))
-                .h(px(16.))
+                .w(ui_px(28.))
+                .h(ui_px(16.))
                 .border_1()
                 .border_color(rgba(if on { theme.accent } else { theme.line }))
                 .bg(rgba(if on { theme.accent } else { theme.bg0 }))
                 .child(
                     div()
                         .absolute()
-                        .top(px(2.))
-                        .when(on, |thumb| thumb.right(px(2.)))
-                        .when(!on, |thumb| thumb.left(px(2.)))
-                        .w(px(10.))
-                        .h(px(10.))
+                        .top(ui_px(2.))
+                        .when(on, |thumb| thumb.right(ui_px(2.)))
+                        .when(!on, |thumb| thumb.left(ui_px(2.)))
+                        .w(ui_px(10.))
+                        .h(ui_px(10.))
                         .bg(rgba(if on { theme.on_accent } else { theme.fg2 })),
                 ),
         )
@@ -140,6 +141,7 @@ impl MuxlaneApp {
         self.settings_theme_menu = false;
         self.settings_font_menu = false;
         self.settings_language_menu = false;
+        self.settings_scale_menu = false;
     }
 
     fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
@@ -161,6 +163,16 @@ impl MuxlaneApp {
                 term.set_font_family(family, cx);
                 term.set_theme(theme, cx);
             });
+        }
+        self.persist();
+        cx.notify();
+    }
+
+    fn set_ui_scale(&mut self, percent: u32, cx: &mut Context<Self>) {
+        crate::ui_scale::set_percent(percent);
+        self.dismiss_settings_menus();
+        for term in self.terms.values() {
+            term.update(cx, |term, cx| term.refresh_ui_scale(cx));
         }
         self.persist();
         cx.notify();
@@ -286,7 +298,7 @@ impl MuxlaneApp {
                     .px_6()
                     .pt_4()
                     .pb_3()
-                    .text_size(px(15.))
+                    .text_size(ui_px(15.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgba(theme.fg0))
                     .child(i18n::text(self.language, "settings.general")),
@@ -300,6 +312,7 @@ impl MuxlaneApp {
                 )),
                 render_switch(
                     "settings-project-workspaces-toggle",
+                    i18n::text(self.language, "settings.project_workspaces"),
                     project_workspaces_enabled,
                     theme,
                 )
@@ -315,23 +328,32 @@ impl MuxlaneApp {
                     self.language,
                     "settings.notification_sound_help",
                 )),
-                render_switch("settings-sound-toggle", self.sound_enabled, theme).on_click(
-                    cx.listener(|this, _event, _window, cx| {
-                        this.sound_enabled = !this.sound_enabled;
-                        this.persist();
-                        cx.notify();
-                    }),
-                ),
+                render_switch(
+                    "settings-sound-toggle",
+                    i18n::text(self.language, "settings.notification_sound"),
+                    self.sound_enabled,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.sound_enabled = !this.sound_enabled;
+                    this.persist();
+                    cx.notify();
+                })),
                 theme,
             ))
             .child(setting_row(
                 "settings-row-osc52",
                 i18n::text(self.language, "settings.osc52"),
                 Some(i18n::text(self.language, "settings.osc52_help")),
-                render_switch("settings-osc52-toggle", self.osc52_clipboard_enabled, theme)
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.toggle_osc52_clipboard(cx);
-                    })),
+                render_switch(
+                    "settings-osc52-toggle",
+                    i18n::text(self.language, "settings.osc52"),
+                    self.osc52_clipboard_enabled,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.toggle_osc52_clipboard(cx);
+                })),
                 theme,
             ))
             .into_any_element()
@@ -346,46 +368,52 @@ impl MuxlaneApp {
         let theme_select = div()
             .relative()
             .child(
-                div()
-                    .id("settings-theme-select")
-                    .w(px(210.))
-                    .h(px(28.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_1()
-                    .border_color(rgba(theme.line))
-                    .bg(rgba(theme.bg0))
-                    .hover(|style| style.bg(rgba(theme.bg2)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        let open = !this.settings_theme_menu;
-                        this.dismiss_settings_menus();
-                        this.settings_theme_menu = open;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .w(px(24.))
-                            .h(px(16.))
-                            .bg(rgba(theme.bg0))
-                            .border_1()
-                            .border_color(rgba(theme.accent)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.))
-                            .text_color(rgba(theme.fg0))
-                            .child(self.theme_mode.label(self.language)),
-                    )
-                    .child(div().text_size(px(12.)).text_color(rgba(theme.fg1)).child(
-                        if self.settings_theme_menu {
+                semantic_button(
+                    "settings-theme-select",
+                    self.theme_mode.label(self.language),
+                    theme,
+                )
+                .w(ui_px(210.))
+                .h(ui_px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_1()
+                .border_color(rgba(theme.line))
+                .bg(rgba(theme.bg0))
+                .hover(|style| style.bg(rgba(theme.bg2)))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    let open = !this.settings_theme_menu;
+                    this.dismiss_settings_menus();
+                    this.settings_theme_menu = open;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(ui_px(24.))
+                        .h(ui_px(16.))
+                        .bg(rgba(theme.bg0))
+                        .border_1()
+                        .border_color(rgba(theme.accent)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(ui_px(11.))
+                        .text_color(rgba(theme.fg0))
+                        .child(self.theme_mode.label(self.language)),
+                )
+                .child(
+                    div()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.fg1))
+                        .child(if self.settings_theme_menu {
                             "⌃"
                         } else {
                             "⌄"
-                        },
-                    )),
+                        }),
+                ),
             )
             .when(self.settings_theme_menu, |anchor| {
                 anchor.child(
@@ -395,8 +423,8 @@ impl MuxlaneApp {
                             .absolute()
                             .top_full()
                             .left_0()
-                            .w(px(210.))
-                            .max_h(px(280.))
+                            .w(ui_px(210.))
+                            .max_h(ui_px(280.))
                             .overflow_y_scroll()
                             .bg(rgba(theme.bg1))
                             .border_1()
@@ -415,43 +443,46 @@ impl MuxlaneApp {
                             .children(ThemeMode::ALL.into_iter().map(|mode| {
                                 let selected = mode == current_mode;
                                 let swatch = Theme::for_mode(mode);
-                                div()
-                                    .id(gpui::ElementId::Name(
+                                semantic_button(
+                                    gpui::ElementId::Name(
                                         format!("settings-theme-option-{}", mode.id()).into(),
-                                    ))
-                                    .h(px(28.))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .when(selected, |item| item.bg(rgba(theme.bg2)))
-                                    .when(!selected, |item| {
-                                        item.hover(|style| style.bg(rgba(theme.bg2)))
-                                    })
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.set_theme(mode, cx);
-                                    }))
-                                    .child(
-                                        div()
-                                            .w(px(22.))
-                                            .h(px(14.))
-                                            .bg(rgba(swatch.bg0))
-                                            .border_1()
-                                            .border_color(rgba(swatch.accent)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(px(11.))
-                                            .text_color(rgba(theme.fg0))
-                                            .child(mode.label(current_language)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(rgba(theme.accent))
-                                            .child(if selected { "✓" } else { "" }),
-                                    )
+                                    ),
+                                    mode.label(current_language),
+                                    theme,
+                                )
+                                .h(ui_px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .when(selected, |item| item.bg(rgba(theme.selection())))
+                                .when(!selected, |item| {
+                                    item.hover(|style| style.bg(rgba(theme.bg2)))
+                                })
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.set_theme(mode, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .w(ui_px(22.))
+                                        .h(ui_px(14.))
+                                        .bg(rgba(swatch.bg0))
+                                        .border_1()
+                                        .border_color(rgba(swatch.accent)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(ui_px(11.))
+                                        .text_color(rgba(theme.fg0))
+                                        .child(mode.label(current_language)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(ui_px(11.))
+                                        .text_color(rgba(theme.accent))
+                                        .child(if selected { "✓" } else { "" }),
+                                )
                             })),
                     )
                     .with_priority(1),
@@ -461,10 +492,9 @@ impl MuxlaneApp {
         let font_select = div()
             .relative()
             .child(
-                div()
-                    .id("settings-font-select")
-                    .w(px(260.))
-                    .h(px(28.))
+                semantic_button("settings-font-select", self.font_family.clone(), theme)
+                    .w(ui_px(260.))
+                    .h(ui_px(28.))
                     .px_2()
                     .flex()
                     .items_center()
@@ -481,18 +511,21 @@ impl MuxlaneApp {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.))
+                            .text_size(ui_px(11.))
                             .text_color(rgba(theme.fg0))
                             .font_family(self.font_family.clone())
                             .child(self.font_family.clone()),
                     )
-                    .child(div().text_size(px(12.)).text_color(rgba(theme.fg1)).child(
-                        if self.settings_font_menu {
-                            "⌃"
-                        } else {
-                            "⌄"
-                        },
-                    )),
+                    .child(
+                        div()
+                            .text_size(ui_px(12.))
+                            .text_color(rgba(theme.fg1))
+                            .child(if self.settings_font_menu {
+                                "⌃"
+                            } else {
+                                "⌄"
+                            }),
+                    ),
             )
             .when(self.settings_font_menu, |anchor| {
                 anchor.child(
@@ -502,8 +535,8 @@ impl MuxlaneApp {
                             .absolute()
                             .top_full()
                             .left_0()
-                            .w(px(260.))
-                            .max_h(px(280.))
+                            .w(ui_px(260.))
+                            .max_h(ui_px(280.))
                             .overflow_y_scroll()
                             .bg(rgba(theme.bg1))
                             .border_1()
@@ -522,55 +555,162 @@ impl MuxlaneApp {
                             .children(FONT_FAMILIES.iter().map(|family| {
                                 let selected = current_font == *family;
                                 let family = (*family).to_string();
-                                div()
-                                    .id(gpui::ElementId::Name(
+                                semantic_button(
+                                    gpui::ElementId::Name(
                                         format!(
                                             "settings-font-option-{}",
                                             family.replace(' ', "-")
                                         )
                                         .into(),
-                                    ))
-                                    .h(px(28.))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .when(selected, |item| item.bg(rgba(theme.bg2)))
-                                    .when(!selected, |item| {
-                                        item.hover(|style| style.bg(rgba(theme.bg2)))
-                                    })
-                                    .on_click(cx.listener({
-                                        let family = family.clone();
-                                        move |this, _event, _window, cx| {
-                                            this.set_font_family(&family, cx);
-                                        }
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(px(11.))
-                                            .text_color(rgba(theme.fg0))
-                                            .font_family(family.clone())
-                                            .child(family),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(rgba(theme.accent))
-                                            .child(if selected { "✓" } else { "" }),
-                                    )
+                                    ),
+                                    family.clone(),
+                                    theme,
+                                )
+                                .h(ui_px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .when(selected, |item| item.bg(rgba(theme.selection())))
+                                .when(!selected, |item| {
+                                    item.hover(|style| style.bg(rgba(theme.bg2)))
+                                })
+                                .on_click(cx.listener({
+                                    let family = family.clone();
+                                    move |this, _event, _window, cx| {
+                                        this.set_font_family(&family, cx);
+                                    }
+                                }))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(ui_px(11.))
+                                        .text_color(rgba(theme.fg0))
+                                        .font_family(family.clone())
+                                        .child(family),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(ui_px(11.))
+                                        .text_color(rgba(theme.accent))
+                                        .child(if selected { "✓" } else { "" }),
+                                )
                             })),
                     )
                     .with_priority(1),
                 )
             });
 
+        let scale_select = {
+            let current_scale = crate::ui_scale::percent();
+            div()
+                .relative()
+                .child(
+                    semantic_button("settings-scale-select", format!("{current_scale}%"), theme)
+                        .w(ui_px(180.))
+                        .h(ui_px(28.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .border_1()
+                        .border_color(rgba(theme.line))
+                        .bg(rgba(theme.bg0))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            let open = !this.settings_scale_menu;
+                            this.dismiss_settings_menus();
+                            this.settings_scale_menu = open;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(ui_px(11.))
+                                .text_color(rgba(theme.fg0))
+                                .child(format!("{current_scale}%")),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_px(12.))
+                                .text_color(rgba(theme.fg1))
+                                .child(if self.settings_scale_menu {
+                                    "⌃"
+                                } else {
+                                    "⌄"
+                                }),
+                        ),
+                )
+                .when(self.settings_scale_menu, |anchor| {
+                    anchor.child(
+                        deferred(
+                            div()
+                                .id("settings-scale-menu")
+                                .absolute()
+                                .top_full()
+                                .left_0()
+                                .w(ui_px(180.))
+                                .max_h(ui_px(280.))
+                                .overflow_y_scroll()
+                                .bg(rgba(theme.bg1))
+                                .border_1()
+                                .border_color(rgba(theme.line))
+                                .shadow_lg()
+                                .occlude()
+                                .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                                    this.dismiss_settings_menus();
+                                    cx.notify();
+                                }))
+                                .on_any_mouse_down(cx.listener(
+                                    |_this, _event: &gpui::MouseDownEvent, _window, cx| {
+                                        cx.stop_propagation();
+                                    },
+                                ))
+                                .children(
+                                    (crate::ui_scale::MIN_PERCENT..=crate::ui_scale::MAX_PERCENT)
+                                        .step_by(crate::ui_scale::STEP_PERCENT as usize)
+                                        .map(|percent| {
+                                            let selected = percent == current_scale;
+                                            semantic_button(
+                                                gpui::ElementId::Name(
+                                                    format!("settings-scale-option-{percent}")
+                                                        .into(),
+                                                ),
+                                                format!("{percent}%"),
+                                                theme,
+                                            )
+                                            .h(ui_px(28.))
+                                            .px_2()
+                                            .flex()
+                                            .items_center()
+                                            .when(selected, |item| item.bg(rgba(theme.selection())))
+                                            .when(!selected, |item| {
+                                                item.hover(|style| style.bg(rgba(theme.bg2)))
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.set_ui_scale(percent, cx);
+                                                },
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_size(ui_px(11.))
+                                                    .text_color(rgba(theme.fg0))
+                                                    .child(format!("{percent}%")),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .with_priority(1),
+                    )
+                })
+        };
+
         let language_select = div()
             .relative()
             .child(
-                div()
-                    .id("settings-language-select")
-                    .w(px(180.))
-                    .h(px(28.))
+                semantic_button("settings-language-select", self.language.label(), theme)
+                    .w(ui_px(180.))
+                    .h(ui_px(28.))
                     .px_2()
                     .flex()
                     .items_center()
@@ -587,17 +727,20 @@ impl MuxlaneApp {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.))
+                            .text_size(ui_px(11.))
                             .text_color(rgba(theme.fg0))
                             .child(self.language.label()),
                     )
-                    .child(div().text_size(px(12.)).text_color(rgba(theme.fg1)).child(
-                        if self.settings_language_menu {
-                            "⌃"
-                        } else {
-                            "⌄"
-                        },
-                    )),
+                    .child(
+                        div()
+                            .text_size(ui_px(12.))
+                            .text_color(rgba(theme.fg1))
+                            .child(if self.settings_language_menu {
+                                "⌃"
+                            } else {
+                                "⌄"
+                            }),
+                    ),
             )
             .when(self.settings_language_menu, |anchor| {
                 anchor.child(
@@ -607,7 +750,7 @@ impl MuxlaneApp {
                             .absolute()
                             .top_full()
                             .left_0()
-                            .w(px(180.))
+                            .w(ui_px(180.))
                             .bg(rgba(theme.bg1))
                             .border_1()
                             .border_color(rgba(theme.line))
@@ -624,35 +767,38 @@ impl MuxlaneApp {
                             ))
                             .children(Language::ALL.into_iter().map(|language| {
                                 let selected = language == current_language;
-                                div()
-                                    .id(gpui::ElementId::Name(
+                                semantic_button(
+                                    gpui::ElementId::Name(
                                         format!("settings-language-option-{}", language.id())
                                             .into(),
-                                    ))
-                                    .h(px(28.))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .when(selected, |item| item.bg(rgba(theme.bg2)))
-                                    .when(!selected, |item| {
-                                        item.hover(|style| style.bg(rgba(theme.bg2)))
-                                    })
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.set_language(language, cx);
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(px(11.))
-                                            .text_color(rgba(theme.fg0))
-                                            .child(language.label()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(rgba(theme.accent))
-                                            .child(if selected { "✓" } else { "" }),
-                                    )
+                                    ),
+                                    language.label(),
+                                    theme,
+                                )
+                                .h(ui_px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .when(selected, |item| item.bg(rgba(theme.selection())))
+                                .when(!selected, |item| {
+                                    item.hover(|style| style.bg(rgba(theme.bg2)))
+                                })
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.set_language(language, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(ui_px(11.))
+                                        .text_color(rgba(theme.fg0))
+                                        .child(language.label()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(ui_px(11.))
+                                        .text_color(rgba(theme.accent))
+                                        .child(if selected { "✓" } else { "" }),
+                                )
                             })),
                     )
                     .with_priority(1),
@@ -668,7 +814,7 @@ impl MuxlaneApp {
                     .px_6()
                     .pt_4()
                     .pb_3()
-                    .text_size(px(15.))
+                    .text_size(ui_px(15.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgba(theme.fg0))
                     .child(i18n::text(self.language, "settings.appearance")),
@@ -685,6 +831,13 @@ impl MuxlaneApp {
                 i18n::text(self.language, "settings.terminal_font"),
                 Some(i18n::text(self.language, "settings.terminal_font_help")),
                 font_select,
+                theme,
+            ))
+            .child(setting_row(
+                "settings-row-terminal-scale",
+                i18n::text(self.language, "settings.ui_scale"),
+                Some(i18n::text(self.language, "settings.ui_scale_help")),
+                scale_select,
                 theme,
             ))
             .child(setting_row(
@@ -717,34 +870,37 @@ impl MuxlaneApp {
                     .justify_between()
                     .child(
                         div()
-                            .text_size(px(15.))
+                            .text_size(ui_px(15.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(theme.fg0))
                             .child(i18n::text(self.language, "settings.shortcuts")),
                     )
                     .child(
-                        div()
-                            .id("settings-shortcuts-restore")
-                            .h(px(26.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .border_1()
-                            .border_color(rgba(theme.line))
-                            .text_size(px(10.))
-                            .text_color(rgba(theme.fg1))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.restore_default_shortcuts(cx);
-                            }))
-                            .child(i18n::text(self.language, "settings.shortcuts_restore")),
+                        semantic_button(
+                            "settings-shortcuts-restore",
+                            i18n::text(self.language, "settings.shortcuts_restore"),
+                            theme,
+                        )
+                        .h(ui_px(26.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .border_1()
+                        .border_color(rgba(theme.line))
+                        .text_size(ui_px(10.))
+                        .text_color(rgba(theme.fg1))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.restore_default_shortcuts(cx);
+                        }))
+                        .child(i18n::text(self.language, "settings.shortcuts_restore")),
                     ),
             )
             .child(
                 div()
                     .px_6()
                     .pb_2()
-                    .text_size(px(10.))
+                    .text_size(ui_px(10.))
                     .text_color(rgba(theme.fg2))
                     .child(i18n::text(self.language, "settings.shortcuts_help")),
             )
@@ -767,7 +923,7 @@ impl MuxlaneApp {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.))
+                            .text_size(ui_px(12.))
                             .text_color(rgba(theme.fg0))
                             .child(i18n::text(self.language, action.label_key())),
                     )
@@ -778,61 +934,71 @@ impl MuxlaneApp {
                             .items_center()
                             .gap_2()
                             .child(
-                                div()
-                                    .id(gpui::ElementId::Name(record_id.into()))
-                                    .w(px(170.))
-                                    .h(px(28.))
-                                    .px_2()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .border_1()
-                                    .border_color(rgba(if recording {
-                                        theme.accent
-                                    } else {
-                                        theme.line
-                                    }))
-                                    .bg(rgba(theme.bg0))
-                                    .text_size(px(10.))
-                                    .text_color(rgba(if recording {
-                                        theme.accent
-                                    } else {
-                                        theme.fg1
-                                    }))
-                                    .hover(|style| style.bg(rgba(theme.bg2)))
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.start_shortcut_capture(action, cx);
-                                    }))
-                                    .child(if recording {
+                                semantic_button(
+                                    gpui::ElementId::Name(record_id.into()),
+                                    if recording {
                                         i18n::text(self.language, "settings.shortcut_recording")
                                             .to_string()
                                     } else {
-                                        binding.unwrap_or_else(|| {
+                                        binding.clone().unwrap_or_else(|| {
                                             i18n::text(self.language, "settings.shortcut_disabled")
                                                 .into()
                                         })
-                                    }),
+                                    },
+                                    theme,
+                                )
+                                .w(ui_px(170.))
+                                .h(ui_px(28.))
+                                .px_2()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .border_1()
+                                .border_color(rgba(if recording {
+                                    theme.accent
+                                } else {
+                                    theme.line
+                                }))
+                                .bg(rgba(theme.bg0))
+                                .text_size(ui_px(10.))
+                                .text_color(rgba(if recording { theme.accent } else { theme.fg1 }))
+                                .hover(|style| style.bg(rgba(theme.bg2)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.start_shortcut_capture(action, cx);
+                                }))
+                                .child(if recording {
+                                    i18n::text(self.language, "settings.shortcut_recording")
+                                        .to_string()
+                                } else {
+                                    binding.unwrap_or_else(|| {
+                                        i18n::text(self.language, "settings.shortcut_disabled")
+                                            .into()
+                                    })
+                                }),
                             )
                             .child(
-                                div()
-                                    .id(gpui::ElementId::Name(clear_id.into()))
-                                    .w(px(52.))
-                                    .h(px(28.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .border_1()
-                                    .border_color(rgba(theme.line))
-                                    .text_size(px(10.))
-                                    .text_color(rgba(theme.fg2))
-                                    .hover(|style| style.bg(rgba(theme.bg2)))
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.cancel_shortcut_capture();
-                                        this.apply_shortcut_binding(action, None, cx);
-                                    }))
-                                    .child(i18n::text(self.language, "common.clear")),
+                                semantic_button(
+                                    gpui::ElementId::Name(clear_id.into()),
+                                    i18n::text(self.language, "common.clear"),
+                                    theme,
+                                )
+                                .w(ui_px(52.))
+                                .h(ui_px(28.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .border_1()
+                                .border_color(rgba(theme.line))
+                                .text_size(ui_px(10.))
+                                .text_color(rgba(theme.fg2))
+                                .hover(|style| style.bg(rgba(theme.bg2)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.cancel_shortcut_capture();
+                                    this.apply_shortcut_binding(action, None, cx);
+                                }))
+                                .child(i18n::text(self.language, "common.clear")),
                             ),
                     )
             }))
@@ -841,7 +1007,7 @@ impl MuxlaneApp {
                     div()
                         .px_6()
                         .py_2()
-                        .text_size(px(10.))
+                        .text_size(ui_px(10.))
                         .text_color(rgba(theme.red))
                         .child(error),
                 )
@@ -871,7 +1037,7 @@ impl MuxlaneApp {
             .flex()
             .items_start()
             .justify_center()
-            .pt(px(48.))
+            .pt(ui_px(48.))
             .bg(rgba(theme.overlay()))
             .on_mouse_down(
                 MouseButton::Left,
@@ -884,8 +1050,8 @@ impl MuxlaneApp {
                     .id("settings-page")
                     .relative()
                     .occlude()
-                    .w(px(880.))
-                    .h(px(600.))
+                    .w(ui_px(880.))
+                    .h(ui_px(600.))
                     .max_w(relative(0.92))
                     .max_h(relative(0.82))
                     .flex()
@@ -907,7 +1073,7 @@ impl MuxlaneApp {
                     }))
                     .child(
                         div()
-                            .h(px(40.))
+                            .h(ui_px(40.))
                             .px_4()
                             .flex_none()
                             .flex()
@@ -917,20 +1083,19 @@ impl MuxlaneApp {
                             .border_color(rgba(theme.line))
                             .child(
                                 div()
-                                    .text_size(px(13.))
+                                    .text_size(ui_px(13.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgba(theme.fg0))
                                     .child(i18n::text(self.language, "common.settings")),
                             )
                             .child(
-                                div()
-                                    .id("settings-close")
-                                    .w(px(24.))
-                                    .h(px(24.))
+                                semantic_button("settings-close", "Close settings", theme)
+                                    .w(ui_px(24.))
+                                    .h(ui_px(24.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_size(px(16.))
+                                    .text_size(ui_px(16.))
                                     .text_color(rgba(theme.fg1))
                                     .hover(|style| {
                                         style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0))
@@ -948,7 +1113,7 @@ impl MuxlaneApp {
                             .min_h_0()
                             .child(
                                 div()
-                                    .w(px(180.))
+                                    .w(ui_px(180.))
                                     .h_full()
                                     .flex_none()
                                     .flex()
@@ -979,36 +1144,37 @@ impl MuxlaneApp {
                                         .map(
                                             |(page, id, label_key)| {
                                                 let selected = page == current_page;
-                                                div()
-                                                    .id(id)
-                                                    .h(px(28.))
-                                                    .px_3()
-                                                    .flex()
-                                                    .items_center()
-                                                    .text_size(px(12.))
-                                                    .text_color(rgba(if selected {
-                                                        theme.fg0
-                                                    } else {
-                                                        theme.fg1
-                                                    }))
-                                                    .when(selected, |item| {
-                                                        item.bg(rgba(theme.bg2))
-                                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                    })
-                                                    .when(!selected, |item| {
-                                                        item.hover(|style| {
-                                                            style.bg(rgba(theme.bg2))
-                                                        })
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        move |this, _event, _window, cx| {
-                                                            this.settings_page = page;
-                                                            this.cancel_shortcut_capture();
-                                                            this.dismiss_settings_menus();
-                                                            cx.notify();
-                                                        },
-                                                    ))
-                                                    .child(i18n::text(self.language, label_key))
+                                                semantic_button(
+                                                    id,
+                                                    i18n::text(self.language, label_key),
+                                                    theme,
+                                                )
+                                                .h(ui_px(28.))
+                                                .px_3()
+                                                .flex()
+                                                .items_center()
+                                                .text_size(ui_px(12.))
+                                                .text_color(rgba(if selected {
+                                                    theme.fg0
+                                                } else {
+                                                    theme.fg1
+                                                }))
+                                                .when(selected, |item| {
+                                                    item.bg(rgba(theme.selection()))
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                })
+                                                .when(!selected, |item| {
+                                                    item.hover(|style| style.bg(rgba(theme.bg2)))
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |this, _event, _window, cx| {
+                                                        this.settings_page = page;
+                                                        this.cancel_shortcut_capture();
+                                                        this.dismiss_settings_menus();
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                                .child(i18n::text(self.language, label_key))
                                             },
                                         ),
                                     ),

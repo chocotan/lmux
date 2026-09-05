@@ -118,8 +118,8 @@ impl Theme {
                 bg3: 0xd0ccc3ff,
                 line: 0xd0ccc3ff,
                 fg0: 0x242831ff,
-                fg1: 0x5c6370ff,
-                fg2: 0x8a909cff,
+                fg1: 0x4b5563ff,
+                fg2: 0x59636fff,
                 accent: 0x3d6cd8ff,
                 on_accent: 0xffffffff,
                 green: 0x529633ff,
@@ -133,8 +133,8 @@ impl Theme {
                 bg3: 0xd2c0a8ff,
                 line: 0xd2c0a8ff,
                 fg0: 0x3d3027ff,
-                fg1: 0x786858ff,
-                fg2: 0x9d8a77ff,
+                fg1: 0x574a41ff,
+                fg2: 0x66584dff,
                 accent: 0xb35f2aff,
                 on_accent: 0xffffffff,
                 green: 0x4e8c62ff,
@@ -148,8 +148,8 @@ impl Theme {
                 bg3: 0xc1d3ecff,
                 line: 0xc1d3ecff,
                 fg0: 0x1e293bff,
-                fg1: 0x64748bff,
-                fg2: 0x94a3b8ff,
+                fg1: 0x4b5c73ff,
+                fg2: 0x52647cff,
                 accent: 0x2563ebff,
                 on_accent: 0xffffffff,
                 green: 0x16805cff,
@@ -163,8 +163,8 @@ impl Theme {
                 bg3: 0xbfd8caff,
                 line: 0xbfd8caff,
                 fg0: 0x1f3529ff,
-                fg1: 0x5f7869ff,
-                fg2: 0x8aa394ff,
+                fg1: 0x465d50ff,
+                fg2: 0x526b5eff,
                 accent: 0x059669ff,
                 on_accent: 0xffffffff,
                 green: 0x2f855aff,
@@ -178,8 +178,8 @@ impl Theme {
                 bg3: 0xe8bdcdff,
                 line: 0xe8bdcdff,
                 fg0: 0x452530ff,
-                fg1: 0x855568ff,
-                fg2: 0xb18798ff,
+                fg1: 0x674350ff,
+                fg2: 0x765060ff,
                 accent: 0xe11d48ff,
                 on_accent: 0xffffffff,
                 green: 0x378557ff,
@@ -193,8 +193,8 @@ impl Theme {
                 bg3: 0x3b4048ff,
                 line: 0x333842ff,
                 fg0: 0xd7dae0ff,
-                fg1: 0x828997ff,
-                fg2: 0x5c6370ff,
+                fg1: 0xa4aab5ff,
+                fg2: 0x9aa1adff,
                 accent: 0x528bffff,
                 on_accent: 0x0f1419ff,
                 green: 0x98c379ff,
@@ -209,7 +209,7 @@ impl Theme {
                 line: 0x4b2861ff,
                 fg0: 0xf9eaffff,
                 fg1: 0xc6a9d8ff,
-                fg2: 0x9875adff,
+                fg2: 0xb39bc8ff,
                 accent: 0xe879f9ff,
                 on_accent: 0x1b1029ff,
                 green: 0x7ee2b8ff,
@@ -223,8 +223,8 @@ impl Theme {
                 bg3: 0x3e4451ff,
                 line: 0x3e4451ff,
                 fg0: 0xabb2bfff,
-                fg1: 0x7f848eff,
-                fg2: 0x5c6370ff,
+                fg1: 0x9299a7ff,
+                fg2: 0x9da4b2ff,
                 accent: 0x61afefff,
                 on_accent: 0x0f1419ff,
                 green: 0x98c379ff,
@@ -254,18 +254,48 @@ mod tests {
         assert!(!ThemeMode::Paper.is_dark());
     }
 
-    fn luminance(color: u32) -> u32 {
-        let r = (color >> 24) & 0xff;
-        let g = (color >> 16) & 0xff;
-        let b = (color >> 8) & 0xff;
-        r + g + b
+    fn srgb_luminance(color: u32) -> f64 {
+        let channel = |shift: u32| {
+            let value = f64::from((color >> shift) & 0xff) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(24) + 0.7152 * channel(16) + 0.0722 * channel(8)
+    }
+
+    fn contrast_ratio(foreground: u32, background: u32) -> f64 {
+        let foreground = srgb_luminance(foreground);
+        let background = srgb_luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    #[test]
+    fn small_text_contrasts_on_all_theme_surfaces() {
+        for mode in ThemeMode::ALL {
+            let theme = Theme::for_mode(mode);
+            for background in [theme.bg0, theme.bg1] {
+                assert!(
+                    contrast_ratio(theme.fg1, background) >= 4.5,
+                    "{} fg1 on {background:#x}",
+                    mode.id()
+                );
+                assert!(
+                    contrast_ratio(theme.fg2, background) >= 4.5,
+                    "{} fg2 on {background:#x}",
+                    mode.id()
+                );
+            }
+        }
     }
 
     #[test]
     fn light_secondary_text_is_lighter_than_primary_muted() {
         let theme = Theme::for_mode(ThemeMode::Light);
-        assert!(luminance(theme.fg2) > luminance(theme.fg1));
-        assert!(luminance(theme.fg1) > luminance(theme.fg0));
+        assert!(srgb_luminance(theme.fg2) > srgb_luminance(theme.fg1));
+        assert!(srgb_luminance(theme.fg1) > srgb_luminance(theme.fg0));
     }
 
     #[test]

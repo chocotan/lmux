@@ -152,7 +152,7 @@ impl ServerState {
             return vec![];
         };
         inst.seen = true;
-        if inst.status == AgentStatus::Done {
+        if inst.status.is_finished() {
             return self.apply_status(agent, AgentStatus::Idle, None);
         }
         vec![]
@@ -227,7 +227,7 @@ impl ServerState {
         }
         inst.status = to;
         inst.status_since = muxlane_core::model::now_secs();
-        if to == AgentStatus::Done {
+        if to.is_finished() {
             inst.seen = false;
         }
         let msg = EventMsg::new(
@@ -427,6 +427,11 @@ mod tests {
         assert!(!st.observe_screen(&agent, &input).is_empty());
         assert_eq!(st.agents[0].status, AgentStatus::Blocked);
         st.apply_status(&agent, AgentStatus::Done, None);
+        assert!(!st.mark_seen(&agent).is_empty());
+        assert!(st.agents[0].seen);
+        assert_eq!(st.agents[0].status, AgentStatus::Idle);
+
+        st.apply_status(&agent, AgentStatus::Failed, None);
         assert!(!st.mark_seen(&agent).is_empty());
         assert!(st.agents[0].seen);
         assert_eq!(st.agents[0].status, AgentStatus::Idle);

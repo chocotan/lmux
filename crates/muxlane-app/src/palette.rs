@@ -3,10 +3,10 @@ use crate::app::MuxlaneApp;
 use crate::i18n;
 use crate::icons::*;
 use crate::theme::Theme;
+use crate::ui_scale::px as ui_px;
 use crate::workspace::ProjectKey;
 use gpui::{
-    div, prelude::*, px, relative, rgba, Context, Focusable, MouseButton, ParentElement, Styled,
-    Window,
+    div, prelude::*, relative, rgba, Context, Focusable, MouseButton, ParentElement, Styled, Window,
 };
 use muxlane_core::SplitAxis;
 
@@ -549,7 +549,7 @@ impl MuxlaneApp {
             .id("palette-items-scroll")
             .flex()
             .flex_col()
-            .max_h(px(324.))
+            .max_h(ui_px(324.))
             .overflow_y_scroll()
             .track_scroll(&self.palette_scroll);
 
@@ -558,7 +558,7 @@ impl MuxlaneApp {
                 div()
                     .px_4()
                     .py_6()
-                    .text_size(px(12.))
+                    .text_size(ui_px(12.))
                     .text_color(rgba(theme.fg2))
                     .child(i18n::text(self.language, "palette.no_results")),
             );
@@ -579,7 +579,7 @@ impl MuxlaneApp {
                             .gap_2()
                             .px_3()
                             .py_2()
-                            .text_size(px(12.))
+                            .text_size(ui_px(12.))
                             .text_color(rgba(theme.fg0))
                             .when(is_selected, |el| el.bg(rgba(theme.bg2)))
                             .when(selected, |el| {
@@ -597,10 +597,10 @@ impl MuxlaneApp {
                             .child(
                                 div()
                                     .ml_auto()
-                                    .max_w(px(260.))
+                                    .max_w(ui_px(260.))
                                     .overflow_hidden()
                                     .text_ellipsis()
-                                    .text_size(px(10.))
+                                    .text_size(ui_px(10.))
                                     .text_color(rgba(theme.fg2))
                                     .child(path),
                             )
@@ -614,7 +614,7 @@ impl MuxlaneApp {
                         .gap_2()
                         .px_3()
                         .py_2()
-                        .text_size(px(12.))
+                        .text_size(ui_px(12.))
                         .text_color(rgba(theme.fg0))
                         .when(is_selected, |el| el.bg(rgba(theme.bg2)))
                         .hover(|s| s.bg(rgba(theme.bg2)))
@@ -630,7 +630,7 @@ impl MuxlaneApp {
                         .child(
                             div()
                                 .ml_auto()
-                                .text_size(px(10.))
+                                .text_size(ui_px(10.))
                                 .text_color(rgba(theme.fg2))
                                 .child(preset.program),
                         ),
@@ -646,7 +646,7 @@ impl MuxlaneApp {
                         .gap_2()
                         .px_3()
                         .py_2()
-                        .text_size(px(12.))
+                        .text_size(ui_px(12.))
                         .text_color(rgba(theme.fg0))
                         .when(is_selected, |el| el.bg(rgba(theme.bg2)))
                         .hover(|s| s.bg(rgba(theme.bg2)))
@@ -664,7 +664,7 @@ impl MuxlaneApp {
                                     .py_0p5()
                                     .border_1()
                                     .border_color(rgba(theme.line))
-                                    .text_size(px(9.5))
+                                    .text_size(ui_px(9.5))
                                     .text_color(rgba(theme.fg2))
                                     .child(format!("[{sc}]")),
                             )
@@ -676,7 +676,7 @@ impl MuxlaneApp {
 
         let panel = div()
             .occlude()
-            .w(px(560.))
+            .w(ui_px(560.))
             .max_w(relative(0.92))
             .max_h(relative(0.75))
             .overflow_hidden()
@@ -740,9 +740,9 @@ impl MuxlaneApp {
             .id("palette-projects-scroll")
             .flex()
             .flex_col()
-            .w(px(220.))
+            .w(ui_px(220.))
             .flex_none()
-            .max_h(px(324.))
+            .max_h(ui_px(324.))
             .overflow_y_scroll()
             .track_scroll(&self.palette_project_scroll)
             .border_r_1()
@@ -752,7 +752,7 @@ impl MuxlaneApp {
                 div()
                     .px_3()
                     .py_4()
-                    .text_size(px(11.))
+                    .text_size(ui_px(11.))
                     .text_color(rgba(theme.fg2))
                     .child(i18n::text(self.language, "palette.no_results")),
             );
@@ -770,7 +770,7 @@ impl MuxlaneApp {
                     .gap_2()
                     .px_3()
                     .py_2()
-                    .text_size(px(12.))
+                    .text_size(ui_px(12.))
                     .text_color(rgba(theme.fg0))
                     .when(is_focused && !is_selected, |el| el.bg(rgba(theme.bg2)))
                     .when(is_selected, |el| el.bg(rgba(theme.selection())))
@@ -789,10 +789,10 @@ impl MuxlaneApp {
                     )
                     .child(
                         div()
-                            .max_w(px(80.))
+                            .max_w(ui_px(80.))
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_size(px(9.5))
+                            .text_size(ui_px(9.5))
                             .text_color(rgba(theme.fg2))
                             .child(path),
                     ),
@@ -804,7 +804,7 @@ impl MuxlaneApp {
             .flex()
             .flex_col()
             .flex_1()
-            .max_h(px(324.))
+            .max_h(ui_px(324.))
             .overflow_y_scroll()
             .track_scroll(&self.palette_scroll);
         if presets.is_empty() {
@@ -812,7 +812,7 @@ impl MuxlaneApp {
                 div()
                     .px_3()
                     .py_4()
-                    .text_size(px(11.))
+                    .text_size(ui_px(11.))
                     .text_color(rgba(theme.fg2))
                     .child(i18n::text(self.language, "palette.no_results")),
             );
@@ -831,7 +831,7 @@ impl MuxlaneApp {
                     .gap_2()
                     .px_3()
                     .py_2()
-                    .text_size(px(12.))
+                    .text_size(ui_px(12.))
                     .text_color(rgba(theme.fg0))
                     .when(is_focused, |el| el.bg(rgba(theme.bg2)))
                     .hover(|s| s.bg(rgba(theme.bg2)))
@@ -847,7 +847,7 @@ impl MuxlaneApp {
                     .child(
                         div()
                             .ml_auto()
-                            .text_size(px(10.))
+                            .text_size(ui_px(10.))
                             .text_color(rgba(theme.fg2))
                             .child(program),
                     ),
@@ -857,7 +857,7 @@ impl MuxlaneApp {
         let hint = i18n::text(self.language, "palette.tab_switch_column");
         let panel = div()
             .occlude()
-            .w(px(560.))
+            .w(ui_px(560.))
             .max_w(relative(0.92))
             .max_h(relative(0.75))
             .overflow_hidden()
@@ -891,7 +891,7 @@ impl MuxlaneApp {
                     .py_1p5()
                     .border_t_1()
                     .border_color(rgba(theme.line))
-                    .text_size(px(10.))
+                    .text_size(ui_px(10.))
                     .text_color(rgba(theme.fg2))
                     .child(hint),
             );

@@ -51,6 +51,10 @@ fn default_sidebar_width() -> f32 {
     230.0
 }
 
+fn default_ui_scale() -> u32 {
+    100
+}
+
 fn default_close_tab_shortcut() -> Option<String> {
     Some("ctrl-w".into())
 }
@@ -172,6 +176,8 @@ pub struct PersistedApp {
     pub sidebar_visible: bool,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: u32,
     #[serde(default)]
     pub shortcut_bindings: PersistedShortcutBindings,
     /// 侧栏项目自定义排序：machine_id -> 按显示顺序排列的 project_id。
@@ -222,6 +228,7 @@ impl PersistedApp {
         self.active_project_workspace = previous.active_project_workspace.clone();
         self.sidebar_visible = previous.sidebar_visible;
         self.sidebar_width = previous.sidebar_width;
+        self.ui_scale = previous.ui_scale;
         self.shortcut_bindings = previous.shortcut_bindings.clone();
         self.shortcut_bindings.migrate_legacy_defaults();
         self.project_order = previous.project_order.clone();
@@ -253,6 +260,7 @@ impl Default for PersistedApp {
             active_project_workspace: None,
             sidebar_visible: default_sidebar_visible(),
             sidebar_width: default_sidebar_width(),
+            ui_scale: default_ui_scale(),
             shortcut_bindings: PersistedShortcutBindings::default(),
             project_order: Default::default(),
         }
@@ -599,7 +607,10 @@ mod tests {
     fn roundtrip_atomic() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("state.json");
-        let mut app = PersistedApp::default();
+        let mut app = PersistedApp {
+            ui_scale: 125,
+            ..Default::default()
+        };
         app.remote_configs.push(PersistedRemote {
             target: "user@nuc:/tmp/muxlane.sock".into(),
             auth: PersistedRemoteAuth::SshConfig,

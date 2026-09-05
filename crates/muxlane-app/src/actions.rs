@@ -16,5 +16,7 @@ gpui::actions!(
         SelectTab8,
         SelectTab9,
         ToggleTheme,
+        FocusNextPart,
+        FocusPreviousPart,
     ]
 );

@@ -1,4 +1,5 @@
-use gpui::{prelude::*, px, rgba, svg, Svg};
+use crate::ui_scale::px as ui_px;
+use gpui::{prelude::*, rgba, svg, Svg};
 
 pub(crate) const SPLIT_HORIZONTAL_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><rect x='3' y='4' width='18' height='16'/><path d='M12 4v16'/></svg>"#;
 pub(crate) const SPLIT_VERTICAL_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><rect x='3' y='4' width='18' height='16'/><path d='M3 12h18'/></svg>"#;
@@ -39,5 +40,5 @@ pub(crate) fn panel_icon(data: &[u8], color: u32) -> Svg {
         .iter()
         .find_map(|(path, bytes)| (*bytes == data).then_some(*path))
         .expect("panel icon must be registered");
-    svg().path(path).size(px(15.)).text_color(rgba(color))
+    svg().path(path).size(ui_px(15.)).text_color(rgba(color))
 }

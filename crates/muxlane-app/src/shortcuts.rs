@@ -1,6 +1,7 @@
 use crate::actions::{
-    CloseTab, NewShellTab, NextTab, PreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
-    SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, TogglePalette,
+    CloseTab, FocusNextPart, FocusPreviousPart, NewShellTab, NextTab, PreviousTab, SelectTab1,
+    SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
+    TogglePalette,
 };
 use gpui::{App, KeyBinding, Keystroke};
 use muxlane_store::PersistedShortcutBindings;
@@ -9,6 +10,8 @@ use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 pub(crate) const FIXED_CHORDS: &[&str] = &[
     "cmd-k",
+    "f6",
+    "shift-f6",
     "ctrl-shift-t",
     "ctrl-tab",
     "ctrl-shift-tab",
@@ -26,6 +29,8 @@ pub(crate) const FIXED_CHORDS: &[&str] = &[
 #[cfg(not(target_os = "macos"))]
 pub(crate) const FIXED_CHORDS: &[&str] = &[
     "super-k",
+    "f6",
+    "shift-f6",
     "ctrl-shift-t",
     "ctrl-tab",
     "ctrl-shift-tab",
@@ -41,6 +46,7 @@ pub(crate) const FIXED_CHORDS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum ShortcutAction {
     CloseTab,
     PreviousTab,
@@ -194,6 +200,8 @@ pub(crate) fn install_keymap_or_defaults(
 fn build_keymap(bindings: &PersistedShortcutBindings) -> Vec<KeyBinding> {
     let mut keymap = vec![
         KeyBinding::new(&expand_platform_chord("platform-k"), TogglePalette, None),
+        KeyBinding::new("f6", FocusNextPart, None),
+        KeyBinding::new("shift-f6", FocusPreviousPart, None),
         KeyBinding::new("ctrl-shift-t", NewShellTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
@@ -207,6 +215,11 @@ fn build_keymap(bindings: &PersistedShortcutBindings) -> Vec<KeyBinding> {
         KeyBinding::new(&expand_platform_chord("platform-8"), SelectTab8, None),
         KeyBinding::new(&expand_platform_chord("platform-9"), SelectTab9, None),
     ];
+
+    #[cfg(debug_assertions)]
+    if std::env::var("MUXLANE_TEST_PALETTE_CTRL_K").as_deref() == Ok("1") {
+        keymap.push(KeyBinding::new("ctrl-k", TogglePalette, None));
+    }
 
     for action in ShortcutAction::ALL {
         if let Some(chord) = action.binding(bindings) {

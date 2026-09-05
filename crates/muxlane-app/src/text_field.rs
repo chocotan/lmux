@@ -1,6 +1,7 @@
 use crate::theme::{Theme, ThemeMode};
+use crate::ui_scale::px as ui_px;
 use gpui::{
-    canvas, div, point, prelude::*, px, rgba, size, Bounds, Context, ElementInputHandler,
+    canvas, div, point, prelude::*, rgba, size, Bounds, Context, ElementInputHandler,
     EntityInputHandler, FocusHandle, Focusable, Pixels, Point, Render, SharedString, Subscription,
     UTF16Selection, Window,
 };
@@ -35,6 +36,10 @@ fn range_from_utf16_in(content: &str, range: Range<usize>) -> Range<usize> {
 fn marked_selection(base: usize, new_text: &str, selected_utf16: Range<usize>) -> Range<usize> {
     let selected = range_from_utf16_in(new_text, selected_utf16);
     base + selected.start..base + selected.end
+}
+
+fn ime_caret_x(origin_x: f32, prefix_chars: usize, scale: f32) -> f32 {
+    origin_x + (12.0 + prefix_chars as f32 * 7.2) * scale
 }
 
 pub struct TextField {
@@ -440,14 +445,16 @@ impl EntityInputHandler for TextField {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let pad = 12.0;
-        let approx_char = 7.2;
         let start = utf16_to_byte(&self.content, range_utf16.start).min(self.content.len());
         let prefix = self.content[..start].chars().count();
-        let x = f32::from(element_bounds.origin.x) + pad + prefix as f32 * approx_char;
+        let x = ime_caret_x(
+            f32::from(element_bounds.origin.x),
+            prefix,
+            crate::ui_scale::factor(),
+        );
         Some(Bounds {
-            origin: point(px(x), element_bounds.origin.y),
-            size: size(px(2.), element_bounds.size.height),
+            origin: point(gpui::px(x), element_bounds.origin.y),
+            size: size(ui_px(2.), element_bounds.size.height),
         })
     }
 
@@ -492,7 +499,13 @@ impl Render for TextField {
                         .child(self.placeholder.clone()),
                 )
                 .when(focused, |el| {
-                    el.child(div().ml(px(1.)).w(px(1.5)).h(px(16.)).bg(rgba(cursor_c)))
+                    el.child(
+                        div()
+                            .ml(ui_px(1.))
+                            .w(ui_px(1.5))
+                            .h(ui_px(16.))
+                            .bg(rgba(cursor_c)),
+                    )
                 })
         } else if !focused {
             let display_text = if self.secure {
@@ -525,7 +538,7 @@ impl Render for TextField {
             if has_selection {
                 row = row.child(div().bg(rgba(theme.selection())).child(selected));
             } else {
-                row = row.child(div().w(px(1.5)).h(px(16.)).bg(rgba(cursor_c)));
+                row = row.child(div().w(ui_px(1.5)).h(ui_px(16.)).bg(rgba(cursor_c)));
             }
             if !after.is_empty() {
                 row = row.child(div().child(after));
@@ -540,12 +553,12 @@ impl Render for TextField {
             .flex()
             .items_center()
             .w_full()
-            .min_h(px(34.))
+            .min_h(ui_px(34.))
             .px_3()
             .border_1()
             .border_color(rgba(border_c))
             .bg(rgba(bg_c))
-            .text_size(px(12.))
+            .text_size(ui_px(12.))
             .on_click(cx.listener(|this, _event, window, cx| {
                 this.focus.focus(window, cx);
                 window.invalidate_character_coordinates();
@@ -681,5 +694,12 @@ mod tests {
     fn marked_selection_is_relative_to_new_text() {
         assert_eq!(marked_selection(3, "中文", 2..2), 9..9);
         assert_eq!(marked_selection(3, "😀x", 2..3), 7..8);
+    }
+
+    #[test]
+    fn ime_caret_coordinates_follow_ui_scale() {
+        assert!((ime_caret_x(20.0, 2, 1.0) - 46.4).abs() < f32::EPSILON);
+        assert!((ime_caret_x(20.0, 2, 1.5) - 59.6).abs() < f32::EPSILON);
+        assert!((ime_caret_x(20.0, 2, 2.0) - 72.8).abs() < f32::EPSILON);
     }
 }

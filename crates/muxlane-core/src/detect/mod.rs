@@ -23,6 +23,7 @@ pub struct ScreenInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
     Done,
+    Failed,
     Blocked,
     Working,
 }
@@ -31,6 +32,7 @@ impl HookEvent {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "done" => Some(HookEvent::Done),
+            "failed" | "error" => Some(HookEvent::Failed),
             "blocked" => Some(HookEvent::Blocked),
             "working" => Some(HookEvent::Working),
             _ => None,
@@ -39,6 +41,7 @@ impl HookEvent {
     pub fn to_status(self) -> AgentStatus {
         match self {
             HookEvent::Done => AgentStatus::Done,
+            HookEvent::Failed => AgentStatus::Failed,
             HookEvent::Blocked => AgentStatus::Blocked,
             HookEvent::Working => AgentStatus::Working,
         }
@@ -356,6 +359,13 @@ mod tests {
         );
         assert_eq!(r, None);
         assert!(!e.has_hook_authority(&a));
+    }
+
+    #[test]
+    fn failed_hook_event_is_explicit() {
+        assert_eq!(HookEvent::parse("failed"), Some(HookEvent::Failed));
+        assert_eq!(HookEvent::parse("error"), Some(HookEvent::Failed));
+        assert_eq!(HookEvent::Failed.to_status(), AgentStatus::Failed);
     }
 
     #[test]

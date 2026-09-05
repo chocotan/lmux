@@ -3,10 +3,11 @@ use crate::app::MuxlaneApp;
 use crate::i18n;
 use crate::icons::*;
 use crate::theme::Theme;
+use crate::ui_scale::px as ui_px;
 use crate::widgets::*;
 use crate::workspace::ProjectKey;
 use gpui::{
-    canvas, div, prelude::*, px, relative, rgba, Context, MouseButton, Pixels, Point, SharedString,
+    canvas, div, prelude::*, relative, rgba, Context, MouseButton, Pixels, Point, SharedString,
     Window,
 };
 use muxlane_core::model::AgentId;
@@ -49,7 +50,7 @@ impl MuxlaneApp {
             .update(cx, |center, cx| center.mark_agent_read(agent, cx));
         if let Some(a) = self.last_snapshot.agent_mut(agent) {
             a.seen = true;
-            if a.status == muxlane_core::model::AgentStatus::Done {
+            if a.status.is_finished() {
                 a.status = muxlane_core::model::AgentStatus::Idle;
             }
         }
@@ -528,17 +529,17 @@ impl MuxlaneApp {
                                 .items_center()
                                 .justify_center()
                                 .when(axis == SplitAxis::Horizontal, |el| {
-                                    el.w(px(2.))
+                                    el.w(ui_px(2.))
                                         .h_full()
-                                        .ml(px(-1.))
-                                        .mr(px(-1.))
+                                        .ml(ui_px(-1.))
+                                        .mr(ui_px(-1.))
                                         .cursor_col_resize()
                                 })
                                 .when(axis == SplitAxis::Vertical, |el| {
-                                    el.h(px(2.))
+                                    el.h(ui_px(2.))
                                         .w_full()
-                                        .mt(px(-1.))
-                                        .mb(px(-1.))
+                                        .mt(ui_px(-1.))
+                                        .mb(ui_px(-1.))
                                         .cursor_row_resize()
                                 })
                                 .on_click(cx.listener({
@@ -611,7 +612,7 @@ impl MuxlaneApp {
                 let mut tabs = div()
                     .flex()
                     .items_center()
-                    .h(px(28.))
+                    .h(ui_px(28.))
                     .bg(rgba(theme.bg1))
                     .border_b_1()
                     .border_color(rgba(theme.line));
@@ -625,12 +626,7 @@ impl MuxlaneApp {
                         .unwrap_or(muxlane_core::model::AgentStatus::Idle);
                     let seen = agent_opt.as_ref().map(|a| a.seen).unwrap_or(true)
                         || self.active.as_ref() == Some(&tab_id);
-                    let is_error = agent_opt
-                        .as_ref()
-                        .map(|a| a.title.contains("异常") || a.title.contains("错误"))
-                        .unwrap_or(false);
-                    let att =
-                        compute_attention_style(status, seen, is_error, self.pulse_phase, theme);
+                    let att = compute_attention_style(status, seen, theme);
                     let tab_title = agent_opt
                         .as_ref()
                         .map(|a| {
@@ -654,7 +650,7 @@ impl MuxlaneApp {
                         .gap_1p5()
                         .h_full()
                         .px_2()
-                        .text_size(px(11.5))
+                        .text_size(ui_px(11.5))
                         .when(att.is_alerting && att.text_color.is_some(), |el| {
                             el.text_color(rgba(att.text_color.unwrap()))
                         })
@@ -718,45 +714,54 @@ impl MuxlaneApp {
                         }))
                         .child(render_status_indicator(
                             status,
-                            is_error,
-                            self.spinner_frame,
+                            format!("pane-{pane_id}-agent-{tab_id}"),
                             theme,
                         ))
-                        .child(div().line_height(px(14.)).child(tab_title))
+                        .child(div().line_height(ui_px(14.)).child(tab_title.clone()))
                         .child(
-                            div()
-                                .id(gpui::ElementId::Name(format!("tab-close-{tab_id}").into()))
-                                .text_color(rgba(theme.fg2))
-                                .px_1()
-                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                                .on_click(cx.listener({
-                                    let id = tab_id.clone();
-                                    let pane = pane_id.clone();
-                                    move |this, _ev, window, cx| {
-                                        cx.stop_propagation();
-                                        this.close_tab(&pane, &id, window, cx);
-                                    }
-                                }))
-                                .child("×"),
+                            semantic_button(
+                                gpui::ElementId::Name(format!("tab-close-{tab_id}").into()),
+                                format!("Close tab {tab_title}"),
+                                theme,
+                            )
+                            .text_color(rgba(theme.fg2))
+                            .px_1()
+                            .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                            .tooltip(hover_tip(format!("Close tab {tab_title}")))
+                            .on_click(cx.listener({
+                                let id = tab_id.clone();
+                                let pane = pane_id.clone();
+                                move |this, _ev, window, cx| {
+                                    cx.stop_propagation();
+                                    this.close_tab(&pane, &id, window, cx);
+                                }
+                            }))
+                            .child("×"),
                         );
                     tabs = tabs.child(tab);
                 }
                 tabs = tabs.child(
-                    div()
-                        .id(gpui::ElementId::Name(format!("new-tab-{pane_id}").into()))
-                        .w(px(28.))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(14.))
-                        .text_color(rgba(theme.fg1))
-                        .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                        .on_click(cx.listener({
-                            let pane = pane_id.clone();
-                            move |this, _ev, window, cx| this.new_shell_tab(&pane, window, cx)
-                        }))
-                        .child(panel_icon(PLUS_ICON, theme.fg1)),
+                    semantic_button(
+                        gpui::ElementId::Name(format!("new-tab-{pane_id}").into()),
+                        i18n::text(self.language, "palette.new").replace("{name}", "shell tab"),
+                        theme,
+                    )
+                    .w(ui_px(28.))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(ui_px(14.))
+                    .text_color(rgba(theme.fg1))
+                    .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                    .tooltip(hover_tip(
+                        i18n::text(self.language, "palette.new").replace("{name}", "shell tab"),
+                    ))
+                    .on_click(cx.listener({
+                        let pane = pane_id.clone();
+                        move |this, _ev, window, cx| this.new_shell_tab(&pane, window, cx)
+                    }))
+                    .child(panel_icon(PLUS_ICON, theme.fg1)),
                 );
                 // 显式分屏/最大化 controls：没有隐式 split。
                 tabs = tabs.child(
@@ -767,81 +772,104 @@ impl MuxlaneApp {
                         .h_full()
                         .text_color(rgba(theme.fg1))
                         .child(
-                            div()
-                                .id(gpui::ElementId::Name(format!("split-h-{pane_id}").into()))
-                                .w(px(28.))
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                                .on_click(cx.listener({
-                                    let pane = pane_id.clone();
-                                    move |this, _ev, window, cx| {
-                                        this.split_pane(&pane, SplitAxis::Horizontal, window, cx)
-                                    }
-                                }))
-                                .child(panel_icon(SPLIT_HORIZONTAL_ICON, theme.fg1)),
+                            semantic_button(
+                                gpui::ElementId::Name(format!("split-h-{pane_id}").into()),
+                                i18n::text(self.language, "palette.horizontal_split"),
+                                theme,
+                            )
+                            .w(ui_px(28.))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                            .tooltip(hover_tip(i18n::text(
+                                self.language,
+                                "palette.horizontal_split",
+                            )))
+                            .on_click(cx.listener({
+                                let pane = pane_id.clone();
+                                move |this, _ev, window, cx| {
+                                    this.split_pane(&pane, SplitAxis::Horizontal, window, cx)
+                                }
+                            }))
+                            .child(panel_icon(SPLIT_HORIZONTAL_ICON, theme.fg1)),
                         )
                         .child(
-                            div()
-                                .id(gpui::ElementId::Name(format!("split-v-{pane_id}").into()))
-                                .w(px(28.))
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                                .on_click(cx.listener({
-                                    let pane = pane_id.clone();
-                                    move |this, _ev, window, cx| {
-                                        this.split_pane(&pane, SplitAxis::Vertical, window, cx)
-                                    }
-                                }))
-                                .child(panel_icon(SPLIT_VERTICAL_ICON, theme.fg1)),
+                            semantic_button(
+                                gpui::ElementId::Name(format!("split-v-{pane_id}").into()),
+                                i18n::text(self.language, "palette.vertical_split"),
+                                theme,
+                            )
+                            .w(ui_px(28.))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                            .tooltip(hover_tip(i18n::text(
+                                self.language,
+                                "palette.vertical_split",
+                            )))
+                            .on_click(cx.listener({
+                                let pane = pane_id.clone();
+                                move |this, _ev, window, cx| {
+                                    this.split_pane(&pane, SplitAxis::Vertical, window, cx)
+                                }
+                            }))
+                            .child(panel_icon(SPLIT_VERTICAL_ICON, theme.fg1)),
                         )
                         .child(
-                            div()
-                                .id(gpui::ElementId::Name(format!("maximize-{pane_id}").into()))
-                                .w(px(28.))
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                                .on_click(cx.listener({
-                                    let pane = pane_id.clone();
-                                    move |this, _ev, _window, cx| this.toggle_maximize(&pane, cx)
-                                }))
-                                .child(panel_icon(
-                                    if self.maximized_pane.as_ref() == Some(&pane_id) {
-                                        RESTORE_ICON
-                                    } else {
-                                        MAXIMIZE_ICON
-                                    },
-                                    theme.fg1,
-                                )),
+                            semantic_button(
+                                gpui::ElementId::Name(format!("maximize-{pane_id}").into()),
+                                i18n::text(self.language, "palette.maximize"),
+                                theme,
+                            )
+                            .w(ui_px(28.))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                            .tooltip(hover_tip(i18n::text(self.language, "palette.maximize")))
+                            .on_click(cx.listener({
+                                let pane = pane_id.clone();
+                                move |this, _ev, _window, cx| this.toggle_maximize(&pane, cx)
+                            }))
+                            .child(panel_icon(
+                                if self.maximized_pane.as_ref() == Some(&pane_id) {
+                                    RESTORE_ICON
+                                } else {
+                                    MAXIMIZE_ICON
+                                },
+                                theme.fg1,
+                            )),
                         )
                         .when(self.pane_tree.leaf_count() > 1, |controls| {
                             controls.child(
-                                div()
-                                    .id(gpui::ElementId::Name(
-                                        format!("close-pane-{pane_id}").into(),
-                                    ))
-                                    .w(px(28.))
-                                    .h_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(rgba(theme.fg1))
-                                    .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.red)))
-                                    .on_click(cx.listener({
-                                        let pane = pane_id.clone();
-                                        move |this, _ev, window, cx| {
-                                            this.close_split_pane(&pane, window, cx)
-                                        }
-                                    }))
-                                    .child(panel_icon(CLOSE_ICON, theme.red)),
+                                semantic_button(
+                                    gpui::ElementId::Name(format!("close-pane-{pane_id}").into()),
+                                    i18n::text(self.language, "palette.close_split"),
+                                    theme,
+                                )
+                                .w(ui_px(28.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgba(theme.fg1))
+                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.red)))
+                                .tooltip(hover_tip(i18n::text(
+                                    self.language,
+                                    "palette.close_split",
+                                )))
+                                .on_click(cx.listener({
+                                    let pane = pane_id.clone();
+                                    move |this, _ev, window, cx| {
+                                        this.close_split_pane(&pane, window, cx)
+                                    }
+                                }))
+                                .child(panel_icon(CLOSE_ICON, theme.red)),
                             )
                         }),
                 );
@@ -853,17 +881,7 @@ impl MuxlaneApp {
                     .unwrap_or(muxlane_core::model::AgentStatus::Idle);
                 let active_seen = active_agent_opt.as_ref().map(|a| a.seen).unwrap_or(true)
                     || self.active.as_ref() == active_id.as_ref();
-                let active_is_error = active_agent_opt
-                    .as_ref()
-                    .map(|a| a.title.contains("异常") || a.title.contains("错误"))
-                    .unwrap_or(false);
-                let pane_att = compute_attention_style(
-                    active_status,
-                    active_seen,
-                    active_is_error,
-                    self.pulse_phase,
-                    theme,
-                );
+                let pane_att = compute_attention_style(active_status, active_seen, theme);
 
                 let content = active_id
                     .as_ref()

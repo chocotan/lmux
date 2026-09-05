@@ -117,6 +117,12 @@ fn empty_layout() -> WorkspaceLayout {
     WorkspaceLayout::new(PaneNode::empty(), None)
 }
 
+fn active_tab_in_layout(pane_tree: &PaneNode, active_pane: &PaneId) -> Option<AgentId> {
+    pane_tree
+        .group(active_pane)
+        .and_then(|group| group.active.clone().or_else(|| group.tabs.first().cloned()))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WorkspaceController {
     enabled: bool,
@@ -465,10 +471,7 @@ impl MuxlaneApp {
     fn apply_workspace_layout(&mut self, layout: WorkspaceLayout) {
         self.pane_tree = layout.pane_tree;
         self.active_pane = layout.active_pane;
-        self.active = self
-            .pane_tree
-            .group(&self.active_pane)
-            .and_then(|group| group.active.clone());
+        self.active = active_tab_in_layout(&self.pane_tree, &self.active_pane);
         self.maximized_pane = None;
         self.split_drag = None;
         self.sidebar.end_drag();
@@ -767,6 +770,20 @@ mod tests {
         let group = layout.pane_tree.group(&layout.active_pane).unwrap();
         assert!(group.tabs.is_empty());
         assert!(group.active.is_none());
+    }
+
+    #[test]
+    fn focus_target_uses_only_the_current_layout() {
+        let layout = PaneNode::with_tab("layout-agent".into());
+        let pane = layout.first_pane_id();
+        assert_eq!(
+            active_tab_in_layout(&layout, &pane),
+            Some("layout-agent".into())
+        );
+
+        let empty = PaneNode::empty();
+        let pane = empty.first_pane_id();
+        assert_eq!(active_tab_in_layout(&empty, &pane), None);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 //! Notification center state, policy, rendering, and toast lifecycle.
+use crate::ui_scale::px as ui_px;
 
 use crate::i18n::{self, Language};
 use crate::icons::{panel_icon, NOTIFICATION_ICON};
@@ -6,8 +7,8 @@ use crate::sound::{self, SoundKind};
 use crate::theme::{Theme, ThemeMode};
 use crate::widgets::{format_relative_time, truncate};
 use gpui::{
-    div, prelude::*, px, rgba, Context, EventEmitter, MouseButton, ParentElement, Render, Styled,
-    Task, Window,
+    div, prelude::*, rgba, Context, EventEmitter, MouseButton, ParentElement, Render, Styled, Task,
+    Window,
 };
 use muxlane_core::model::{AgentId, AgentStatus, AgentType};
 use std::collections::HashSet;
@@ -129,7 +130,10 @@ impl NotificationCenter {
             }
             return;
         }
-        if !matches!(draft.to, AgentStatus::Blocked | AgentStatus::Done) {
+        if !matches!(
+            draft.to,
+            AgentStatus::Blocked | AgentStatus::Done | AgentStatus::Failed
+        ) {
             return;
         }
 
@@ -156,6 +160,9 @@ impl NotificationCenter {
                 .replace("{machine}", &draft.machine_name)
                 .replace("{project}", &draft.project_name),
             AgentStatus::Done => i18n::text(self.language, "notification.title_done")
+                .replace("{machine}", &draft.machine_name)
+                .replace("{project}", &draft.project_name),
+            AgentStatus::Failed => i18n::text(self.language, "notification.title_failed")
                 .replace("{machine}", &draft.machine_name)
                 .replace("{project}", &draft.project_name),
             _ => format!("{} · {}", draft.machine_name, draft.project_name),
@@ -185,7 +192,7 @@ impl NotificationCenter {
         if draft.sound_enabled {
             match draft.to {
                 AgentStatus::Blocked => sound::play_sound(SoundKind::Request),
-                AgentStatus::Done => sound::play_sound(SoundKind::Done),
+                AgentStatus::Done | AgentStatus::Failed => sound::play_sound(SoundKind::Done),
                 _ => {}
             }
         }
@@ -285,10 +292,10 @@ impl NotificationCenter {
                     .id("notifications-popover")
                     .occlude()
                     .absolute()
-                    .bottom(px(40.))
-                    .left(px(8.))
-                    .w(px(320.))
-                    .max_h(px(420.))
+                    .bottom(ui_px(40.))
+                    .left(ui_px(8.))
+                    .w(ui_px(320.))
+                    .max_h(ui_px(420.))
                     .flex()
                     .flex_col()
                     .bg(rgba(theme.bg1))
@@ -301,7 +308,7 @@ impl NotificationCenter {
                     )
                     .child(
                         div()
-                            .h(px(34.))
+                            .h(ui_px(34.))
                             .px_3()
                             .flex()
                             .items_center()
@@ -316,7 +323,7 @@ impl NotificationCenter {
                                     .child(panel_icon(NOTIFICATION_ICON, theme.fg1))
                                     .child(
                                         div()
-                                            .text_size(px(12.))
+                                            .text_size(ui_px(12.))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(rgba(theme.fg0))
                                             .child(i18n::text(
@@ -328,10 +335,10 @@ impl NotificationCenter {
                                         header.child(
                                             div()
                                                 .px_1p5()
-                                                .py(px(1.))
+                                                .py(ui_px(1.))
                                                 .bg(rgba(theme.accent))
                                                 .text_color(rgba(theme.on_accent))
-                                                .text_size(px(9.))
+                                                .text_size(ui_px(9.))
                                                 .font_weight(gpui::FontWeight::BOLD)
                                                 .child(format!("{unread_count}")),
                                         )
@@ -349,7 +356,7 @@ impl NotificationCenter {
                                                 .cursor_pointer()
                                                 .px_1p5()
                                                 .py_0p5()
-                                                .text_size(px(10.))
+                                                .text_size(ui_px(10.))
                                                 .text_color(rgba(theme.fg2))
                                                 .hover(|s| {
                                                     s.bg(rgba(theme.bg2))
@@ -369,7 +376,7 @@ impl NotificationCenter {
                                             .id("close-notifications")
                                             .cursor_pointer()
                                             .px_1()
-                                            .text_size(px(14.))
+                                            .text_size(ui_px(14.))
                                             .text_color(rgba(theme.fg2))
                                             .hover(|s| s.text_color(rgba(theme.fg0)))
                                             .on_click(
@@ -397,7 +404,7 @@ impl NotificationCenter {
                                         .gap_1()
                                         .child(
                                             div()
-                                                .text_size(px(11.))
+                                                .text_size(ui_px(11.))
                                                 .text_color(rgba(theme.fg2))
                                                 .child(i18n::text(
                                                     self.language,
@@ -410,6 +417,7 @@ impl NotificationCenter {
                                 let dot_color = match n.to {
                                     AgentStatus::Blocked => theme.yellow,
                                     AgentStatus::Done => theme.green,
+                                    AgentStatus::Failed => theme.red,
                                     AgentStatus::Working => theme.accent,
                                     _ => theme.fg2,
                                 };
@@ -419,6 +427,9 @@ impl NotificationCenter {
                                     }
                                     AgentStatus::Done => {
                                         i18n::text(self.language, "status.task_completed")
+                                    }
+                                    AgentStatus::Failed => {
+                                        i18n::text(self.language, "status.failed")
                                     }
                                     AgentStatus::Working => {
                                         i18n::text(self.language, "status.working")
@@ -465,13 +476,13 @@ impl NotificationCenter {
                                                     .gap_1p5()
                                                     .child(
                                                         div()
-                                                            .w(px(6.))
-                                                            .h(px(6.))
+                                                            .w(ui_px(6.))
+                                                            .h(ui_px(6.))
                                                             .bg(rgba(dot_color)),
                                                     )
                                                     .child(
                                                         div()
-                                                            .text_size(px(11.))
+                                                            .text_size(ui_px(11.))
                                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                                             .text_color(rgba(theme.fg0))
                                                             .child(format!(
@@ -481,14 +492,14 @@ impl NotificationCenter {
                                                     )
                                                     .child(
                                                         div()
-                                                            .text_size(px(10.))
+                                                            .text_size(ui_px(10.))
                                                             .text_color(rgba(dot_color))
                                                             .child(status_text),
                                                     ),
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(10.))
+                                                    .text_size(ui_px(10.))
                                                     .text_color(rgba(theme.fg2))
                                                     .child(time_str),
                                             ),
@@ -496,7 +507,7 @@ impl NotificationCenter {
                                     .when_some(n.message.clone(), |row, msg| {
                                         row.child(
                                             div()
-                                                .text_size(px(11.))
+                                                .text_size(ui_px(11.))
                                                 .text_color(rgba(if is_unread {
                                                     theme.fg0
                                                 } else {
@@ -522,16 +533,17 @@ impl Render for NotificationCenter {
                 div()
                     .id("toast-overlay")
                     .absolute()
-                    .bottom(px(16.))
-                    .right(px(16.))
+                    .bottom(ui_px(16.))
+                    .right(ui_px(16.))
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .w(px(320.))
+                    .w(ui_px(320.))
                     .children(self.toasts.iter().map(|toast| {
                         let dot_color = match toast.status {
                             AgentStatus::Blocked => theme.yellow,
                             AgentStatus::Done => theme.green,
+                            AgentStatus::Failed => theme.red,
                             AgentStatus::Working => theme.accent,
                             AgentStatus::Idle | AgentStatus::Unknown => theme.fg2,
                         };
@@ -556,7 +568,7 @@ impl Render for NotificationCenter {
                                     .left_0()
                                     .top_0()
                                     .bottom_0()
-                                    .w(px(4.))
+                                    .w(ui_px(4.))
                                     .bg(rgba(dot_color)),
                             )
                             .on_click(cx.listener(move |_this, _ev, _window, cx| {
@@ -572,10 +584,16 @@ impl Render for NotificationCenter {
                                             .flex()
                                             .items_center()
                                             .gap_1p5()
-                                            .child(div().w(px(7.)).h(px(7.)).bg(rgba(dot_color)))
+                                            .child(
+                                                div().w(ui_px(7.)).h(ui_px(7.)).bg(rgba(dot_color)),
+                                            )
                                             .child(
                                                 div()
-                                                    .text_size(px(12.))
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .text_ellipsis()
+                                                    .text_size(ui_px(12.))
                                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                                     .text_color(rgba(theme.fg0))
                                                     .child(toast.title.clone()),
@@ -586,7 +604,7 @@ impl Render for NotificationCenter {
                                             .id(gpui::ElementId::Name(
                                                 format!("toast-close-{toast_id}").into(),
                                             ))
-                                            .text_size(px(11.))
+                                            .text_size(ui_px(11.))
                                             .text_color(rgba(theme.fg2))
                                             .hover(|s| s.text_color(rgba(theme.fg0)))
                                             .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -600,14 +618,18 @@ impl Render for NotificationCenter {
                             .child(
                                 div()
                                     .mt_1()
-                                    .text_size(px(11.5))
+                                    .text_size(ui_px(11.5))
                                     .text_color(rgba(theme.fg1))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
                                     .child(truncate(&toast.message, 120)),
                             )
                             .child(
                                 div()
                                     .mt_1()
-                                    .text_size(px(9.5))
+                                    .text_size(ui_px(9.5))
                                     .text_color(rgba(theme.fg2))
                                     .child(i18n::text(self.language, "notification.click_to_open")),
                             )
@@ -620,14 +642,14 @@ impl Render for NotificationCenter {
                 div()
                     .id("error-toast")
                     .absolute()
-                    .top(px(16.))
-                    .right(px(16.))
-                    .w(px(420.))
+                    .top(ui_px(16.))
+                    .right(ui_px(16.))
+                    .w(ui_px(420.))
                     .p_3()
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.red))
-                    .text_size(px(11.5))
+                    .text_size(ui_px(11.5))
                     .text_color(rgba(theme.red))
                     .child(message),
             );
@@ -654,6 +676,7 @@ fn effective_notification_body(
         return match status {
             AgentStatus::Blocked => i18n::text(language, "status.input_required").into(),
             AgentStatus::Done => i18n::text(language, "status.task_completed_body").into(),
+            AgentStatus::Failed => i18n::text(language, "status.failed").into(),
             _ => status.as_str().into(),
         };
     }

@@ -5,4 +5,4 @@ mod vterm;
 
 pub use replay::ReplayBuffer;
 pub use session::{default_shell_program, LaunchCfg, PtySession, SessionEvent};
-pub use vterm::{RenderCursor, VTerm, VTermModes};
+pub use vterm::{RenderCursor, RenderSnapshot, VTerm, VTermModes};

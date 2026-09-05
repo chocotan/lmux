@@ -1,15 +1,15 @@
-//! 终端视图：真彩色 cell renderer + 光标 + 低延迟 PTY 输入。
 //! TermView 在 GPUI task 内 drain PTY 输出，chunk 到达即 process + notify。
 use crate::theme::Theme;
+use crate::ui_scale::px as ui_px;
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, rgba, size, App, Bounds, ClipboardEntry,
-    ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks,
-    FontFeatures, FontStyle, FontWeight, Hsla, ImageFormat, InputHandler, MouseButton,
-    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, ShapedLine, Styled,
-    Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    canvas, div, fill, point, prelude::*, rgba, size, App, Bounds, ClipboardEntry, ClipboardItem,
+    Context, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle,
+    FontWeight, Hsla, ImageFormat, InputHandler, MouseButton, ParentElement, Pixels, Point, Render,
+    ScrollDelta, ScrollWheelEvent, ShapedLine, Styled, Subscription, Task, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window,
 };
 use muxlane_core::model::AgentId;
-use muxlane_term::{PtySession, VTerm};
+use muxlane_term::{PtySession, RenderSnapshot, VTerm};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,6 +26,21 @@ const SCROLLBAR_WIDTH: f32 = 10.0;
 const SCROLLBAR_RIGHT: f32 = 2.0;
 const MIN_SCROLLBAR_THUMB: f32 = 24.0;
 const MAX_OSC52_CLIPBOARD_BYTES: usize = 64 * 1024;
+fn inner_extent(outer_width: f32, outer_height: f32, padding_x: f32, padding_y: f32) -> (f32, f32) {
+    (
+        (outer_width - padding_x * 2.0).max(1.0),
+        (outer_height - padding_y * 2.0).max(1.0),
+    )
+}
+
+fn invalidate_cached_geometry(dims: &mut (u16, u16), bounds: &mut Option<Bounds<Pixels>>) {
+    *dims = (0, 0);
+    *bounds = None;
+}
+
+fn refresh_snapshot_after_resize(vterm: &VTerm, snapshot: &mut RenderSnapshot) {
+    *snapshot = vterm.render_snapshot();
+}
 
 fn osc52_clipboard_allowed(enabled: bool, text: &str) -> bool {
     if text.len() > MAX_OSC52_CLIPBOARD_BYTES {
@@ -519,6 +534,13 @@ impl TermView {
         cx.notify();
     }
 
+    pub(crate) fn refresh_ui_scale(&mut self, cx: &mut Context<Self>) {
+        if let (Ok(mut dims), Ok(mut bounds)) = (self.last_dims.lock(), self.last_bounds.lock()) {
+            invalidate_cached_geometry(&mut dims, &mut bounds);
+        }
+        cx.notify();
+    }
+
     fn input_sink(&self) -> Option<InputSink> {
         self.writer
             .as_ref()
@@ -533,7 +555,10 @@ impl TermView {
             .lock()
             .map(|size| *size)
             .unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H));
-        let (cols, rows) = self.last_dims.lock().map(|dims| *dims).unwrap_or((2, 2));
+        let (cols, rows) = self.last_dims.lock().map(|dims| *dims).unwrap_or((0, 0));
+        if cols == 0 || rows == 0 {
+            return None;
+        }
         let local = position - bounds.origin;
         let col = (f32::from(local.x).max(0.0) / cell_w) as usize;
         let visual_row = (f32::from(local.y).max(0.0) / cell_h) as usize;
@@ -657,7 +682,10 @@ impl TermView {
             .lock()
             .map(|size| *size)
             .unwrap_or((FALLBACK_CELL_W, FALLBACK_CELL_H));
-        let (cols, rows) = self.last_dims.lock().map(|dims| *dims).unwrap_or((2, 2));
+        let (cols, rows) = self.last_dims.lock().map(|dims| *dims).unwrap_or((0, 0));
+        if cols == 0 || rows == 0 {
+            return;
+        }
         let local = event.position - bounds.origin;
         let col =
             ((f32::from(local.x).max(0.0) / cell_w) as usize).min(cols.saturating_sub(1) as usize);
@@ -876,7 +904,7 @@ fn mouse_report(
 
 impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let snapshot = self.vterm.render_snapshot();
+        let mut snapshot = self.vterm.render_snapshot();
         if self.focus_subscriptions.is_none() {
             let focus = self.focus.clone();
             let focus_in = cx.on_focus_in(&focus, window, |_this, window, cx| {
@@ -896,6 +924,7 @@ impl Render for TermView {
             writer.set_focused(focused);
         }
 
+        let term = cx.entity().downgrade();
         let vt_resize = self.vterm.clone();
         let writer_resize = self.writer.clone();
         let remote_resize = self.remote_input.clone();
@@ -963,14 +992,17 @@ impl Render for TermView {
             .child(
                 canvas(
                     move |bounds, window, _cx| {
-                        let padding_x = px(TERM_PADDING_X);
-                        let padding_y = px(TERM_PADDING_Y);
+                        let padding_x = ui_px(TERM_PADDING_X);
+                        let padding_y = ui_px(TERM_PADDING_Y);
+                        let (inner_width, inner_height) = inner_extent(
+                            f32::from(bounds.size.width),
+                            f32::from(bounds.size.height),
+                            f32::from(padding_x),
+                            f32::from(padding_y),
+                        );
                         let inner = Bounds {
                             origin: point(bounds.origin.x + padding_x, bounds.origin.y + padding_y),
-                            size: size(
-                                px((f32::from(bounds.size.width) - TERM_PADDING_X * 2.0).max(1.0)),
-                                px((f32::from(bounds.size.height) - TERM_PADDING_Y * 2.0).max(1.0)),
-                            ),
+                            size: size(gpui::px(inner_width), gpui::px(inner_height)),
                         };
 
                         let family = font_family.clone().into();
@@ -987,12 +1019,12 @@ impl Render for TermView {
                             style: FontStyle::Normal,
                         };
                         let text_system = window.text_system();
-                        let font_size = px(FONT_SIZE);
+                        let font_size = ui_px(FONT_SIZE);
                         let font_id = text_system.resolve_font(&base_font);
                         let measured_cell = text_system
                             .advance(font_id, font_size, 'm')
                             .map(|advance| advance.width)
-                            .unwrap_or(px(FALLBACK_CELL_W));
+                            .unwrap_or(ui_px(FALLBACK_CELL_W));
                         let line_height = font_size * 1.3;
                         let base_shape = text_system.shape_line(
                             "m".into(),
@@ -1032,7 +1064,11 @@ impl Render for TermView {
                                 if let Some(remote) = &remote_resize {
                                     let _ = remote.send(RemoteTermCommand::Resize(cols, rows));
                                 }
-                                window.request_animation_frame();
+                                refresh_snapshot_after_resize(&vt_resize, &mut snapshot);
+                                let term = term.clone();
+                                window.on_next_frame(move |_window, cx| {
+                                    term.update(cx, |_term, cx| cx.notify()).ok();
+                                });
                             }
                         }
 
@@ -1070,7 +1106,7 @@ impl Render for TermView {
                                         background_color: None,
                                         underline: run.style.underline.then_some(UnderlineStyle {
                                             color: Some(color),
-                                            thickness: px(1.0),
+                                            thickness: ui_px(1.0),
                                             wavy: false,
                                         }),
                                         strikethrough: None,
@@ -1312,10 +1348,10 @@ impl Render for TermView {
                         layer.child(
                             div()
                                 .absolute()
-                                .right(px(SCROLLBAR_RIGHT))
-                                .top(px(TERM_PADDING_Y))
-                                .w(px(SCROLLBAR_WIDTH))
-                                .h(px(geometry.track_height))
+                                .right(ui_px(SCROLLBAR_RIGHT))
+                                .top(ui_px(TERM_PADDING_Y))
+                                .w(ui_px(SCROLLBAR_WIDTH))
+                                .h(gpui::px(geometry.track_height))
                                 .bg(rgba(term_theme.scrollbar_track()))
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -1349,9 +1385,9 @@ impl Render for TermView {
                                 .child(
                                     div()
                                         .absolute()
-                                        .top(px(geometry.thumb_top))
+                                        .top(gpui::px(geometry.thumb_top))
                                         .w_full()
-                                        .h(px(geometry.thumb_height))
+                                        .h(gpui::px(geometry.thumb_height))
                                         .bg(rgba(term_theme.scrollbar_thumb())),
                                 ),
                         )
@@ -1370,6 +1406,43 @@ fn dim_u32(c: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_scale_invalidates_cached_terminal_geometry() {
+        let mut dims = (80, 24);
+        let mut bounds = Some(Bounds {
+            origin: point(gpui::px(1.0), gpui::px(2.0)),
+            size: size(gpui::px(3.0), gpui::px(4.0)),
+        });
+
+        invalidate_cached_geometry(&mut dims, &mut bounds);
+
+        assert_eq!(dims, (0, 0));
+        assert!(bounds.is_none());
+    }
+
+    #[test]
+    fn resize_refreshes_snapshot_dimensions_before_paint() {
+        let vterm = VTerm::new(8, 2);
+        let mut snapshot = vterm.render_snapshot();
+        assert_eq!(snapshot.lines, 2);
+
+        vterm.resize(8, 5);
+        refresh_snapshot_after_resize(&vterm, &mut snapshot);
+
+        assert_eq!(snapshot.cols, 8);
+        assert_eq!(snapshot.lines, 5);
+        assert_eq!(snapshot.rows.len(), 5);
+    }
+    #[test]
+    fn inner_extent_scales_physical_bounds_once() {
+        for scale in [1.0, 1.5, 2.0] {
+            let (width, height) =
+                inner_extent(100.0 * scale, 80.0 * scale, 12.0 * scale, 8.0 * scale);
+            assert!((width - 76.0 * scale).abs() < f32::EPSILON);
+            assert!((height - 64.0 * scale).abs() < f32::EPSILON);
+        }
+    }
 
     #[test]
     fn osc52_clipboard_is_opt_in_and_size_limited() {

@@ -17,6 +17,7 @@ mod term_view;
 mod terminal_keys;
 mod text_field;
 mod theme;
+mod ui_scale;
 mod widgets;
 mod workspace;
 

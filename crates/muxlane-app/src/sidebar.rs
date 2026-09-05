@@ -4,13 +4,16 @@ use super::MuxlaneApp;
 use crate::dialogs::ConnectAuthMode;
 use crate::i18n;
 use crate::icons::*;
-use crate::menus::{dismiss_context_menus, BootstrapConfirm, DeleteTarget, SessionMenu, TreeMenu};
+use crate::menus::{
+    clamp_menu_position, dismiss_context_menus, BootstrapConfirm, DeleteTarget, SessionMenu,
+    TreeMenu,
+};
 use crate::theme::Theme;
+use crate::ui_scale::px as ui_px;
 use crate::widgets::*;
 use crate::workspace::ProjectKey;
 use gpui::{
-    div, prelude::*, px, relative, rgba, Context, Focusable, MouseButton, ParentElement, Render,
-    SharedString, Styled, Window,
+    div, prelude::*, relative, rgba, size, Context, Focusable, MouseButton, ParentElement, Styled,
 };
 use std::sync::Arc;
 
@@ -78,31 +81,6 @@ impl MuxlaneApp {
 
 #[derive(Clone)]
 pub(super) struct SidebarDividerDrag;
-
-struct HoverTip {
-    text: SharedString,
-}
-
-impl Render for HoverTip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .bg(rgba(0x1a1d24f2))
-            .border_1()
-            .border_color(rgba(0x00000066))
-            .text_size(px(11.))
-            .text_color(rgba(0xffffffff))
-            .child(self.text.clone())
-    }
-}
-
-pub(super) fn hover_tip(
-    text: impl Into<SharedString>,
-) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView {
-    let text = text.into();
-    move |_, cx| cx.new(|_| HoverTip { text: text.clone() }).into()
-}
 
 impl MuxlaneApp {
     fn render_project_row(
@@ -185,10 +163,10 @@ impl MuxlaneApp {
             .flex()
             .items_center()
             .gap_1()
-            .h(px(28.))
+            .h(ui_px(28.))
             .pl_4()
             .pr_2()
-            .text_size(px(12.))
+            .text_size(ui_px(12.))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(rgba(theme.fg0))
             .group(project_group.clone())
@@ -196,7 +174,6 @@ impl MuxlaneApp {
             .hover(|style| style.bg(rgba(theme.bg2)))
             .when_some(drag_payload, |row, payload| {
                 row.on_drag(payload, {
-                    let theme = theme;
                     move |drag: &DragProject, offset, _, cx| {
                         let label = drag.label.clone();
                         cx.new(move |_| DragGhost {
@@ -238,7 +215,11 @@ impl MuxlaneApp {
                     this.session_menu = None;
                     this.tree_menu = Some(TreeMenu {
                         target: delete_target.clone(),
-                        position: event.position,
+                        position: clamp_menu_position(
+                            event.position,
+                            window.viewport_size(),
+                            size(ui_px(190.), ui_px(150.)),
+                        ),
                     });
                     cx.stop_propagation();
                     cx.notify();
@@ -264,12 +245,12 @@ impl MuxlaneApp {
                         controls.child(
                             div()
                                 .flex_none()
-                                .max_w(px(90.))
+                                .max_w(ui_px(90.))
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .px_1()
                                 .bg(rgba(theme.bg2))
-                                .text_size(px(9.))
+                                .text_size(ui_px(9.))
                                 .font_weight(gpui::FontWeight::NORMAL)
                                 .text_color(rgba(theme.fg1))
                                 .child(branch),
@@ -278,13 +259,13 @@ impl MuxlaneApp {
                     .child(
                         div()
                             .id(gpui::ElementId::Name(add_id.into()))
-                            .w(px(20.))
-                            .h(px(20.))
+                            .w(ui_px(20.))
+                            .h(ui_px(20.))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(13.))
+                            .text_size(ui_px(13.))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(rgba(theme.fg1))
                             .invisible()
@@ -327,23 +308,23 @@ impl MuxlaneApp {
         let active = self.active.as_deref() == Some(&id);
         let status = agent.status;
         let project_key = self.project_key_for_agent(&id);
-        let is_error = agent.title.contains("异常") || agent.title.contains("错误");
-        let attention = compute_attention_style(
-            status,
-            agent.seen || active,
-            is_error,
-            self.pulse_phase,
-            theme,
+        let attention = compute_attention_style(status, agent.seen || active, theme);
+        let animation_id = format!(
+            "sidebar-agent-{}-{id}",
+            project_key
+                .as_ref()
+                .map(|key| key.machine_id.as_str())
+                .unwrap_or(if remote { "remote" } else { "local" }),
         );
         div()
             .id(gpui::ElementId::Name(id.clone().into()))
             .flex()
             .items_center()
             .gap_1()
-            .h(px(26.))
+            .h(ui_px(26.))
             .pl_4()
             .pr_2()
-            .text_size(px(11.5))
+            .text_size(ui_px(11.5))
             .when(
                 attention.is_alerting && attention.text_color.is_some(),
                 |el| el.text_color(rgba(attention.text_color.unwrap())),
@@ -375,7 +356,11 @@ impl MuxlaneApp {
                     this.tree_menu = None;
                     this.session_menu = Some(SessionMenu {
                         agent: id.clone(),
-                        position: event.position,
+                        position: clamp_menu_position(
+                            event.position,
+                            window.viewport_size(),
+                            size(ui_px(180.), ui_px(44.)),
+                        ),
                         remote,
                     });
                     this.palette_open = false;
@@ -383,12 +368,7 @@ impl MuxlaneApp {
                     cx.notify();
                 }),
             )
-            .child(render_status_indicator(
-                status,
-                is_error,
-                self.spinner_frame,
-                theme,
-            ))
+            .child(render_status_indicator(status, animation_id, theme))
             .child(
                 div()
                     .flex_1()
@@ -419,11 +399,11 @@ impl MuxlaneApp {
         let mut tree = div().flex().flex_col().py_1();
         tree = tree.child(
             div()
-                .h(px(28.))
+                .h(ui_px(28.))
                 .px_3()
                 .flex()
                 .items_center()
-                .text_size(px(10.))
+                .text_size(ui_px(10.))
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(rgba(theme.fg1))
                 .child(
@@ -432,30 +412,33 @@ impl MuxlaneApp {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .child("MACHINES"),
+                        .child(i18n::text(self.language, "sidebar.machines")),
                 )
                 .child(
-                    div()
-                        .id("connect-machine")
-                        .ml_auto()
-                        .w(px(20.))
-                        .h(px(20.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .text_color(rgba(theme.fg1))
-                        .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
-                        .active(|s| s.bg(rgba(theme.bg3)))
-                        .tooltip(hover_tip(i18n::text(
-                            self.language,
-                            "sidebar.connect_remote",
-                        )))
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            this.open_connect_dialog(window, cx);
-                        }))
-                        .child(panel_icon(PLUS_ICON, theme.fg1)),
+                    semantic_button(
+                        "connect-machine",
+                        i18n::text(self.language, "sidebar.connect_remote"),
+                        theme,
+                    )
+                    .ml_auto()
+                    .w(ui_px(20.))
+                    .h(ui_px(20.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(rgba(theme.fg1))
+                    .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
+                    .active(|s| s.bg(rgba(theme.bg3)))
+                    .tooltip(hover_tip(i18n::text(
+                        self.language,
+                        "sidebar.connect_remote",
+                    )))
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.open_connect_dialog(window, cx);
+                    }))
+                    .child(panel_icon(PLUS_ICON, theme.fg1)),
                 ),
         );
         tree = tree.child(
@@ -464,10 +447,10 @@ impl MuxlaneApp {
                 .flex()
                 .items_center()
                 .gap_1()
-                .h(px(32.))
+                .h(ui_px(32.))
                 .pl_4()
                 .pr_2()
-                .text_size(px(12.5))
+                .text_size(ui_px(12.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.fg0))
                 .group("local-machine")
@@ -495,36 +478,39 @@ impl MuxlaneApp {
                         .flex_none()
                         .px_1()
                         .bg(rgba(theme.bg2))
-                        .text_size(px(9.))
+                        .text_size(ui_px(9.))
                         .font_weight(gpui::FontWeight::NORMAL)
                         .text_color(rgba(theme.fg1))
                         .child("local"),
                 )
                 .child(
-                    div()
-                        .id("add-local-project")
-                        .w(px(20.))
-                        .h(px(20.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::NORMAL)
-                        .text_color(rgba(theme.fg1))
-                        .invisible()
-                        .group_hover("local-machine", |style| style.visible())
-                        .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            cx.stop_propagation();
-                            this.project_dialog = true;
-                            this.connect_dialog = false;
-                            this.dialog_error = None;
-                            this.project_input.update(cx, |input, cx| input.reset(cx));
-                            this.project_input.focus_handle(cx).focus(window, cx);
-                            cx.notify();
-                        }))
-                        .child(panel_icon(PLUS_ICON, theme.fg1)),
+                    semantic_button(
+                        "add-local-project",
+                        i18n::text(self.language, "dialog.add_local_project"),
+                        theme,
+                    )
+                    .w(ui_px(20.))
+                    .h(ui_px(20.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(ui_px(13.))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(rgba(theme.fg1))
+                    .invisible()
+                    .group_hover("local-machine", |style| style.visible())
+                    .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        cx.stop_propagation();
+                        this.project_dialog = true;
+                        this.connect_dialog = false;
+                        this.dialog_error = None;
+                        this.project_input.update(cx, |input, cx| input.reset(cx));
+                        this.project_input.focus_handle(cx).focus(window, cx);
+                        cx.notify();
+                    }))
+                    .child(panel_icon(PLUS_ICON, theme.fg1)),
                 ),
         );
         if !local_collapsed {
@@ -636,8 +622,16 @@ impl MuxlaneApp {
                         compute_attention_style(
                             muxlane_core::model::AgentStatus::Blocked,
                             false,
+                            theme,
+                        )
+                    } else if snapshot.agents.iter().any(|agent| {
+                        agent.status == muxlane_core::model::AgentStatus::Failed
+                            && !agent.seen
+                            && self.active.as_ref() != Some(&agent.id)
+                    }) {
+                        compute_attention_style(
+                            muxlane_core::model::AgentStatus::Failed,
                             false,
-                            self.pulse_phase,
                             theme,
                         )
                     } else if snapshot.agents.iter().any(|agent| {
@@ -648,8 +642,6 @@ impl MuxlaneApp {
                         compute_attention_style(
                             muxlane_core::model::AgentStatus::Done,
                             false,
-                            false,
-                            self.pulse_phase,
                             theme,
                         )
                     } else {
@@ -665,10 +657,10 @@ impl MuxlaneApp {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .h(px(32.))
+                    .h(ui_px(32.))
                     .pl_4()
                     .pr_2()
-                    .text_size(px(12.5))
+                    .text_size(ui_px(12.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgba(theme.fg0))
                     .when(machine_attention.is_alerting, |row| {
@@ -694,7 +686,11 @@ impl MuxlaneApp {
                                 this.session_menu = None;
                                 this.tree_menu = Some(TreeMenu {
                                     target: target.clone(),
-                                    position: event.position,
+                                    position: clamp_menu_position(
+                                        event.position,
+                                        window.viewport_size(),
+                                        size(ui_px(200.), ui_px(190.)),
+                                    ),
                                 });
                                 cx.stop_propagation();
                                 cx.notify();
@@ -718,7 +714,7 @@ impl MuxlaneApp {
                             .flex_none()
                             .px_1()
                             .bg(rgba(theme.bg2))
-                            .text_size(px(9.))
+                            .text_size(ui_px(9.))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(rgba(dot_color))
                             .on_click(cx.listener({
@@ -808,13 +804,13 @@ impl MuxlaneApp {
                             .id(gpui::ElementId::Name(
                                 format!("remote-project-add-{remote_project_host}").into(),
                             ))
-                            .w(px(20.))
-                            .h(px(20.))
+                            .w(ui_px(20.))
+                            .h(ui_px(20.))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(13.))
+                            .text_size(ui_px(13.))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(rgba(theme.fg1))
                             .invisible()
@@ -840,7 +836,7 @@ impl MuxlaneApp {
                                 .flex_none()
                                 .px_2()
                                 .py_1()
-                                .text_size(px(10.))
+                                .text_size(ui_px(10.))
                                 .text_color(rgba(theme.accent))
                                 .hover(|style| style.bg(rgba(theme.bg2)))
                                 .on_click(cx.listener({
@@ -879,12 +875,12 @@ impl MuxlaneApp {
                         .gap_2()
                         .pl_4()
                         .pr_2()
-                        .h(px(22.))
-                        .text_size(px(10.))
+                        .h(ui_px(22.))
+                        .text_size(ui_px(10.))
                         .text_color(rgba(theme.accent))
                         .child(phase_text)
                         .child(
-                            div().flex_1().h(px(3.)).bg(rgba(theme.bg2)).child(
+                            div().flex_1().h(ui_px(3.)).bg(rgba(theme.bg2)).child(
                                 div()
                                     .w(relative(overall as f32 / 100.0))
                                     .h_full()
@@ -941,7 +937,7 @@ impl MuxlaneApp {
     ) -> gpui::AnyElement {
         let (unread_count, has_blocked, notifications_open) = self.notifications.read(cx).summary();
         div()
-            .h(px(40.))
+            .h(ui_px(40.))
             .px_2()
             .flex()
             .items_center()
@@ -949,26 +945,27 @@ impl MuxlaneApp {
             .border_t_1()
             .border_color(rgba(theme.line))
             .child(
-                div()
-                    .id("sidebar-hide-button")
-                    .w(px(32.))
-                    .h(px(32.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgba(theme.bg2)))
-                    .active(|s| s.bg(rgba(theme.bg3)))
-                    .tooltip(hover_tip(i18n::text(self.language, "sidebar.hide")))
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.set_sidebar_visible(false, window, cx);
-                    }))
-                    .child(panel_icon(SIDEBAR_COLLAPSE_ICON, theme.fg1)),
+                semantic_button(
+                    "sidebar-hide-button",
+                    i18n::text(self.language, "sidebar.hide"),
+                    theme,
+                )
+                .w(ui_px(32.))
+                .h(ui_px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(theme.bg2)))
+                .active(|s| s.bg(rgba(theme.bg3)))
+                .tooltip(hover_tip(i18n::text(self.language, "sidebar.hide")))
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.set_sidebar_visible(false, window, cx);
+                }))
+                .child(panel_icon(SIDEBAR_COLLAPSE_ICON, theme.fg1)),
             )
             .child(div().flex_1())
             .child({
-                let pulse =
-                    (1.0 - (self.pulse_phase as f32 * std::f32::consts::TAU / 36.0).cos()) * 0.5;
                 let badge_color = if has_blocked {
                     theme.yellow
                 } else if unread_count > 0 {
@@ -977,95 +974,98 @@ impl MuxlaneApp {
                     theme.fg2
                 };
                 let badge_glow = if unread_count > 0 {
-                    let glow_alpha = (0x30 as f32 + pulse * 0x60 as f32) as u32;
-                    Some(Theme::with_alpha(badge_color, glow_alpha as u8))
+                    Some(Theme::with_alpha(badge_color, 0x60))
                 } else {
                     None
                 };
 
-                div()
-                    .id("sidebar-notification-button")
-                    .relative()
-                    .w(px(32.))
-                    .h(px(32.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgba(theme.bg2)))
-                    .active(|s| s.bg(rgba(theme.bg3)))
-                    .tooltip(hover_tip(i18n::text(
-                        self.language,
-                        "sidebar.notifications",
-                    )))
-                    .when(unread_count > 0, |el| {
-                        el.bg(rgba(Theme::with_alpha(badge_color, 0x18)))
-                    })
-                    .when(notifications_open, |el| el.bg(rgba(theme.bg2)))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.notifications
-                            .update(cx, |center, cx| center.toggle_open(cx));
-                        cx.notify();
-                    }))
-                    .child(panel_icon(
-                        NOTIFICATION_ICON,
-                        if notifications_open || unread_count > 0 {
-                            badge_color
-                        } else {
-                            theme.fg1
-                        },
-                    ))
-                    .when(unread_count > 0, |el| {
-                        el.child(
-                            div()
-                                .absolute()
-                                .top(px(2.))
-                                .right(px(2.))
-                                .min_w(px(14.))
-                                .h(px(14.))
-                                .px(px(3.))
-                                .bg(rgba(badge_color))
-                                .when_some(badge_glow, |b, glow| {
-                                    b.border_1().border_color(rgba(glow))
-                                })
-                                .text_size(px(9.))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgba(theme.on_accent))
-                                .child(if unread_count > 99 {
-                                    "99+".to_string()
-                                } else {
-                                    format!("{unread_count}")
-                                }),
-                        )
-                    })
+                semantic_button(
+                    "sidebar-notification-button",
+                    i18n::text(self.language, "sidebar.notifications"),
+                    theme,
+                )
+                .relative()
+                .w(ui_px(32.))
+                .h(ui_px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(theme.bg2)))
+                .active(|s| s.bg(rgba(theme.bg3)))
+                .tooltip(hover_tip(i18n::text(
+                    self.language,
+                    "sidebar.notifications",
+                )))
+                .when(unread_count > 0, |el| {
+                    el.bg(rgba(Theme::with_alpha(badge_color, 0x18)))
+                })
+                .when(notifications_open, |el| el.bg(rgba(theme.bg2)))
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.notifications
+                        .update(cx, |center, cx| center.toggle_open(cx));
+                    cx.notify();
+                }))
+                .child(panel_icon(
+                    NOTIFICATION_ICON,
+                    if notifications_open || unread_count > 0 {
+                        badge_color
+                    } else {
+                        theme.fg1
+                    },
+                ))
+                .when(unread_count > 0, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(ui_px(2.))
+                            .right(ui_px(2.))
+                            .min_w(ui_px(14.))
+                            .h(ui_px(14.))
+                            .px(ui_px(3.))
+                            .bg(rgba(badge_color))
+                            .when_some(badge_glow, |b, glow| b.border_1().border_color(rgba(glow)))
+                            .text_size(ui_px(9.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgba(theme.on_accent))
+                            .child(if unread_count > 99 {
+                                "99+".to_string()
+                            } else {
+                                format!("{unread_count}")
+                            }),
+                    )
+                })
             })
             .child(
-                div()
-                    .id("open-settings")
-                    .w(px(32.))
-                    .h(px(32.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgba(theme.bg2)))
-                    .active(|s| s.bg(rgba(theme.bg3)))
-                    .when(self.settings_open, |el| el.bg(rgba(theme.bg2)))
-                    .tooltip(hover_tip(i18n::text(self.language, "common.settings")))
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.settings_open = true;
-                        this.palette_open = false;
-                        this.focus.focus(window, cx);
-                        cx.notify();
-                    }))
-                    .child(panel_icon(
-                        SETTINGS_ICON,
-                        if self.settings_open {
-                            theme.fg0
-                        } else {
-                            theme.fg1
-                        },
-                    )),
+                semantic_button(
+                    "open-settings",
+                    i18n::text(self.language, "common.settings"),
+                    theme,
+                )
+                .w(ui_px(32.))
+                .h(ui_px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(theme.bg2)))
+                .active(|s| s.bg(rgba(theme.bg3)))
+                .when(self.settings_open, |el| el.bg(rgba(theme.bg2)))
+                .tooltip(hover_tip(i18n::text(self.language, "common.settings")))
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.settings_open = true;
+                    this.palette_open = false;
+                    this.focus.focus(window, cx);
+                    cx.notify();
+                }))
+                .child(panel_icon(
+                    SETTINGS_ICON,
+                    if self.settings_open {
+                        theme.fg0
+                    } else {
+                        theme.fg1
+                    },
+                )),
             )
             .into_any_element()
     }
