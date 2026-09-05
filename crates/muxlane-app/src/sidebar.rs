@@ -25,6 +25,65 @@ pub(crate) struct DragProject {
     pub(crate) label: String,
 }
 
+fn reorder_project_ids(ids: &mut Vec<String>, dragged: &str, target: &str) -> bool {
+    if dragged == target {
+        return false;
+    }
+    let Some(from) = ids.iter().position(|id| id == dragged) else {
+        return false;
+    };
+    let Some(target_index) = ids.iter().position(|id| id == target) else {
+        return false;
+    };
+
+    let dragged_id = ids.remove(from);
+    let target_index_after_remove = if from < target_index {
+        target_index - 1
+    } else {
+        target_index
+    };
+    let insertion_index = if from < target_index {
+        target_index_after_remove + 1
+    } else {
+        target_index_after_remove
+    };
+    ids.insert(insertion_index, dragged_id);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reorder_project_ids;
+
+    #[test]
+    fn reorder_project_ids_moves_projects_in_both_directions() {
+        let cases = [
+            ("A", "B", vec!["B", "A", "C"]),
+            ("A", "C", vec!["B", "C", "A"]),
+            ("C", "B", vec!["A", "C", "B"]),
+            ("C", "A", vec!["C", "A", "B"]),
+        ];
+
+        for (dragged, target, expected) in cases {
+            let mut ids = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+            assert!(reorder_project_ids(&mut ids, dragged, target));
+            assert_eq!(
+                ids,
+                expected.into_iter().map(String::from).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn reorder_project_ids_ignores_self_and_missing_projects() {
+        for (dragged, target) in [("A", "A"), ("missing", "A"), ("A", "missing")] {
+            let mut ids = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+            assert!(!reorder_project_ids(&mut ids, dragged, target));
+            assert_eq!(ids, ["A", "B", "C"]);
+        }
+    }
+}
+
 impl MuxlaneApp {
     /// 按自定义顺序返回项目；未记录的保持原顺序排在尾部。
     pub(crate) fn ordered_projects<'a>(
@@ -47,11 +106,13 @@ impl MuxlaneApp {
         indexed.into_iter().map(|(_, project)| project).collect()
     }
 
-    /// 把 dragged 项目移动到 target 项目之前（同机器）。
-    pub(crate) fn move_project_order(&mut self, machine_id: &str, dragged: &str, target: &str) {
-        if dragged == target {
-            return;
-        }
+    /// 把 dragged 项目移动到 target 项目附近（同机器）。
+    pub(crate) fn move_project_order(
+        &mut self,
+        machine_id: &str,
+        dragged: &str,
+        target: &str,
+    ) -> bool {
         let snapshot = if machine_id == self.local_machine_id() {
             Some(&self.last_snapshot)
         } else {
@@ -62,20 +123,20 @@ impl MuxlaneApp {
                     .is_some_and(|machine| machine.machine_id == machine_id)
             })
         };
-        let Some(snapshot) = snapshot else { return };
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
         let mut ids: Vec<String> = self
             .ordered_projects(machine_id, &snapshot.projects)
             .into_iter()
             .map(|project| project.id.clone())
             .collect();
-        let Some(from) = ids.iter().position(|id| id == dragged) else {
-            return;
-        };
-        let id = ids.remove(from);
-        let to = ids.iter().position(|id| id == target).unwrap_or(ids.len());
-        ids.insert(to, id);
+        if !reorder_project_ids(&mut ids, dragged, target) {
+            return false;
+        }
         self.project_order.insert(machine_id.to_string(), ids);
         self.persist();
+        true
     }
 }
 
@@ -188,8 +249,9 @@ impl MuxlaneApp {
                 if let (Some(machine), Some(target)) =
                     (drop_machine.as_ref(), drop_project.as_ref())
                 {
-                    if drag.machine_id == *machine {
-                        this.move_project_order(machine, &drag.project_id, target);
+                    if drag.machine_id == *machine
+                        && this.move_project_order(machine, &drag.project_id, target)
+                    {
                         cx.notify();
                     }
                 }
